@@ -1,0 +1,6 @@
+# mandatory config 
+task: batch
+dataset_file: Data_example/fodors_zagats-tableA.csv
+
+# optional config
+output_file_name: fodors_zagats

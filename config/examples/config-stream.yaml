@@ -1,0 +1,7 @@
+# mandatory config 
+task: smatch
+graph_file: pipeline/graph/fodors_zagats.graphml
+embeddings_file: pipeline/embeddings/fodors_zagats.embin
+
+# optional config
+output_file_name: "fodors_zagats-001"

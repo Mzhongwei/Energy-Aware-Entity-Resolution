@@ -1,0 +1,77 @@
+# mandatory config 
+task: smatch
+graph_file: /home/zhongwei/Data_integration/er_embedding_streaming/pipeline/graph/dirty_dblp_acm_cb.graphml
+embeddings_file: /home/zhongwei/Data_integration/er_embedding_streaming/pipeline/embeddings/dirty_dblp_acm_cb.embin
+
+# optional config
+output_file_name: "dirty_dblp_acm_cb"
+
+log:
+  path: "pipeline/logging"
+
+graph:
+# node types explained in README
+  meta_path: [['rid', 'title', 'authors', 'title'], ['title', 'venue']]
+  node_types:
+# numerical instance
+    - "5#__tn"  
+# textual instance                  
+    - "5$__tt" 
+# instence after tokenization                  
+    - "5$__st"                   
+    - "3$__idx"
+    - "1$__cid"
+# split prefix for nodes
+  flatten: "tt"
+# smooth method: log/no
+  smoothing_method: "no"   
+# whether the graph is directed      
+  directed: false                
+
+walks:
+  write_walks: true
+# step size
+  walk_length: 60
+# number of sentences per root
+  walks_number: 20
+# whether to allow return to previous node
+  backtrack: false
+# statistical result of random walk
+  rw_stat: false
+
+embeddings:
+# skipgram / CBOW
+  learning_method: "skipgram"
+  window_size: 3
+  min_count: 0
+  n_dimensions: 300
+# word2vec / fasttext
+  training_algorithm: "word2vec" 
+  sampling_factor: 0.001
+  
+similarity_list:
+# top K most similar entries to keep
+  top_k: 10  
+# how many records to evaluate similarity for                    
+  simlist_n: 10   
+# how many to print/show               
+  simlist_show: 5  
+# similarity algorithm: basic / faiss              
+  strategy_suppl: "basic"      
+# list / graph  
+  sim_structure: "graph"  
+# db / json / parquet / graphml       
+  output_format: "graphml"            
+
+kafka:
+  topicid: "entity_resolution_process_test"
+  groupid: "er_group"
+  bootstrap_servers: "localhost"
+  port: 9092
+
+# sliding window strategy # "count" or "time"
+  window_strategy: "count"      
+# used if strategy is "count" 
+  window_count: 131     
+# 0 = tumbling window, otherwise stride size          
+  update_frequency: 0            

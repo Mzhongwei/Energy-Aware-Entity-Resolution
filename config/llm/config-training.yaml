@@ -1,0 +1,11 @@
+task: llm-train
+exp_name: test
+model: BERT
+train_batch_size: 16
+eval_batch_size: 16
+epochs: 15
+seed: 42
+trainset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/train.csv"
+testset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/test.csv"
+validset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/valid.csv"
+testing: True

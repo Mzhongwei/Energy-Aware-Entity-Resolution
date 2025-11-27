@@ -1,0 +1,22 @@
+dataset_file: /home/zhongwei/Data_integration/data/exp_datasets/2-fordors_zagats/tableA.csv
+embeddings:
+  inc_epochs: 5
+  min_count: 0
+  n_dimensions: 128
+  negative: 5
+  window_size: 3
+embeddings_file: /home/zhongwei/Data_integration/er_embedding_streaming/pipeline/embeddings/fordors_zagats-1.embin
+graph_file: /home/zhongwei/Data_integration/er_embedding_streaming/pipeline/graph/fordors_zagats-1.graphml
+kafka:
+  topicid: entity_resolution_process_zhongwei
+  window_count: 106
+output_file_name: fordors_zagats-1
+task: smatch
+walks:
+  walk_length: 20
+  walks_number: 5
+similarity_list:
+  # top K most similar entries to keep
+  top_k: 3
+  # similarity algorithm: basic / faiss
+  strategy_suppl: "faiss"

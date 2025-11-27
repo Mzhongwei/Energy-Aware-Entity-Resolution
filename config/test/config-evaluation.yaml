@@ -1,0 +1,5 @@
+match_file: /home/zhongwei/Data_integration/data/exp_datasets/2-fordors_zagats/matches.txt
+output_file_name: fordors_zagats-1
+similarity_file: /home/zhongwei/Data_integration/er_embedding_streaming/pipeline/similarity/fordors_zagats-1.graphml
+source_a: 533
+task: evaluation

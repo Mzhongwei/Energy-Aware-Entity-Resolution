@@ -1,0 +1,12 @@
+dataset_file: /home/zhongwei/Data_integration/data/exp_datasets/2-fordors_zagats/tableA.csv
+embeddings:
+  inc_epochs: 5
+  min_count: 0
+  n_dimensions: 128
+  negative: 5
+  window_size: 3
+output_file_name: fordors_zagats-1
+task: batch
+walks:
+  walk_length: 20
+  walks_number: 5

@@ -1,0 +1,35 @@
+# mandatory config 
+task: batch
+dataset_file: /home/zhongwei/Data_integration/data/datasets/dataset2-fordors/fodors_zagats-tableA.csv
+
+# optional config
+output_file_name: fodors_zagats
+
+log:
+  path: "pipeline/logging"
+
+graph:
+  # node types explained in README
+  node_types:
+    - "5#__tn"
+    - "5$__tt"
+    - "5$__st"
+    - "3$__idx"
+    - "1$__cid"
+  flatten: "tt"                  # split prefix for nodes
+  smoothing_method: "no"         # smooth method: log/no
+  directed: false                # whether the graph is directed
+
+walks:
+  write_walks: true
+  walk_length: 60                # step size
+  walks_number: 20               # number of sentences per root
+  backtrack: false               # whether to allow return to previous node
+  rw_stat: true                  # statistical result of random walk
+
+embeddings:
+  learning_method: "skipgram"    # skipgram / CBOW
+  window_size: 3
+  n_dimensions: 300
+  training_algorithm: "word2vec" # word2vec / fasttext
+  sampling_factor: 0.001

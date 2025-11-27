@@ -1,0 +1,9 @@
+# mandatory config
+task: evaluation
+# similarity list for stream process
+similarity_file: /home/zhongwei/Data_integration/er_embedding_streaming/pipeline/similarity/dirty_dblp_acm_cb.graphml
+# ground truth file
+match_file: /home/zhongwei/Data_integration/data/datasets/dataset3-acm/matches-dblp_acm.txt
+source_a: 2294
+# optional config
+output_file_name: dirty_dblp_acm_cb

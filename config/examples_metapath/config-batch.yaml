@@ -1,0 +1,46 @@
+# mandatory config 
+task: batch
+dataset_file: /home/zhongwei/Data_integration/data/test_for_metapath/dirty_dblp_acm/tableA.csv
+
+# optional config
+output_file_name: dirty_dblp_acm_cb
+
+log:
+  path: "pipeline/logging"
+
+graph:
+  # node types explained in README
+  meta_path: [['rid', 'title', 'authors', 'title'], ['title', 'venue']]
+  node_types:
+    - "5#__tn"
+    - "5$__tt"
+    - "5$__st"
+    - "3$__idx"
+    - "1$__cid"
+  # split prefix for nodes
+  flatten: "tt"
+  # smooth method: log/no
+  smoothing_method: "no"
+  # whether the graph is directed
+  directed: fals                
+
+walks:
+  write_walks: true
+  # step size
+  walk_length: 60
+  # number of sentences per root
+  walks_number: 20
+  # whether to allow return to previous node
+  backtrack: false
+  # statistical result of random walk
+  rw_stat: true
+
+embeddings:
+  # skipgram / CBOW
+  learning_method: "skipgram"
+  window_size: 3
+  min_count: 0
+  n_dimensions: 300
+  # word2vec / fasttext
+  training_algorithm: "word2vec"
+  sampling_factor: 0.001

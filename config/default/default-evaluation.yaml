@@ -1,0 +1,15 @@
+task: evaluation
+output_file_name: "test"
+
+log:
+  path: "pipeline/logging"
+
+eva:
+  # take records with top n similar degrees
+  n_first: 3
+  # similarity retains x decimal places
+  approximate: 16
+  # visualization of result or not
+  sim_vis: true
+
+source_a: 0

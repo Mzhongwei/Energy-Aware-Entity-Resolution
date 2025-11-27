@@ -1,0 +1,9 @@
+# mandatory config
+task: evaluation
+# similarity list for stream process
+similarity_file: pipeline/similarity/fodors_zagats-001.db
+# ground truth file
+match_file: Data_example/fodors_zagats-matches.txt
+
+# optional config
+output_file_name: fodors_zagats-001

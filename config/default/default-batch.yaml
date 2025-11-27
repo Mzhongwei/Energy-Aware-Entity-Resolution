@@ -1,0 +1,44 @@
+task: batch
+output_file_name: "test"
+
+log:
+  path: "pipeline/logging"
+
+graph:
+  # node types explained in README
+  meta_path: []
+  # tn: numerical instance, tt: textual instance, st: instence after tokenization
+  node_types:
+    - "7#__tn"
+    - "7$__tt"
+    - "5$__st"
+    - "3$__idx"
+    - "1$__cid"
+  # split prefix for nodes, "no" / "tt"
+  flatten: "tt"       
+  # smooth method: log/no           
+  smoothing_method: "no" 
+  # whether the graph is directed        
+  directed: false                
+
+walks:
+  write_walks: true
+  # step size
+  walk_length: 60
+  # number of sentences per root        
+  walks_number: 20
+  # whether to allow return to previous node            
+  backtrack: false
+  # statistical result of random walk 
+  rw_stat: false
+
+embeddings:
+  # skipgram / CBOW
+  learning_method: "skipgram"
+  window_size: 3
+  negative: 5
+  epochs: 5
+  min_count: 0
+  n_dimensions: 300
+  training_algorithm: "word2vec"
+  sampling_factor: 0.001
