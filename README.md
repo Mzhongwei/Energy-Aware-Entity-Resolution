@@ -42,14 +42,17 @@ For the two pipelines mentioned above, we incorporate a match-state gouvernment 
 
 ## Evaluation & Results
 ![result1](./image/consumption_f1.png)
+
 Pipeline2 achieves significantly higher F1 at the cost of increased energy consumption.
 
 ![result2](./image/ratio.png)
+
 Energy consumption of Pipeline 1 is almost entirely concentrated on the CPU and RAM.
 
 Energy consumption profile of Pipeline 2 shows a significant GPU segment.
 
 ![result3](./image/consumption-duration.png)
+
 For dblp-scholar dataset,  Pipeline 1 ran for over 11,000 seconds with an F1 score of only 0.58, while Pipeline 2
 reduced runtime by over 60% while boosting F1 to 0.98
 → This directly demonstrates that traditional pipelines are unsuitable for large-scale entity matching
