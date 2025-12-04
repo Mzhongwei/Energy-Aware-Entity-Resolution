@@ -1,97 +1,56 @@
-# ER for stream
-This project enables **entity resolution (ER)** for streaming data. We use **embedding techniques** to represent the data in a relational table with vectors and computes similarities between records to identify matching entities.
+# Energy-Aware and Generic Framework for ER
+We implement the one graph embedding and one LLM as examples to show the feasibility of our framework.
 
-## 🛠️ INSTALLATION
-### Install dependencies
-```bash
-pip install -r requirements.txt 
-pip install git+https://github.com/dpkp/kafka-python.git
-```
-### Usage
-To run the application with a configuration file:
-```bash
-python main.py -f [config_file_path]
-```
-### Notes
-> ⚠️ **Python Compatibility Notice**:  
-> Python 3.13 is **not currently compatible** with the `gensim` package. It is **not recommended** to use Python 3.13 for this project.  
+## About the experiments
+### Datasets
+ We use the [open-source datasets](https://zenodo.org/records/7930461) created from real-world data and are dedicated to the entity resolution task.
 
-> ✅ **For streaming process**:  
-> Make sure Kafka is properly configured and activated if running process with real-time data sources
+### Setup
+Our experiments were conducted on a server equipped with a 20-core Intel Xeon W-2155 CPU running at 3.30 GHz, 251.3 GiB of RAM, and an NVIDIA Quadro P2200 GPU.
 
-## ⚙️ CONFIGURATION
+### Metrics
+- Performance: We use precision, recall, and F1-score as the primary performance metrics. 
+- Energy consumption: we monitor CPU, RAM and GPU power usage (in Watts) and total energy consumption (in Joules) using the [Ecofloc](https://github.com/hhumbertoAv/ecofloc). 
 
-There are 3 example configuration files provided in the `/config` directory.
+### Pipeline & Configuration
+- Pipeline1: incremental graph embedding
 
-Each configuration file contains several blocks:
+(preprocessing--candidates generation--pairwise matching--decision operator) \
+To simulate the data streaming application, we take the tuples in Data Source A as the local dataset used for pre-training, and send the data from source B to kafka producer incrementally as a data stream at a regular and fixed frequency without concurrency. For each record of source B, we look for its similar values from Source A, generate the candidates and calculate the similarity. Finally, we apply a bidirectional Top-1 mutual matching strategy to determine the final match. \
+For embedding, we use [gensim](https://github.com/piskvorky/gensim) pre-trained model.
+![pipeline1](./image/graph_embedding_pipeline.png)
+- Pipeline2: PLM-based approaches
 
-- **mandatory**: Required settings needed to run the program
-- **optional**: You can customize these values as needed; otherwise, the program will fall back to default settings (the default configuration values are attached at the end of the article).
+(preprocessing--pairwise matching--decision operator(classifier))\
+We utilize datasets provided by previous work, adopting a 3:1:1 split for the training, validation, and test sets. The model is trained using BERT, and the experimental results are subsequently obtained.
+![pipeline2](./image/plm_pipeline.png)
 
-> 📌 **Attention**:  
-> - Please select a appropriate task type. `batch` for pre-training models, "smatch" for er on streaming data, `evaluation` for evaluating results;
-> - Make sure to update the configuration file paths (e.g., dataset files, task type, etc.) according to your environment.
 
-## 🧪 PIPELINES AND EVALUATION
+## Match State
+For the two pipelines mentioned above, we incorporate a match-state gouvernment layer without altering the original pipeline structures, based on the Match State attributes listed below:
 
-### Pre-training Pipeline
-This process constructs a graph according to a relational table formatted as a csv, then converts it into an embedding model. 
-- Input file: dataset file, setted up with variable name `dataset_file`.
-- Output files: graph file `.graphml` and embedding `.emb`, stored respectively in path `pipeline/graph` and `pipeline/embeddings`, which can be used in the streaming process as pre-training input variables. 
+| **Attribute** | **Format** | **Description** | **Constraints** | **Example** |
+|--------------|-----------|----------------|----------------|------------|
+| pair_id | tuple(string, string) | identifier of the record pair | primary key, not null | ("i", "j") |
+| timestamp | datetime | creation time of the match state | primary key, not null | 2025-11-17T13:11:30 |
+| score | float | similarity score | not null | 0.95 |
+| stage | string | processing stage from which the similarity score is generated | Value set: {"PM", "CM"}, not null | "PM" |
+| decision | string | decision state | Value set: {"tentative", "match"}, not null | "tentative" |
+| transaction | string | transaction state | Value set: {"pending", "commit", "failed", "rolled_back", "expired"}, not null | "pending" |
+| active | boolean | whether the instance is active | Value set: {true, false} | true |
 
-For testing pre-training process, pls run `python main.py -f Config_example/config-batch` 
 
-### Streaming Pipeline
-This process captures real-time data from kafka and performs entity resolution tasks incrementally. The incremental window can be count-based or time-based and is set in config file.
-- Input file: 
-    - No input files: runs without pre-training (not recommanded, low accurancy) 
-    - With input files: uses both graph file `.graphml` and embedding file `.emb` generated from pre-training process
-- Output file: similarity results and predictions stored as a `.db` file in the `pipeline/similarity` directory.
+## Evaluation & Results
+![result1](./image/consumption_f1.png)
+Pipeline2 achieves significantly higher F1 at the cost of increased energy consumption.
 
-For testing streaming process, pls run `python main.py -f Config_example/config-stream` 
+![result2](./image/ratio.png)
+Energy consumption of Pipeline 1 is almost entirely concentrated on the CPU and RAM.
 
-### Evaluation
-We provide 3 metrics for the evaluation: precision, recall and f1-score. All evaluation results output to the terminal and simultaneously logged in `pipeline/evaluation/evaluation.log`.
+Energy consumption profile of Pipeline 2 shows a significant GPU segment.
 
-For verifying the results of the experiment, pls run `python main.py -f Config_example/config-evaluation`
+![result3](./image/consumption-duration.png)
+For dblp-scholar dataset,  Pipeline 1 ran for over 11,000 seconds with an F1 score of only 0.58, while Pipeline 2
+reduced runtime by over 60% while boosting F1 to 0.98
+→ This directly demonstrates that traditional pipelines are unsuitable for large-scale entity matching
 
-## ANNEXES
-### default values list:
-| VARIABLE NAME    | VALUE BY DEFAULT |
-| -------- | ------- |
-| log_path  | "pipeline/logging"  |
-| output_file_name  | "test" |
-| node_types | ["7#__tn", "7$__tt", "3$__idx", "1$__cid"] |
-| flatten |  "no" | 
-| smoothing_method|  "no" | 
-| directed| False | 
-| write_walks|  True | 
-| walk_length|  60 | 
-| walks_number|  20 | 
-| backtrack|  False | 
-| rw_stat| True | 
-| learning_method|  "skipgram" | 
-| window_size|  3 | 
-| n_dimensions|  300 | 
-| training_algorithm|  "word2vec" | 
-| sampling_factor |  0.001 |
-| top_k| 10 | 
-| simlist_n| 10 | 
-| simlist_show| 5 | 
-| strategy_suppl| "basic" | 
-| output_format| "db" | 
-| kafka_topicid| "entity_resolution_process" | 
-| kafka_groupid| "er_group" | 
-| bootstrap_servers| "localhost" | 
-| port| "9092" | 
-| window_strategy| "count" | 
-| window_count| 50 | 
-| update_frequency| 0| 
-| n_first|  3 | 
-| approximate|  16 | 
-| sim_vis|  True | 
-
-### node types
-- "tn": token as number, "tt": token as text, "idx": id of row, "cid": id of column
-- "$": string, "#": number
-- (1-7): class of this type of value, definition of different classes is written at file README
