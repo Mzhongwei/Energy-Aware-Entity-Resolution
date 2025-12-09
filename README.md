@@ -49,6 +49,8 @@ For the two pipelines mentioned above, we incorporate a match-state gouvernment 
 
 
 ## Evaluation & Results
+Considering that the Pipeline 2 requires a specific dataset containing annotated data and lacks a candidate generation step, we removed the candidate generation step from Pipeline 2 to ensure comparability between the two pipelines.
+
 ![result1](./image/consumption_f1.png)
 
 Pipeline2 achieves significantly higher F1 at the cost of increased energy consumption.
