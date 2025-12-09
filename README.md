@@ -39,7 +39,7 @@ For the two pipelines mentioned above, we incorporate a match-state gouvernment 
 
 | **Attribute** | **Format** | **Description** | **Constraints** | **Example** |
 |--------------|-----------|----------------|----------------|------------|
-| pair_id | tuple(string, string) | identifier of the record pair | primary key, not null | ("i", "j") |
+| pair_id | tuple(string, string) | identifier of the record pair | primary key, not null | ("i_sourceA", "j_sourceB") |
 | timestamp | datetime | creation time of the match state | primary key, not null | 2025-11-17T13:11:30 |
 | score | float | similarity score | not null | 0.95 |
 | stage | string | processing stage from which the similarity score is generated | Value set: {"PM", "CM"}, not null | "PM" |
@@ -55,13 +55,13 @@ Pipeline2 achieves significantly higher F1 at the cost of increased energy consu
 
 ![result2](./image/ratio.png)
 
-Energy consumption of Pipeline 1 is almost entirely concentrated on the CPU and RAM.
+For the Pipeline 1, the embedding is performed only on the CPU, Energy consumption is concentrated on the CPU and RAM.
 
-Energy consumption profile of Pipeline 2 shows a significant GPU segment.
-
+For the Pipeline 2, we train the BERT model on the GPU. Energy consumption profile shows a significant GPU segment.
+ 
 ![result3](./image/consumption-duration.png)
 
 For dblp-scholar dataset,  Pipeline 1 ran for over 11,000 seconds with an F1 score of only 0.58, while Pipeline 2
 reduced runtime by over 60% while boosting F1 to 0.98
-→ This directly demonstrates that traditional pipelines are unsuitable for large-scale entity matching
+→ This directly demonstrates that traditional pipelines are unsuitable for large-scale entity matching. A reduction in duration does not necessarily imply a decrease in total energy consumption.
 
