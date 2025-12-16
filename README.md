@@ -3,14 +3,14 @@ We implement the one graph embedding and one LLM as examples to show the feasibi
 
 ## About the experiments
 ### Datasets
- We use the [open-source datasets](https://zenodo.org/records/7930461) created from real-world data and are dedicated to the entity resolution task.
+ We use the [open-source datasets](https://github.com/anhaidgroup/deepmatcher/blob/master/Datasets.md created from real-world data and are dedicated to the entity resolution task.
 
- | Dataset         | Attributes                                                | Description                 | Records | Size (Raw) | Cleaned Records | Size (Cleaned) | Matches | Match Rate |
-|----------------|------------------------------------------------------------|-----------------------------|---------|------------|-----------------|----------------|---------|------------|
-| fordors-zagats | name, addr, city, phone, type, class                       | Restaurant information      | 533     | 37.2 KiB   | 331             | 22 KiB         | 110     | 33.23%     |
-| beer           | beer_name, brew_factory_name, style, abv                   | Beer product information    | 4345    | 312.6 KiB  | 3000            | 213.7 KiB      | 68      | 2.27%      |
-| dblp-acm      | title, venue, year, author_1, author_2, author_3, author_4 | Scientific articles         | 2294    | 308.1 KiB  | 2616            | 291.2 KiB      | 2224    | 85.02%     |
-| dblp-scholar  | Id, title, venue, year, authors                            | Scientific articles         | 2616    | 285 KiB    | 64263           | 7.7 MiB        | 5347    | 8.32%      |
+ | Dataset         | Attributes                                                | Description                 | Record Pairs | Matches | Match Rate | Size |
+|----------------|------------------------------------------------------------|-----------------------------|---------|------------|-----------------|----------------|
+| fordors-zagats | name, addr, city, phone, type, class                       | Restaurant information      | 946     | 110  | 11.63%    | 168 KiB         | 
+| beer           | beer_name, brew_factory_name, style, abv                   | Beer products information    | 450    | 68  | 15.11%     | 81 KiB      |
+| dblp-acm      | title, venue, year, author_1, author_2, author_3, author_4 | Scientific articles         | 12363    | 2220  | 17.96%    | 3.5 MiB      |
+| dblp-scholar  | Id, title, venue, year, authors                            | Scientific articles         | 28707    | 5347    | 18.63%    | 6.6 MiB        |
 
 
 ### Setup
