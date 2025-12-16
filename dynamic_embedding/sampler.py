@@ -3,7 +3,7 @@ import math
 
 class NodeSampler:
     '''Summary:
-    This is a sampler for vertex in graph. If the number of neighbors is above certain threshold (50 bu default), 
+    This is a sampler for vertex in graph. If the number of neighbors is above certain threshold (50 by default), 
     sampler will automatically chooses the aliased method to simplifier the random sample. 
     If not, simple sample method will be applied by np structure
 

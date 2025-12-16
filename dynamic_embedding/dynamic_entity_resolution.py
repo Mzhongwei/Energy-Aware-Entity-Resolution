@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import pandas as pd
 import faiss
 import numpy as np
 from typing import List, Tuple, Optional, Dict
@@ -453,3 +454,11 @@ def dynentity_resolution(model, target, n):
     sims = [(word, score) for word, score in model.wv.most_similar(target, topn=n*10) if word in filtered_keys][:n]
     # sims = model.wv.most_similar(target, topn=10, restrict_vocab=len(filtered_keys))  # get other similar words
     return sims
+
+# def er_caise(model, pairs_info, n_graph):
+#     df = pd.read_csv(pairs_info)
+#     for index, row in df.iterrows():
+#         table2_id = row['table2.id']
+#         if table2_id <= n_graph:
+#             model.similarity(table2_id, row['table1.id'])
+#         print(row['c1'], row['c2'])

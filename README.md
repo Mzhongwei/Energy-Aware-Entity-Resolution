@@ -53,7 +53,13 @@ Considering that the Pipeline 2 requires a specific dataset containing annotated
 
 ![result1](./image/consumption_f1.png)
 
-Pipeline2 achieves significantly higher F1 at the cost of increased energy consumption.
+The energy consumption and F1 score of the two pipelines exhibit different behaviors depending on dataset size and data quality.
+
+For relatively small datasets, when the matching task is difficult (e.g., beer), pipeline 2 improves the F1 score at the cost of higher energy consumption. In contrast, when the matching difficulty is low (e.g., fodors-zagats), the additional energy consumption of pipeline 2 brings only marginal improvement in F1 (from 0.9 to 1.0).
+
+For larger datasets, the behavior changes significantly. As dataset size increases, the energy consumption of pipeline 1 grows rapidly, while pipeline 2 remains comparatively stable and reasonable.
+
+Overall, pipeline 1 is highly sensitive to both dataset size and data quality. Pipeline 2 incurs a higher energy cost once triggered, but its energy consumption and F1 performance are less sensitive to these factors than those of pipeline 1.
 
 ![result2](./image/ratio.png)
 
