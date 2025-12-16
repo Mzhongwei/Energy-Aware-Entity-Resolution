@@ -3,7 +3,7 @@ We implement the one graph embedding and one LLM as examples to show the feasibi
 
 ## About the experiments
 ### Datasets
- We use the [open-source datasets](https://github.com/anhaidgroup/deepmatcher/blob/master/Datasets.md created from real-world data and are dedicated to the entity resolution task.
+ We use the [open-source datasets](https://github.com/anhaidgroup/deepmatcher/blob/master/Datasets.md) created from real-world data and are dedicated to the entity resolution task.
 
  | Dataset         | Attributes                                                | Description                 | Record Pairs | Matches | Match Rate | Size |
 |----------------|------------------------------------------------------------|-----------------------------|---------|------------|-----------------|----------------|
