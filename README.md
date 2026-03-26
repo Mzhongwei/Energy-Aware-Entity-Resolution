@@ -1,75 +1,172 @@
-# Energy-Aware and Generic Framework for ER
-We implement the one graph embedding and one LLM as examples to show the feasibility of our framework.
+# Energy-Aware ER
 
-## About the experiments
-### Datasets
- We use the [open-source datasets](https://github.com/anhaidgroup/deepmatcher/blob/master/Datasets.md) created from real-world data and are dedicated to the entity resolution task.
+## 1. Overview
 
- | Dataset         | Attributes                                                | Description                 | Record Pairs | Matches | Match Rate | Size |
-|----------------|------------------------------------------------------------|-----------------------------|---------|------------|-----------------|----------------|
-| fordors-zagats | name, addr, city, phone, type, class                       | Restaurant information      | 946     | 110  | 11.63%    | 168 KiB         | 
-| beer           | beer_name, brew_factory_name, style, abv                   | Beer products information    | 450    | 68  | 15.11%     | 81 KiB      |
-| dblp-acm      | title, venue, year, author_1, author_2, author_3, author_4 | Scientific articles         | 12363    | 2220  | 17.96%    | 3.5 MiB      |
-| dblp-scholar  | Id, title, venue, year, authors                            | Scientific articles         | 28707    | 5347    | 18.63%    | 6.6 MiB        |
+This project implements an entity resolution pipeline that supports two execution families:
 
+- `embedding-*`: graph-based incremental or batch-style entity resolution with random walk embeddings, candidate generation, similarity calculation, and decision making.
+- `bert-*`: sequence-pair classification with BERT-style training, inference, and evaluation.
 
-### Setup
-Our experiments were conducted on a server equipped with a 20-core Intel Xeon W-2155 CPU running at 3.30 GHz, 251.3 GiB of RAM, and an NVIDIA Quadro P2200 GPU.
+The runtime entry point is [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py).  
+Pipeline state is managed in memory through [stateManager.py](/home/zhongwei/Data_integration/energy_aware_er/governance/stateManager.py), and can be persisted at the end of a run.
 
-### Metrics
-- Performance: We use precision, recall, and F1-score as the primary performance metrics. 
-- Energy consumption: we monitor CPU, RAM and GPU power usage (in Watts) and total energy consumption (in Joules) using the [Ecofloc](https://github.com/hhumbertoAv/ecofloc). 
+The current implementation mixes two levels:
 
-### Pipeline & Configuration
-- Pipeline1: incremental graph embedding
-
-(preprocessing--candidates generation--pairwise matching--decision operator) \
-To simulate the data streaming application, we take the tuples in Data Source A as the local dataset used for pre-training, and send the data from source B to kafka producer incrementally as a data stream at a regular and fixed frequency without concurrency. For each record of source B, we look for its similar values from Source A, generate the candidates and calculate the similarity. Finally, we apply a bidirectional Top-1 mutual matching strategy to determine the final match. \
-For embedding, we use [gensim](https://github.com/piskvorky/gensim) pre-trained model.
-![pipeline1](./image/graph_embedding_pipeline.png)
-- Pipeline2: PLM-based approaches
-
-(preprocessing--pairwise matching--decision operator(classifier))\
-We utilize datasets provided by previous work, adopting a 3:1:1 split for the training, validation, and test sets. The model is trained using BERT, and the experimental results are subsequently obtained.
-![pipeline2](./image/plm_pipeline.png)
+- pipeline modules under [pipeline](/home/zhongwei/Data_integration/energy_aware_er/pipeline) provide reusable building blocks
+- endpoint functions in [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py) orchestrate task execution and interact with `StateManager`
 
 
-## Match State
-For the two pipelines mentioned above, we incorporate a match-state gouvernment layer without altering the original pipeline structures, based on the Match State attributes listed below:
+## 2. Tasks
 
-| **Attribute** | **Format** | **Description** | **Constraints** | **Example** |
-|--------------|-----------|----------------|----------------|------------|
-| pair_id | tuple(string, string) | identifier of the record pair | primary key, not null | ("i_sourceA", "j_sourceB") |
-| timestamp | datetime | creation time of the match state | primary key, not null | 2025-11-17T13:11:30 |
-| score | float | similarity score | not null | 0.95 |
-| stage | string | processing stage from which the similarity score is generated | Value set: {"PM", "CM"}, not null | "PM" |
-| decision | string | decision state | Value set: {"tentative", "match"}, not null | "tentative" |
-| transaction | string | transaction state | Value set: {"pending", "commit", "failed", "rolled_back", "expired"}, not null | "pending" |
-| active | boolean | whether the instance is active | Value set: {true, false} | true |
+The DAG tasks are defined in [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py).
+
+- `normalization`
+  Normalizes input records. In embedding mode it calls `index_normalization(...)`. In bert mode it converts paired data into sentence-pair format with `sequence_generating_m1(...)`.
+
+- `graph_construction`
+  Builds or updates the representation graph. When the input is a `DataFrame`, it can use [graph_construction.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/graph_construction.py); otherwise it falls back to placeholder in-memory behavior.
+
+- `random_walk`
+  Generates walk sequences from the graph. When a real graph object is present, it uses [random_walk.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/random_walk.py).
+
+- `embedding_training`
+  Trains or retrains the embedding model from walk sequences using [embedding_training.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/embedding_training.py).
+
+- `bert_training`
+  Trains a BERT-style classifier using [bert_training.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/bert_training.py).
+
+- `cg_feature_extraction`
+  Computes candidate-generation features from a `DataFrame` using [cg_feature_extraction.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/cg_feature_extraction.py).
+
+- `feature_index_construction`
+  Builds or updates the candidate-generation index in memory using [feature_index_construction.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/feature_index_construction.py).
+
+- `candidate_enumeration`
+  Queries the committed CG index and generates candidate pairs using [candidate_enumeration.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/candidate_enumeration.py).
+
+- `calculating_similarity`
+  Placeholder stage in the current `main_distribution.py`. Dedicated similarity utilities live in [calculating_similarity.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/calculating_similarity.py).
+
+- `decision_making`
+  Placeholder stage in the current `main_distribution.py`. Decision utilities live in [decision_making.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/decision_making.py).
+
+- `bert_inference`
+  Runs inference with a saved BERT model through [bert_inference.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/bert_inference.py).
+
+- `evaluation`
+  Current endpoint-level evaluation stage that writes result data back into `StateManager`.
+
+- `bert_evaluation`
+  Evaluates a saved BERT model through [bert_evaluation.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/bert_evaluation.py).
 
 
-## Evaluation & Results
-Considering that the Pipeline 2 requires a specific dataset containing annotated data and lacks a candidate generation step, we removed the candidate generation step from Pipeline 2 to ensure comparability between the two pipelines.
+## 3. Modes
 
-![result1](./image/consumption_f1.png)
+Execution mode is read from `config["mode"]` in [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py).
 
-The energy consumption and F1 score of the two pipelines exhibit different behaviors depending on dataset size and data quality.
+### Embedding Modes
 
-For relatively small datasets, when the matching task is difficult (e.g., beer), pipeline 2 improves the F1 score at the cost of higher energy consumption. In contrast, when the matching difficulty is low (e.g., fodors-zagats), the additional energy consumption of pipeline 2 brings only marginal improvement in F1 (from 0.9 to 1.0).
+- `embedding-training`
+  Runs:
+  `normalization -> graph_construction -> random_walk -> embedding_training -> cg_feature_extraction -> feature_index_construction`
 
-For larger datasets, the behavior changes significantly. As dataset size increases, the energy consumption of pipeline 1 grows rapidly, while pipeline 2 remains comparatively stable and reasonable.
+- `embedding-inference`
+  Runs:
+  `normalization -> graph_construction -> random_walk -> embedding_training -> cg_feature_extraction -> feature_index_construction -> candidate_enumeration -> calculating_similarity -> decision_making`
 
-Overall, pipeline 1 is highly sensitive to both dataset size and data quality. Pipeline 2 incurs a higher energy cost once triggered, but its energy consumption and F1 performance are less sensitive to these factors than those of pipeline 1.
+  In the current code this mode is Kafka-oriented: it loads state once, processes buffered Kafka messages in batches, updates the same in-memory state, and saves at the end.
 
-![result2](./image/ratio.png)
+- `embedding-evaluation`
+  Runs only the `evaluation` stage on top of loaded state.
 
-For the Pipeline 1, the embedding is performed only on the CPU, Energy consumption is concentrated on the CPU and RAM.
+### BERT Modes
 
-For the Pipeline 2, we train the BERT model on the GPU. Energy consumption profile shows a significant GPU segment.
- 
-![result3](./image/consumption-duration.png)
+- `bert-training`
+  Runs:
+  `normalization -> bert_training`
 
-For dblp-scholar dataset,  Pipeline 1 ran for over 11,000 seconds with an F1 score of only 0.58, while Pipeline 2
-reduced runtime by over 60% while boosting F1 to 0.98
-→ This directly demonstrates that traditional pipelines are unsuitable for large-scale entity matching. A reduction in duration does not necessarily imply a decrease in total energy consumption.
+- `bert-inference`
+  Runs:
+  `normalization -> bert_inference`
 
+- `bert-b_evaluation`
+  Runs:
+  `normalization -> bert_evaluation`
+
+
+## 4. Data Flow
+
+### Common Flow
+
+The execution engine is `run_pipeline(...)` in [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py).
+
+For each task:
+
+1. It checks task dependencies.
+2. It collects the required inputs from `data_store`.
+3. It executes the endpoint function.
+4. It stores returned outputs back into `data_store`.
+
+Stateful artifacts are not primarily passed through return values. They are stored in:
+
+- `data_store["state_manager"]`
+- `state_manager.cache`
+
+### Embedding Flow
+
+Typical embedding flow is:
+
+1. Raw records enter `normalization`
+2. Normalized records update the graph in `graph_construction`
+3. The graph produces walk sequences in `random_walk`
+4. Sequences retrain the same `EmbeddingModel` in `embedding_training`
+5. Records are converted to CG features in `cg_feature_extraction`
+6. Features are inserted into `CGIndex` in `feature_index_construction`
+7. Candidate pairs are generated in `candidate_enumeration`
+8. Similarity and decision stages produce predicted matches
+
+In Kafka mode, the same `StateManager` instance is reused across batches, so the same in-memory graph, embedding model, and candidate index can be updated incrementally.
+
+### BERT Flow
+
+Typical BERT flow is:
+
+1. CSV data is loaded into `raw_data`
+2. `normalization` converts records into pairwise text input
+3. `bert_training` trains a classifier or `bert_inference` / `bert_evaluation` reuses a saved one
+4. Results are written into `state_manager.cache`
+
+
+## 5. Core Data Structures
+
+The current system revolves around a few central runtime objects.
+
+- `StateManager`
+  Defined in [stateManager.py](/home/zhongwei/Data_integration/energy_aware_er/governance/stateManager.py).  
+  Holds all mutable runtime state in `cache`, including graph, embedding model, candidate index, predicted matches, and evaluation results.
+
+- `RepresentationGraph` / `DynGraphIgraph`
+  Graph structures used by graph construction and random walk generation.  
+  `DynGraphIgraph` is implemented in [graph_construction.py](/home/zhongwei/Data_integration/energy_aware_er/pipeline/graph_construction.py).
+
+- `EmbeddingModel`
+  Wrapper around gensim models, implemented in [embedding_model.py](/home/zhongwei/Data_integration/energy_aware_er/models/embedding_model.py).  
+  Supports initialization, retraining, save, and load.
+
+- `CGIndex`
+  Candidate-generation index, implemented in [cg_index.py](/home/zhongwei/Data_integration/energy_aware_er/models/cg_index.py).  
+  Supports methods such as `fullindexing`, `key-blocking`, `token-blocking`, and `minhash-lsh`.
+
+- `bert_model`
+  BERT-related state is stored in cache as a dictionary containing model/trainer/tokenizer artifacts, depending on stage.
+
+- `data_store`
+  The runtime data exchange dictionary in [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py).  
+  It carries transient data such as `raw_data`, `processed_data`, `sequences`, `cg_feature`, `candidate_pairs`, and the shared `state_manager`.
+
+
+## Current Notes
+
+- Some endpoint functions in [main_distribution.py](/home/zhongwei/Data_integration/energy_aware_er/main_distribution.py) still contain placeholder fallback logic.
+- The project is already partially refactored into pipeline modules, but endpoint orchestration and pipeline implementations are still being aligned.
+- The intended runtime pattern is: load state once, update in memory during the pipeline, and save once at the end.

@@ -1,9 +1,16 @@
 test_ignore*
-pipeline*/
+generative_files
+tmp/
+logs/
+storage/
+data/
 config/config*
 config/test.yaml
 .DS_Store
-
+.codex
+# pytest and other test files
+.pytest*
+test*
 # Energy Conso Results
 emissions*.csv
 result*.csv

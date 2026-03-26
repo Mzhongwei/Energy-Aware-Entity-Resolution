@@ -1,0 +1,52 @@
+mode: "bert-training-b_evaluation"
+version_name: "test"
+
+# bert mode, source data
+trainset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/train.csv"
+testset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/test.csv"
+evalset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/valid.csv"
+
+# incremental mode
+# meta_path: list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
+meta_path: ["name", "rid"]
+
+# STATE MANAGEMENT
+state_management:
+# bert mode
+  bert-dir: "data/bert"
+# incremental mode
+  graph-dir: "data/graph"
+  graph-name: ""
+  embedding-dir: "data/embedding"
+  embedding_model-name: ""
+  feature_index-dir: "data/index"
+  feature_index-name: ""
+  predicted_match-dir: "data/predicted"
+  predicted_match-name: ""
+
+# pipeline
+normalization:
+
+graph_construction:
+
+random_walk:
+
+embedding_training:
+
+bert_training:
+
+cg_feature_extraction:
+
+feature_index_construction:
+
+candidate_enumeration:
+
+calculating_similarity:
+
+decision_making:
+
+bert_inference:
+
+evaluation:
+
+b_evaluation:
