@@ -3,6 +3,7 @@ from .normalization import (
 )
 from .bert_training import train_model
 from .bert_evaluation import evaluate_from_saved_model
+from .evaluation import compare_ground_truth
 from .bert_inference import process_inference
 from .embedding_training import initialize_embeddings, retrain_embeddings, train_embeddings
 from .cg_feature_extraction import compute_features
@@ -13,6 +14,7 @@ __all__ = [
     "index_normalization",
     "train_model",
     "evaluate_from_saved_model",
+    "compare_ground_truth",
     "process_inference",
     "initialize_embeddings",
     "retrain_embeddings",

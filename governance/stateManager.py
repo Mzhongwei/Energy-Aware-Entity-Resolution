@@ -4,6 +4,35 @@ import json
 from models import SimilarityGraph, CGIndex, RepresentationGraph, EmbeddingModel
 from models.bert_model import Model
 
+def _has_stage(*names, stages):
+    return any(name in stages for name in names)
+
+def _artifact_path(dir_key, name_key, default_dir, default_ext, state_config, config):
+    save_dir = state_config.get(dir_key, default_dir)
+    # personalize file name or use version name 
+    version_name = config.get("version_name", "test")
+    name = state_config.get(name_key) or version_name
+    os.makedirs(save_dir, exist_ok=True)
+    return os.path.join(save_dir, f"{name}{default_ext}")
+
+def _write_text(path, value):
+    with open(path, "w", encoding="utf-8") as f:
+        if isinstance(value, str):
+            f.write(value)
+        elif isinstance(value, (list, tuple, set)):
+            f.write("\n".join(map(str, value)))
+        elif isinstance(value, dict):
+            json.dump(value, f, ensure_ascii=False, indent=2)
+        else:
+            f.write(str(value))
+
+def _graph_manifest_path(state_config, config):
+    graph_dir = state_config.get("graph-dir", "data/graph")
+    version_name = config.get("version_name", "test")
+    graph_name = state_config.get("graph-name") or version_name
+    os.makedirs(graph_dir, exist_ok=True)
+    return os.path.join(graph_dir, f"{graph_name}.manifest.json")
+
 class StateManager:
 
     def __init__(self):
@@ -18,29 +47,7 @@ class StateManager:
     def save(self, config, stages):
         state_config = config.get("state_management", {})
 
-        def _has_stage(*names):
-            return any(name in stages for name in names)
-
-        def _artifact_path(dir_key, name_key, default_dir, default_ext):
-            save_dir = state_config.get(dir_key, default_dir)
-            # personalize file name or use version name 
-            version_name = config.get("version_name", "test")
-            name = state_config.get(name_key) or version_name
-            os.makedirs(save_dir, exist_ok=True)
-            return os.path.join(save_dir, f"{name}{default_ext}")
-
-        def _write_text(path, value):
-            with open(path, "w", encoding="utf-8") as f:
-                if isinstance(value, str):
-                    f.write(value)
-                elif isinstance(value, (list, tuple, set)):
-                    f.write("\n".join(map(str, value)))
-                elif isinstance(value, dict):
-                    json.dump(value, f, ensure_ascii=False, indent=2)
-                else:
-                    f.write(str(value))
-
-        if _has_stage("bert_training") and "bert_model" in self.cache:
+        if _has_stage("bert_training", stages=stages) and "bert_model" in self.cache:
             save_dir = state_config.get("bert-dir", "data/bert_model")
             version_name = config.get('version_name', "test")
             model_dir = os.path.join(save_dir, version_name)
@@ -49,25 +56,30 @@ class StateManager:
             bert_mode["trainer"].save_model(model_dir)
             bert_mode["tokenizer"].save_pretrained(model_dir)
 
-        if _has_stage("graph_construction") and "representation_graph" in self.cache:
-            graph_path = _artifact_path("graph-dir", "graph-name", "data/graph", ".graphml")
+        if _has_stage("graph_construction", stages=stages) and "representation_graph" in self.cache:
+            graph_path = _artifact_path("graph-dir", "graph-name", "data/graph", ".graphml", state_config, config)
             graph = self.cache["representation_graph"]
-            graph_obj = getattr(graph, "graph", graph)
             if isinstance(graph, RepresentationGraph):
                 graph_save = graph.clean_attributes()
                 graph_save.write_graphml(graph_path)
+                graph_manifest = {
+                    "graph_class": type(graph).__name__,
+                    "graph_config": config.get("graph", {}),
+                }
+                with open(_graph_manifest_path(state_config, config), "w", encoding="utf-8") as f:
+                    json.dump(graph_manifest, f, ensure_ascii=False, indent=2)
             else:
                 _write_text(graph_path, graph)
 
-        if _has_stage("embedding_training") and "embedding_model" in self.cache:
-            emb_path = _artifact_path("embedding-dir", "embedding_model-name", "data/embedding", ".emb")
+        if _has_stage("embedding_training", stages=stages) and "embedding_model" in self.cache:
+            emb_path = _artifact_path("embedding-dir", "embedding_model-name", "data/embedding", ".emb", state_config, config)
             model = self.cache["embedding_model"]
             if hasattr(model, "save"):
                 model.save(emb_path)
             else:
                 _write_text(emb_path, model)
 
-        if _has_stage("feature_index_construction") and "cg_feature_index" in self.cache:
+        if _has_stage("feature_index_construction", stages=stages) and "cg_feature_index" in self.cache:
             index_dir = state_config.get("feature_index-dir", "data/index")
             index_name = state_config.get("feature_index-name") or config.get("version_name", "test")
             save_dir = os.path.join(index_dir, index_name)
@@ -80,50 +92,58 @@ class StateManager:
             else:
                 _write_text(os.path.join(save_dir, "index.json"), index)
 
-        if _has_stage("decision_making", "bert_inference"):
+        if _has_stage("decision_making", "bert_inference", stages=stages):
             predicted = self.cache.get("predicted_matching")
             if predicted is not None:
                 if isinstance(predicted, SimilarityGraph):
-                    pred_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".graphml")
+                    pred_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".graphml", state_config, config)
                     predicted_save = predicted.graph.clean_attributes()
                     predicted_save.write_graphml(pred_path)
                 else:
-                    pred_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".txt")
+                    pred_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".txt", state_config, config)
                     _write_text(pred_path, predicted)
 
-        if _has_stage("evaluation", "bert_evaluation"):
+        if _has_stage("evaluation", "bert_evaluation", stages=stages):
             result = self.cache.get("result") or self.cache.get("evaluation_result")
             if result is not None:
-                result_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".result.txt")
+                result_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".result.txt", state_config, config)
                 _write_text(result_path, result)
 
     def load(self, config, stages):
-        # 需要确认再改
         state_config = config.get("state_management", {})
-
-        def _has_stage(*names):
-            return any(name in stages for name in names)
-
-        def _artifact_path(dir_key, name_key, default_dir, default_ext):
-            save_dir = state_config.get(dir_key, default_dir)
-            version_name = config.get("version_name", "test")
-            name = state_config.get(name_key) or version_name
-            return os.path.join(save_dir, f"{name}{default_ext}")
-
+        
         def _file_has_content(path):
             return os.path.exists(path) and os.path.getsize(path) > 0
 
-        if _has_stage("graph_construction"):
-            graph_path = _artifact_path("graph-dir", "graph-name", "data/graph", ".graphml")
+        if _has_stage("graph_construction", stages=stages):
+            from pipeline.graph_construction import dyn_graph_generation
+
+            graph_path = _artifact_path("graph-dir", "graph-name", "data/graph", ".graphml", state_config, config)
+            manifest_path = _graph_manifest_path(state_config, config)
+            if _file_has_content(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        graph_manifest = json.load(f)
+                    graph_cfg = graph_manifest.get("graph_config")
+                    if isinstance(graph_cfg, dict):
+                        merged_config = dict(config)
+                        merged_config["graph"] = graph_cfg
+                    else:
+                        merged_config = config
+                except Exception:
+                    merged_config = config
+            else:
+                merged_config = config
+
             if _file_has_content(graph_path):
-                graph = RepresentationGraph()
+                graph = dyn_graph_generation(merged_config)
                 graph.load_graph(graph_path)
                 self.cache["representation_graph"] = graph
             else:
-                self.cache["representation_graph"] = {}
+                self.cache["representation_graph"] = dyn_graph_generation(config)
 
-        if _has_stage("embedding_training"):
-            emb_path = _artifact_path("embedding-dir", "embedding_model-name", "data/embedding", ".emb")
+        if _has_stage("embedding_training", stages=stages):
+            emb_path = _artifact_path("embedding-dir", "embedding_model-name", "data/embedding", ".emb", state_config, config)
             if _file_has_content(emb_path):
                 try:
                     model = EmbeddingModel.load(emb_path)
@@ -133,17 +153,28 @@ class StateManager:
             else:
                 self.cache["embedding_model"] = {}
 
-        if _has_stage("feature_index_construction"):
+        if _has_stage("feature_index_construction", "candidate_enumeration", stages=stages):
             index_dir = state_config.get("feature_index-dir", "data/index")
             index_name = state_config.get("feature_index-name") or config.get("version_name", "test")
             save_dir = os.path.join(index_dir, index_name)
             manifest_path = os.path.join(save_dir, "manifest.json")
             if _file_has_content(manifest_path):
-                self.cache["cg_feature_index"] = CGIndex.load(save_dir)
+                try:
+                    self.cache["cg_feature_index"] = CGIndex.from_disk(config, save_dir)
+                except Exception:
+                    if "candidate_enumeration" in stages:
+                        raise ValueError(f"failed to load cg_feature_index from: {save_dir}")
+            elif "candidate_enumeration" in stages:
+                raise FileNotFoundError(f"cg_feature_index manifest not found or empty: {manifest_path}")
             else:
-                self.cache["cg_feature_index"] = {}
+                cg_cfg = config.get("candidate_generation", {}) if isinstance(config, dict) else {}
+                method = str(cg_cfg.get("method", "")).strip()
+                if method:
+                    self.cache["cg_feature_index"] = CGIndex.from_config(config, index_dir=save_dir)
+                else:
+                    self.cache["cg_feature_index"] = {}
 
-        if _has_stage("bert_inference", "bert_evaluation"):
+        if _has_stage("bert_inference", "bert_evaluation", stages=stages):
             bert_dir = state_config.get("bert-dir", "data/bert_model")
             version_name = config.get("version_name", "test")
             save_dir = os.path.join(bert_dir, version_name)

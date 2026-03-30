@@ -14,12 +14,15 @@ from pipeline import (
     index_normalization,
     train_model,
     evaluate_from_saved_model,
+    compare_ground_truth,
     process_inference,
     train_embeddings,
     compute_features,
 )
-from pipeline.candidate_enumeration import generate_candidates_from_index
-from pipeline.feature_index_construction import build_index as build_cg_index, commit_cg_index, create_cg_index
+from pipeline.candidate_enumeration import enumerate_candidates
+from pipeline.calculating_similarity import score_candidate_pairs
+from pipeline.decision_making import decide_matches
+from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
 from utils.write_log import write_log
@@ -54,27 +57,13 @@ def normalization(config: dict, raw_data: dict | DataFrame):
 def graph_construction(config, processed_data, state_manager: StateManager):
     graph = state_manager.get("representation_graph")
 
-    if isinstance(processed_data, pd.DataFrame):
-        if graph is None:
-            print("[INIT GRAPH]")
-            graph = dyn_graph_generation(config)
-        else:
-            print("[UPDATE GRAPH]")
+    if not isinstance(processed_data, pd.DataFrame):
+        raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
+    if not hasattr(graph, "build_relation"):
+        raise ValueError("representation_graph must support build_relation for incremental updates.")
 
-        if hasattr(graph, "build_relation"):
-            graph.build_relation(processed_data)
-            state_manager.update("representation_graph", graph)
-            return None
-
-    if graph is None:
-        print("[INIT GRAPH]")
-        graph = {"nodes": []}
-    else:
-        print("[UPDATE GRAPH]")
-
-    graph["nodes"].append(len(graph["nodes"]))
+    graph.build_relation(processed_data)
     state_manager.update("representation_graph", graph)
-
     return None
 
 
@@ -107,24 +96,23 @@ def cg_feature_extraction(config, processed_data):
     if isinstance(processed_data, pd.DataFrame):
         method = config.get("candidate_generation", {}).get("method", "fullindexing")
         return compute_features(processed_data, method, config)
-    return {"feature": 1}
+    else:
+        print('error')
+    return None
 
 
 def feature_index_construction(config, cg_feature, state_manager: StateManager):
     print("[feature_index_construction]")
-    if isinstance(cg_feature, list):
-        index = state_manager.get("cg_feature_index")
-        if index is None:
-            method = config.get("candidate_generation", {}).get("method", "fullindexing")
-            index = create_cg_index(method, config)
-        if hasattr(index, "upsert"):
-            build_cg_index(cg_feature, index)
-            commit_cg_index(index)
-            state_manager.update("cg_feature_index", index)
-            return None
+    if not isinstance(cg_feature, list):
+        raise ValueError("cg_feature must be a feature list.")
 
-    index = state_manager.get("cg_feature_index") or {}
-    index["size"] = index.get("size", 0) + 1
+    index = state_manager.get("cg_feature_index")
+    if index is None:
+        raise ValueError("cg_feature_index must be initialized before feature_index_construction.")
+    if not hasattr(index, "build"):
+        raise ValueError("cg_feature_index must be a CGIndex instance.")
+
+    build_cg_index(cg_feature, index)
     state_manager.update("cg_feature_index", index)
     return None
 
@@ -132,20 +120,26 @@ def feature_index_construction(config, cg_feature, state_manager: StateManager):
 def candidate_enumeration(config, cg_feature, state_manager: StateManager):
     print("[candidate_enumeration]")
     index = state_manager.get("cg_feature_index")
-    if isinstance(cg_feature, list) and index is not None and hasattr(index, "query"):
-        top_k = config.get("candidate_generation", {}).get("top_k")
-        return generate_candidates_from_index(cg_feature, index, top_k=top_k)
-    return ["pair1", "pair2"]
-
+    if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
+        return enumerate_candidates(cg_feature, index)
+    else:
+        print("error")
+    return None
 
 def calculating_similarity(config, candidate_pairs, state_manager: StateManager):
     print("[calculating_similarity]")
-    return ["match1"]
+    embedding_model = state_manager.get("embedding_model")
+    if embedding_model is None:
+        raise ValueError("embedding_model must be initialized before calculating_similarity.")
+    sim_cfg = config.get("similarity", {})
+    batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
+    return score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
 
 
 def decision_making(config, matching_pairs, state_manager: StateManager):
     print("[decision_making]")
-    predicted_matching = ["predicted_matching"]
+    output_format = config.get("similarity", {}).get("output_format", "graphml")
+    predicted_matching = decide_matches(matching_pairs, output_format=output_format)
     state_manager.update("predicted_matching", predicted_matching)
     return None
 
@@ -159,7 +153,7 @@ def bert_inference(config, processed_data, state_manager: StateManager):
 
 def evaluation(config, state_manager: StateManager):
     print("[evaluation]")
-    result = state_manager.get("predicted_matching")
+    result = compare_ground_truth(config)
     state_manager.update("result", result)
     return None
 
@@ -218,7 +212,7 @@ TASKS = {
         "func": feature_index_construction
     },
     "candidate_enumeration": {
-        "deps": ["feature_index_construction"],
+        "deps": ["cg_feature_extraction"],
         "input": ["cg_feature", "state_manager"],
         "output": ["candidate_pairs"],
         "func": candidate_enumeration
@@ -405,7 +399,6 @@ def driver(config):
                 "random_walk",
                 "embedding_training",
                 "cg_feature_extraction",
-                "feature_index_construction",
                 "candidate_enumeration",
                 "calculating_similarity",
                 "decision_making",

@@ -19,44 +19,21 @@ def initialize_embeddings(config) -> EmbeddingModel:
     )
 
 
-def _normalize_walks(sequences: Optional[Iterable]) -> List[List[str]]:
-    if sequences is None:
-        return []
-
-    walks: List[List[str]] = []
-    for seq in sequences:
-        if seq is None:
-            continue
-        if isinstance(seq, str):
-            tokens = seq.split()
-        elif isinstance(seq, Sequence):
-            tokens = [str(token) for token in seq if token is not None and str(token) != ""]
-        else:
-            tokens = [str(seq)]
-        if tokens:
-            walks.append(tokens)
-    return walks
-
-
 def retrain_embeddings(config, model: Optional[EmbeddingModel], sequences) -> EmbeddingModel:
-    walks = _normalize_walks(sequences)
     if model is None:
         model = initialize_embeddings(config)
-
-    if not walks:
-        return model
 
     emb_cfg = config.get("embeddings", {}) if isinstance(config, dict) else {}
     train_epochs = int(emb_cfg.get("inc_epochs", emb_cfg.get("epochs", getattr(model, "epochs", 5))))
 
     if len(model.wv.key_to_index) == 0:
-        model.build_vocab(walks)
+        model.build_vocab(sequences)
         total_examples = model.corpus_count
     else:
-        model.build_vocab(walks, update=True)
-        total_examples = len(walks)
+        model.build_vocab(sequences, update=True)
+        total_examples = len(sequences)
 
-    model.train(walks, total_examples=total_examples, epochs=train_epochs)
+    model.train(sequences, total_examples=total_examples, epochs=train_epochs)
     return model
 
 

@@ -45,19 +45,15 @@ def _ensure_rid(df: pd.DataFrame) -> None:
         raise ValueError("Input DataFrame must contain a 'rid' column.")
 
 
-def _rid_to_int(value: Any) -> int:
+def _rid_to_str(value: Any) -> str:
     if isinstance(value, bool):
         raise ValueError(f"Invalid rid value: {value!r}")
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            fval = float(value)
-        except (TypeError, ValueError):
-            raise ValueError(f"rid must be integer-convertible, got {value!r}") from None
-        if not fval.is_integer():
-            raise ValueError(f"rid must be an integer, got {value!r}")
-        return int(fval)
+    if value is None:
+        raise ValueError("rid cannot be None")
+    rid = str(value).strip()
+    if not rid:
+        raise ValueError("rid cannot be empty")
+    return rid
 
 
 def _safe_text(value: Any) -> str:
@@ -104,15 +100,15 @@ def _char_shingles(text: str, shingle_size: int) -> List[str]:
     return [normalized[i : i + shingle_size] for i in range(len(normalized) - shingle_size + 1)]
 
 
-def _compute_key_blocking_features(df: pd.DataFrame, config: Optional[Dict[str, Any]]) -> List[Tuple[int, List[str]]]:
+def _compute_key_blocking_features(df: pd.DataFrame, config: Optional[Dict[str, Any]]) -> List[Tuple[str, List[str]]]:
     keys = _as_field_list(
         _cg_block(config).get("key_blocking", {}).get("keys"),
         "candidate_generation.key_blocking.keys",
         required=True,
     )
-    features: List[Tuple[int, List[str]]] = []
+    features: List[Tuple[str, List[str]]] = []
     for _, row in df.iterrows():
-        rid = _rid_to_int(row["rid"])
+        rid = _rid_to_str(row["rid"])
         emitted: List[str] = []
         composite_parts: List[str] = []
         for field in keys:
@@ -127,22 +123,22 @@ def _compute_key_blocking_features(df: pd.DataFrame, config: Optional[Dict[str, 
     return features
 
 
-def _compute_token_blocking_features(df: pd.DataFrame, config: Optional[Dict[str, Any]]) -> List[Tuple[int, List[str]]]:
+def _compute_token_blocking_features(df: pd.DataFrame, config: Optional[Dict[str, Any]]) -> List[Tuple[str, List[str]]]:
     fields = _as_field_list(
         _cg_block(config).get("token_blocking", {}).get("field"),
         "candidate_generation.token_blocking.field",
         required=True,
     )
-    features: List[Tuple[int, List[str]]] = []
+    features: List[Tuple[str, List[str]]] = []
     for _, row in df.iterrows():
-        rid = _rid_to_int(row["rid"])
+        rid = _rid_to_str(row["rid"])
         text = _record_text(row, fields)
         tokens = list(dict.fromkeys(_tokenize(text)))
         features.append((rid, tokens))
     return features
 
 
-def _compute_minhash_lsh_features(df: pd.DataFrame, config: Optional[Dict[str, Any]]) -> List[Tuple[int, List[int]]]:
+def _compute_minhash_lsh_features(df: pd.DataFrame, config: Optional[Dict[str, Any]]) -> List[Tuple[str, List[int]]]:
     cg_cfg = _cg_block(config)
     mh_cfg = cg_cfg.get("minhash_lsh", {}) if isinstance(cg_cfg.get("minhash_lsh", {}), dict) else {}
     fields = _as_field_list(mh_cfg.get("field"), "candidate_generation.minhash_lsh.field", required=True)
@@ -168,9 +164,9 @@ def _compute_minhash_lsh_features(df: pd.DataFrame, config: Optional[Dict[str, A
             rows_per_band = sig_len
         bands = usable_bands
 
-    features: List[Tuple[int, List[int]]] = []
+    features: List[Tuple[str, List[int]]] = []
     for _, row in df.iterrows():
-        rid = _rid_to_int(row["rid"])
+        rid = _rid_to_str(row["rid"])
         text = _record_text(row, fields)
         shingles = _char_shingles(text, shingle_size)
         if not shingles:
@@ -201,7 +197,7 @@ def _compute_minhash_lsh_features(df: pd.DataFrame, config: Optional[Dict[str, A
     return features
 
 
-def compute_features(df: pd.DataFrame, method: str, config: Optional[Dict[str, Any]] = None) -> List[Tuple[int, Any]]:
+def compute_features(df: pd.DataFrame, method: str, config: Optional[Dict[str, Any]] = None) -> List[Tuple[str, Any]]:
     if df is None:
         return []
     if not isinstance(df, pd.DataFrame):
@@ -212,7 +208,7 @@ def compute_features(df: pd.DataFrame, method: str, config: Optional[Dict[str, A
         return []
 
     if method == "fullindexing":
-        return [(_rid_to_int(row["rid"]), None) for _, row in df.iterrows()]
+        return [(_rid_to_str(row["rid"]), None) for _, row in df.iterrows()]
     if method == "key-blocking":
         return _compute_key_blocking_features(df, config)
     if method == "token-blocking":

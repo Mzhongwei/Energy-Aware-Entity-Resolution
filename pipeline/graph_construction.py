@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 from functools import lru_cache
-from typing import Dict, List, Tuple, Iterable, Optional
+from typing import Dict, List, Tuple, Iterable, Optional, Set
 
 import math
 from tqdm import tqdm
@@ -29,13 +29,20 @@ class DynGraphIgraph(RepresentationGraph):
         undirected_weighted: bool = True,
         cache_ngram_size: int = 200_000,
     ) -> None:
-        super().__init__(
-            node_types=node_types,
-            flatten=flatten,
-            directed=directed,
-            smooth=smooth,
-            meta_path=meta_path,
-        )
+        super().__init__(directed=directed)
+
+        self.node_classes: Dict[str, int] = {}
+        self.node_is_numeric: Dict[str, bool] = {}
+        self.to_flatten = self._resolve_flatten(flatten)
+        self.meta_path = meta_path or []
+        self.meta_link: List[Tuple[str, str]] = []
+        self.meta_node: Set[str] = set()
+        self.dyn_roots = None
+
+        if node_types:
+            self._extract_node_types(node_types)
+        self._init_meta_path(meta_path)
+        self._check_flatten()
 
         self.samplers = []
         self.ngram_config = ngram_config or {"token_n": [2, 3], "char_n": [], "skip": 0}
@@ -43,8 +50,72 @@ class DynGraphIgraph(RepresentationGraph):
         self.rare_bias = rare_bias
         self.rare_alpha = float(rare_alpha)
         self.undirected_weighted = undirected_weighted
+        self.graph["smooth"] = smooth
+        self.graph["words_count"] = 0
+        self.graph["weighted"] = bool(smooth) or bool(undirected_weighted) or directed
+
+    def _resolve_flatten(self, flatten: Iterable[str] | str):
+        if flatten == "no":
+            return []
+        return flatten
+
+    def _extract_node_types(self, node_types: Iterable[str]) -> None:
+        for node_type in node_types:
+            class_info, name = node_type.split("__")
+            rwclass = int(class_info[0])
+            num_flag = class_info[1]
+            self.node_classes[name] = rwclass
+            self.node_is_numeric[name] = (num_flag == "#")
+
+    def _init_meta_path(self, meta_path: Optional[Iterable]) -> None:
+        if meta_path:
+            paths = meta_path if isinstance(meta_path[0], list) else [meta_path]
+            for path in paths:
+                for a, b in zip(path[:-1], path[1:]):
+                    link = tuple(sorted([a, b]))
+                    if link not in self.meta_link:
+                        self.meta_link.append(link)
+                for node_type in path:
+                    self.meta_node.add(node_type)
+
+            self.dyn_roots = {}
+            if isinstance(meta_path[0], list):
+                for path in meta_path:
+                    self.dyn_roots[path[0]] = set()
+            else:
+                self.dyn_roots[meta_path[0]] = set()
+        else:
+            self.dyn_roots = set()
+
+    def _check_flatten(self) -> None:
+        if self.to_flatten and self.to_flatten not in ("no", "all"):
+            for prefix in self.to_flatten:
+                if prefix not in self.node_classes:
+                    raise ValueError(f"Unknown flatten type: {prefix}")
+
+    def _update_node_class(self, prefix: str) -> Dict[str, bool]:
+        node_class_bin = "{:03b}".format(self.node_classes[prefix])
+        return {
+            "isfirst": bool(int(node_class_bin[0])),
+            "isroot": bool(int(node_class_bin[1])),
+            "isappear": bool(int(node_class_bin[2])),
+        }
 
     def _after_graph_loaded(self) -> None:
+        if "words_count" not in self.graph.attributes():
+            self.graph["words_count"] = 0
+        if "smooth" not in self.graph.attributes():
+            self.graph["smooth"] = None
+        if "weighted" not in self.graph.attributes():
+            self.graph["weighted"] = bool(self.graph["smooth"]) or bool(self.undirected_weighted) or self.graph.is_directed()
+        if not self.meta_path:
+            for v in self.graph.vs:
+                if "type" not in v.attributes():
+                    continue
+                if "numeric" not in v.attributes():
+                    v["numeric"] = self.node_is_numeric.get(v["type"], False)
+                if "node_class" not in v.attributes() and v["type"] in self.node_classes:
+                    v["node_class"] = self._update_node_class(v["type"])
         self.samplers = [None] * self.graph.vcount()
         for v in self.graph.vs:
             self._update_neighbors(int(v.index))
@@ -55,6 +126,38 @@ class DynGraphIgraph(RepresentationGraph):
         self.samplers = [None] * self.graph.vcount()
         for v in self.graph.vs:
             self._update_neighbors(int(v.index))
+
+    def _add_vertex(self, node_name: str, node_prefix: str):
+        attrs = {}
+        if not self.meta_path:
+            attrs["numeric"] = self.node_is_numeric.get(node_prefix, False)
+            if node_prefix in self.node_classes:
+                attrs["node_class"] = self._update_node_class(node_prefix)
+        return super()._add_vertex(node_name, node_prefix, **attrs)
+
+    def _update_node(self, node_name: str, node_prefix: str) -> int:
+        node_index = super()._update_node(node_name, node_prefix)
+        self.graph["words_count"] = int(self.graph["words_count"]) + 1
+        node = self.graph.vs[node_index]
+
+        if self.meta_path:
+            if node_prefix in getattr(self, "dyn_roots", {}).keys():
+                self.dyn_roots[node_prefix].add(int(node.index))
+        else:
+            if "node_class" in node.attributes() and node["node_class"].get("isroot", False):
+                self.dyn_roots.add(int(node.index))
+        return int(node.index)
+
+    def _update_token(self, ins_value: str, prefix: str) -> int:
+        node_index = super()._update_token(ins_value, prefix)
+        node = self.graph.vs[node_index]
+        if self.meta_path:
+            if prefix in getattr(self, "dyn_roots", {}).keys():
+                self.dyn_roots[prefix].add(int(node.index))
+        else:
+            if "node_class" in node.attributes() and node["node_class"].get("isroot", False):
+                self.dyn_roots.add(int(node.index))
+        return int(node.index)
 
     # ------------------------
     # n-gram 生成（可缓存）
@@ -164,6 +267,22 @@ class DynGraphIgraph(RepresentationGraph):
             return 1
         return weight    
 
+    def _add_edge(self, node1_index: int, node2_index: int) -> None:
+        use_weight = bool(self.graph["weighted"])
+        edge_weight = float(self._add_edge_weight(node2_index)) if use_weight else 1.0
+
+        if self.graph.are_connected(node1_index, node2_index):
+            eid = self.graph.get_eid(node1_index, node2_index)
+            if use_weight:
+                current = float(self.graph.es[eid]["weight"]) if "weight" in self.graph.es[eid].attributes() else 0.0
+                self.graph.es[eid]["weight"] = current + edge_weight
+            return
+
+        if use_weight:
+            self.graph.add_edge(node1_index, node2_index, weight=edge_weight)
+        else:
+            self.graph.add_edge(node1_index, node2_index)
+
     # ------------------------
     # 邻居采样器缓存
     # ------------------------
@@ -180,7 +299,7 @@ class DynGraphIgraph(RepresentationGraph):
         if self.meta_path:
             graph = self.graph
             vs = graph.vs
-            use_w = (self.undirected_weighted or graph.is_directed())
+            use_w = bool(graph["weighted"])
 
             # 每种类型各放一桶
             buckets = defaultdict(lambda: {"neighbors": [], "weights": []})
@@ -216,7 +335,7 @@ class DynGraphIgraph(RepresentationGraph):
 
         else:
             # 无向图也可走加权
-            use_w = self.undirected_weighted or graph.is_directed()
+            use_w = bool(graph["weighted"])
             if not use_w:
                 self.samplers[index] = NodeSampler(neighbors=neighbors, weighted=False, threshold=1000)
             else:
@@ -241,7 +360,7 @@ class DynGraphIgraph(RepresentationGraph):
         instances_index.add(instance_index)
 
         # app_debug.info(f'node name: {ins_value}, node index: {instance_index}')
-        if prefix in self.to_flatten:
+        if self.to_flatten == "all" or prefix in self.to_flatten:
             # 这里将原值展开为 token + n-gram（按 ngram_config）
             # app_debug.info('start flatten')
             for val, pfx in self._emit_tokens_and_ngrams(ins_value, prefix_for_token=prefix):

@@ -1,5 +1,9 @@
 import pandas as pd
 import numpy as np
+import os
+import re
+import secrets
+import string
 try:
     from tqdm import tqdm
 except ModuleNotFoundError:
@@ -7,6 +11,9 @@ except ModuleNotFoundError:
         return iterable
     
 from utils.utils import convert_token_value, data_cleaning
+
+
+_ID_COLUMN_RE = re.compile(r"(^id$|_id$|\.id$)", re.IGNORECASE)
 
 def sequence_generating_m1(df):
     """
@@ -42,13 +49,46 @@ def index_normalization(config, raw_data):
     """
     incremental mode: index and normalization
     * 'rid' should appear in meta_path if it is setted
+    * note: change directly raw_data dataFrame - may be risky
     
     :param config: 
     :param raw_data: pd.DataFrame
     :return: pd.DataFrame
     """
-    # ===== index ===== 
-    raw_data["rid"] = np.char.add("idx__", np.arange(len(raw_data), dtype=np.int64).astype(str))
+    def _random_id(prefix="idx__", length=12):
+        alphabet = string.ascii_letters + string.digits
+        return prefix + "".join(secrets.choice(alphabet) for _ in range(length))
+
+    def _generate_unique_rids(size, prefix="idx__", length=12):
+        seen = set()
+        rids = []
+        while len(rids) < size:
+            rid = _random_id(prefix=prefix, length=length)
+            if rid in seen:
+                continue
+            seen.add(rid)
+            rids.append(rid)
+        return rids
+
+    def _original_id_columns(df):
+        return [col for col in df.columns if col != "rid" and _ID_COLUMN_RE.search(str(col))]
+    
+    # ===== for evaluation =====
+    def _mapping_output_path(cfg):
+        state_cfg = cfg.get("state_management", {}) if isinstance(cfg, dict) else {}
+        save_dir = state_cfg.get("id_mapping-dir", "data/id_mapping")
+        name = state_cfg.get("id_mapping-name") or cfg.get("version_name", "test")
+        os.makedirs(save_dir, exist_ok=True)
+        return os.path.join(save_dir, f"{name}.csv")
+
+    # ===== index =====
+    id_cols = _original_id_columns(raw_data)
+    raw_data["rid"] = _generate_unique_rids(len(raw_data))
+
+    if id_cols:
+        mapping_df = raw_data[["rid"] + id_cols].copy()
+        mapping_df.to_csv(_mapping_output_path(config), index=False)
+
     meta_path = config.get("meta_path", [])
     result = None
     if meta_path:

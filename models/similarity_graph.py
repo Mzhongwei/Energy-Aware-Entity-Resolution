@@ -2,8 +2,6 @@ import os
 from igraph import Graph
 from datetime import datetime
 from utils.utils import *
-from match_gouvernance.match_state import MatchStateRegistry
-state_registry = MatchStateRegistry()
 
 class SimilarityGraph:
     def __init__(self, most_similar_num, output_format):
@@ -78,15 +76,6 @@ class SimilarityGraph:
         g1 = self._find_or_create_group(record)
 
         for other, score in new_similarities:
-
-            # 1) match state version logging
-            state = state_registry.get_or_create(record, other)
-            if len(state.history()) == 0:
-                state.generate(score=score, stage="PM")
-            else:
-                state.update(score=score, stage="CM")
-
-            # 2) UPDATE Similarity graph
             self.group_map.setdefault(other, other)
             g2 = self._find_or_create_group(other)
 
