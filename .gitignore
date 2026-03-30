@@ -5,12 +5,11 @@ logs/
 storage/
 data/
 config/config*
-config/test.yaml
 .DS_Store
 .codex
 # pytest and other test files
 .pytest*
-test*
+tests/
 # Energy Conso Results
 emissions*.csv
 result*.csv
