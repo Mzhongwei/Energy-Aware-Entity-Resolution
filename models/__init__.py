@@ -3,7 +3,6 @@ from .bert_model import (
 )
 from .embedding_model import (
     EmbeddingModel,
-    initialize_embeddings,
 )
 
 from .similarity_graph import SimilarityGraph
@@ -13,7 +12,6 @@ from .representation_graph import RepresentationGraph
 __all__ = [
     "Model",
     "EmbeddingModel",
-    "initialize_embeddings",
     "SimilarityGraph",
     "CGIndex",
     "RepresentationGraph"
