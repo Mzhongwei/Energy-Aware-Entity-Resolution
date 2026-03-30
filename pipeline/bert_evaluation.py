@@ -1,6 +1,7 @@
 from datasets import Dataset, DatasetDict
 import numpy as np
 import evaluate
+import os
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -12,7 +13,8 @@ from .bert_utils import build_compute_metrics, build_tokenize_fn
 
 
 def evaluate_from_saved_model(processed_data, config):
-    save_dir = config.get("save_dir", "data/bert_model")
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    save_dir = os.path.join(BASE_DIR, f"data/bert/{config['version_name']}")
     tokenizer = AutoTokenizer.from_pretrained(save_dir)
     model = AutoModelForSequenceClassification.from_pretrained(save_dir)
 

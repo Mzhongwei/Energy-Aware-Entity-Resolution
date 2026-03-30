@@ -1,4 +1,3 @@
-from llm.data_processing import preparing_training
 from models import Model
 import torch
 import random
@@ -56,6 +55,7 @@ def train_model(configuration, processed_data):
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
+        report_to="none"
     )
 
     trainer = Trainer(
