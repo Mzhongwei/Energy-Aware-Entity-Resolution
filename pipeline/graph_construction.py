@@ -15,6 +15,18 @@ from utils.utils import OUTPUT_FORMAT, TIME_FORMAT, convert_token_value
 app_debug = write_log("logs", "debug", "dynamic_graph")
 
 
+def _graph_config(configuration):
+    if not isinstance(configuration, dict):
+        return {}
+    graph_cfg = configuration.get("graph_construction")
+    if isinstance(graph_cfg, dict):
+        return graph_cfg
+    legacy_cfg = configuration.get("graph")
+    if isinstance(legacy_cfg, dict):
+        return legacy_cfg
+    return {}
+
+
 class DynGraphIgraph(RepresentationGraph):
     def __init__(
         self,
@@ -114,7 +126,8 @@ class DynGraphIgraph(RepresentationGraph):
                     continue
                 if "numeric" not in v.attributes():
                     v["numeric"] = self.node_is_numeric.get(v["type"], False)
-                if "node_class" not in v.attributes() and v["type"] in self.node_classes:
+                node_class = v["node_class"] if "node_class" in v.attributes() else None
+                if (not isinstance(node_class, dict)) and v["type"] in self.node_classes:
                     v["node_class"] = self._update_node_class(v["type"])
         self.samplers = [None] * self.graph.vcount()
         for v in self.graph.vs:
@@ -227,6 +240,14 @@ class DynGraphIgraph(RepresentationGraph):
             
             # 字符 n-gram 可在此扩展（char_n）
         return res
+
+    def _normalize_cell_tokens(self, cell_value, column_name: str) -> Tuple[List[str], bool]:
+        if isinstance(cell_value, list):
+            tokens = [str(el) for el in cell_value if el not in ("", None)]
+            return tokens, False
+        if column_name == "rid":
+            return [str(cell_value)], False
+        return convert_token_value(cell_value)
 
     # ------------------------
     # 采样权重与稀有偏置
@@ -384,12 +405,8 @@ class DynGraphIgraph(RepresentationGraph):
                 values = {}
                 for col in df.columns:
                     if col in self.meta_node:
-                        if col != 'rid':
-                            values.setdefault(col, [])
-                            token_list, _ = convert_token_value(df_row[col])
-                        else:
-                            values.setdefault(col, [])
-                            token_list = [df_row[col]]
+                        values.setdefault(col, [])
+                        token_list, _ = self._normalize_cell_tokens(df_row[col], col)
                         if token_list is not None and len(token_list) > 0:
                             for el in token_list:
                                 index_set = self._update_instance_vertex_edge(el, col)
@@ -410,7 +427,10 @@ class DynGraphIgraph(RepresentationGraph):
                                 self._add_edge(v1, v2)
         else:
             for _, df_row in tqdm(df.iterrows(), total=len(df), desc="# Building/Updating graph"):
-                rid_node = str(df_row['rid'])
+                rid_tokens, _ = self._normalize_cell_tokens(df_row["rid"], "rid")
+                if not rid_tokens:
+                    raise ValueError("Missing rid token during graph construction.")
+                rid_node = rid_tokens[0]
                 rid_index = self._update_node(rid_node, "idx")
                 affected_nodes.add(rid_index)
 
@@ -485,28 +505,30 @@ def dyn_graph_generation(configuration):
     :param configuration: dictionary with all the run parameters
     :return: the generated graph
     """
-    meta_path = configuration['graph']['meta_path']
+    graph_cfg = _graph_config(configuration)
+    meta_path = configuration.get("meta_path", graph_cfg.get("meta_path", []))
     if not meta_path:
-        if configuration['graph']['flatten']:
-            if configuration['graph']['flatten'].lower() not in ['all', 'false', 'no']:
-                flatten = configuration['graph']['flatten'].strip().split(',')
-            elif configuration['graph']['flatten'].lower() == 'false':
+        flatten_cfg = graph_cfg.get("flatten", [])
+        if flatten_cfg:
+            flatten_str = str(flatten_cfg)
+            if flatten_str.lower() not in ['all', 'false', 'no']:
+                flatten = flatten_str.strip().split(',')
+            elif flatten_str.lower() == 'false':
                 flatten = []
             else:
                 flatten = 'all'
         else:
             flatten = []
     else:
-        flatten = configuration['graph']['flatten']
+        flatten = graph_cfg.get("flatten", [])
 
-    print(f"faltten: {configuration['graph']['flatten']}")
+    print(f"faltten: {graph_cfg.get('flatten', [])}")
     t_start = datetime.now()
     print(OUTPUT_FORMAT.format('Starting graph construction', t_start.strftime(TIME_FORMAT)))
 
-    node_types = configuration['graph']['node_types']
-    directed = configuration['graph']['directed']
-    smooth = configuration['graph']['smoothing_method']
-    meta_path = configuration['graph']['meta_path']
+    node_types = graph_cfg.get("node_types", [])
+    directed = graph_cfg.get("directed", False)
+    smooth = graph_cfg.get("smoothing_method")
     # 你的 convert_token_value 可能按空格切词；这里假设它能把字符串拆成 token_list
     g = DynGraphIgraph(
         node_types=node_types,

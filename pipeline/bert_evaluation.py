@@ -48,5 +48,6 @@ def evaluate_from_saved_model(processed_data, config):
     )
 
     results = trainer.evaluate(eval_dataset=dataset["test"])
-    print(results)
+    results['dataset']= config['testset_path']
+    print(f'[RESULT] {results}')
     return results

@@ -1,9 +1,6 @@
 import pandas as pd
 import numpy as np
 import os
-import re
-import secrets
-import string
 try:
     from tqdm import tqdm
 except ModuleNotFoundError:
@@ -11,9 +8,6 @@ except ModuleNotFoundError:
         return iterable
     
 from utils.utils import convert_token_value, data_cleaning
-
-
-_ID_COLUMN_RE = re.compile(r"(^id$|_id$|\.id$)", re.IGNORECASE)
 
 def sequence_generating_m1(df):
     """
@@ -45,7 +39,7 @@ def sequence_generating_m1(df):
 
 
 
-def index_normalization(config, raw_data):
+def index_normalization(config, raw_data, raw_data_path):
     """
     incremental mode: index and normalization
     * 'rid' should appear in meta_path if it is setted
@@ -55,39 +49,40 @@ def index_normalization(config, raw_data):
     :param raw_data: pd.DataFrame
     :return: pd.DataFrame
     """
-    def _random_id(prefix="idx__", length=12):
-        alphabet = string.ascii_letters + string.digits
-        return prefix + "".join(secrets.choice(alphabet) for _ in range(length))
-
-    def _generate_unique_rids(size, prefix="idx__", length=12):
-        seen = set()
-        rids = []
-        while len(rids) < size:
-            rid = _random_id(prefix=prefix, length=length)
-            if rid in seen:
-                continue
-            seen.add(rid)
-            rids.append(rid)
-        return rids
-
-    def _original_id_columns(df):
-        return [col for col in df.columns if col != "rid" and _ID_COLUMN_RE.search(str(col))]
-    
-    # ===== for evaluation =====
-    def _mapping_output_path(cfg):
-        state_cfg = cfg.get("state_management", {}) if isinstance(cfg, dict) else {}
-        save_dir = state_cfg.get("id_mapping-dir", "data/id_mapping")
-        name = state_cfg.get("id_mapping-name") or cfg.get("version_name", "test")
+    def _counter_path():
+        save_dir = os.path.join("data", "ids")
         os.makedirs(save_dir, exist_ok=True)
-        return os.path.join(save_dir, f"{name}.csv")
+        return os.path.join(save_dir, f"{config['version_name']}.txt")
+
+    def _load_counter(counter_path):
+        if not os.path.exists(counter_path):
+            return 0
+        with open(counter_path, "r", encoding="utf-8") as fp:
+            value = fp.read().strip()
+        return int(value) if value else 0
+
+    def _save_counter(counter_path, counter_value):
+        with open(counter_path, "w", encoding="utf-8") as fp:
+            fp.write(str(counter_value))
+
+    def _generate_incremental_rids(size, start_counter, prefix="idx__"):
+        return [f"{prefix}{counter}" for counter in range(start_counter, start_counter + size)]
 
     # ===== index =====
-    id_cols = _original_id_columns(raw_data)
-    raw_data["rid"] = _generate_unique_rids(len(raw_data))
+    if raw_data is None:
+        raw_data = pd.read_csv(raw_data_path)
+    else:
+        raw_data = raw_data.copy()
 
-    if id_cols:
-        mapping_df = raw_data[["rid"] + id_cols].copy()
-        mapping_df.to_csv(_mapping_output_path(config), index=False)
+    counter_path = _counter_path()
+    current_counter = _load_counter(counter_path)
+    #start from 0
+    print(f'current counter{current_counter}, raw data len {len(raw_data)}')
+    raw_data["rid"] = _generate_incremental_rids(len(raw_data), current_counter)
+    _save_counter(counter_path, current_counter + len(raw_data))
+
+    if "rid" not in raw_data.columns:
+        raise ValueError("Failed to generate 'rid' column during normalization.")
 
     meta_path = config.get("meta_path", [])
     result = None

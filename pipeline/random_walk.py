@@ -9,6 +9,32 @@ app_debug = write_log("logs", "debug", "random_walk")
 walk_info = write_log("logs", "walks", "random_walk_record")
 
 
+def _random_walk_config(configuration):
+    if not isinstance(configuration, dict):
+        return {}
+    walk_cfg = configuration.get("random_walk")
+    if isinstance(walk_cfg, dict):
+        return walk_cfg
+    legacy_cfg = configuration.get("walks")
+    if isinstance(legacy_cfg, dict):
+        return legacy_cfg
+    return {}
+
+
+def _graph_meta_path(configuration):
+    if not isinstance(configuration, dict):
+        return []
+    if "meta_path" in configuration:
+        return configuration.get("meta_path", [])
+    graph_cfg = configuration.get("graph_construction")
+    if isinstance(graph_cfg, dict) and "meta_path" in graph_cfg:
+        return graph_cfg.get("meta_path", [])
+    legacy_cfg = configuration.get("graph")
+    if isinstance(legacy_cfg, dict):
+        return legacy_cfg.get("meta_path", [])
+    return []
+
+
 class RamdomRow:
     def __init__(self, graph, row_id_index, sentence_len):
         i_graph = graph.get_graph()
@@ -223,11 +249,13 @@ def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_
     return sentences
 
 
-def dynrandom_walks_generation(configuration, graph, walk_nums):
-    walk_length = int(configuration["walks"]["walk_length"])
-    backtrack = configuration["walks"]["backtrack"]
-    meta_path = configuration["graph"]["meta_path"]
-    write_walks = configuration["walks"]["write_walks"]
+def dynrandom_walks_generation(configuration, graph):
+    walk_cfg = _random_walk_config(configuration)
+    walk_nums = int(walk_cfg.get("walks_number", 0))
+    walk_length = int(walk_cfg.get("walk_length", 60))
+    backtrack = walk_cfg.get("backtrack", False)
+    meta_path = _graph_meta_path(configuration)
+    write_walks = walk_cfg.get("write_walks", True)
 
     sentences = []
     if walk_nums > 0:

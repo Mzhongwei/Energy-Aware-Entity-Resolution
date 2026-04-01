@@ -33,6 +33,32 @@ def _graph_manifest_path(state_config, config):
     os.makedirs(graph_dir, exist_ok=True)
     return os.path.join(graph_dir, f"{graph_name}.manifest.json")
 
+
+def _graph_config(config):
+    if not isinstance(config, dict):
+        return {}
+    graph_cfg = config.get("graph_construction")
+    if isinstance(graph_cfg, dict):
+        return graph_cfg
+    legacy_cfg = config.get("graph")
+    if isinstance(legacy_cfg, dict):
+        return legacy_cfg
+    return {}
+
+
+def _clean_graph_copy(graph):
+    graph_copy = graph.copy()
+    allowed_types = (str, int, float, bool)
+    for v in graph_copy.vs:
+        for attr in list(v.attributes()):
+            if not isinstance(v[attr], allowed_types):
+                del v[attr]
+    for e in graph_copy.es:
+        for attr in list(e.attributes()):
+            if not isinstance(e[attr], allowed_types):
+                del e[attr]
+    return graph_copy
+
 class StateManager:
 
     def __init__(self):
@@ -60,11 +86,12 @@ class StateManager:
             graph_path = _artifact_path("graph-dir", "graph-name", "data/graph", ".graphml", state_config, config)
             graph = self.cache["representation_graph"]
             if isinstance(graph, RepresentationGraph):
-                graph_save = graph.clean_attributes()
+                graph_save = _clean_graph_copy(graph.graph)
                 graph_save.write_graphml(graph_path)
                 graph_manifest = {
                     "graph_class": type(graph).__name__,
-                    "graph_config": config.get("graph", {}),
+                    "graph_config": _graph_config(config),
+                    "meta_path": config.get("meta_path", []),
                 }
                 with open(_graph_manifest_path(state_config, config), "w", encoding="utf-8") as f:
                     json.dump(graph_manifest, f, ensure_ascii=False, indent=2)
@@ -97,7 +124,7 @@ class StateManager:
             if predicted is not None:
                 if isinstance(predicted, SimilarityGraph):
                     pred_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".graphml", state_config, config)
-                    predicted_save = predicted.graph.clean_attributes()
+                    predicted_save = _clean_graph_copy(predicted.graph)
                     predicted_save.write_graphml(pred_path)
                 else:
                     pred_path = _artifact_path("predicted_match-dir", "predicted_match-name", "data/predicted", ".txt", state_config, config)
@@ -125,9 +152,11 @@ class StateManager:
                     with open(manifest_path, "r", encoding="utf-8") as f:
                         graph_manifest = json.load(f)
                     graph_cfg = graph_manifest.get("graph_config")
+                    manifest_meta_path = graph_manifest.get("meta_path", config.get("meta_path", []))
                     if isinstance(graph_cfg, dict):
                         merged_config = dict(config)
-                        merged_config["graph"] = graph_cfg
+                        merged_config["graph_construction"] = graph_cfg
+                        merged_config["meta_path"] = manifest_meta_path
                     else:
                         merged_config = config
                 except Exception:

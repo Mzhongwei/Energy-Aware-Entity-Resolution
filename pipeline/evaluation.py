@@ -1,5 +1,3 @@
-import csv
-import os
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -7,6 +5,13 @@ from igraph import Graph
 
 
 Pair = Tuple[str, str]
+
+
+def _normalize_rid(rid: str) -> str:
+    rid = rid.strip()
+    if rid.startswith("idx_") and not rid.startswith("idx__"):
+        return rid.replace("idx_", "idx__", 1)
+    return rid
 
 
 def _get_ground_truth(ground_truth_file: str) -> Dict[str, List[str]]:
@@ -17,17 +22,12 @@ def _get_ground_truth(ground_truth_file: str) -> Dict[str, List[str]]:
             if not line:
                 continue
             left, right = [part.strip() for part in line.split(",", 1)]
+            left = _normalize_rid(left)
+            right = _normalize_rid(right)
             matches.setdefault(left, []).append(right)
     if not matches:
         raise IOError("Matches file is empty.")
     return matches
-
-
-def _get_id_mapping_path(configuration: dict) -> str:
-    state_cfg = configuration.get("state_management", {}) if isinstance(configuration, dict) else {}
-    save_dir = state_cfg.get("id_mapping-dir", "data/id_mapping")
-    name = state_cfg.get("id_mapping-name") or configuration.get("version_name", "test")
-    return os.path.join(save_dir, f"{name}.csv")
 
 
 def _get_similarity_file(configuration: dict) -> str:
@@ -38,55 +38,19 @@ def _get_similarity_file(configuration: dict) -> str:
     name = state_cfg.get("predicted_match-name") or configuration.get("version_name", "test")
     output_format = configuration.get("output_format", "graphml")
     ext = ".graphml" if output_format == "graphml" else ".txt"
-    return os.path.join(save_dir, f"{name}{ext}")
+    return str(Path(save_dir) / f"{name}{ext}")
 
 
-def _load_id_mapping(mapping_file: str) -> Tuple[Dict[str, str], Dict[str, str]]:
-    if not Path(mapping_file).exists():
-        raise FileNotFoundError(f"Mapping file not found: {mapping_file}")
-
-    original_to_rid: Dict[str, str] = {}
-    rid_to_original: Dict[str, str] = {}
-    with open(mapping_file, "r", encoding="utf-8") as fp:
-        reader = csv.DictReader(fp)
-        if "rid" not in (reader.fieldnames or []):
-            raise ValueError("Mapping file must contain a 'rid' column.")
-
-        original_cols = [col for col in (reader.fieldnames or []) if col != "rid"]
-        if not original_cols:
-            raise ValueError("Mapping file must contain at least one original id column besides 'rid'.")
-
-        for row in reader:
-            rid = str(row["rid"]).strip()
-            if not rid:
-                continue
-            for col in original_cols:
-                original_id = str(row[col]).strip()
-                if not original_id:
-                    continue
-                if original_id in original_to_rid and original_to_rid[original_id] != rid:
-                    raise ValueError(f"Original id {original_id} maps to multiple rids.")
-                original_to_rid[original_id] = rid
-                rid_to_original.setdefault(rid, original_id)
-    return original_to_rid, rid_to_original
-
-
-def _ground_truth_pairs_with_mapping(ground_truth_file: str, original_to_rid: Dict[str, str]) -> Tuple[Set[Pair], Set[str]]:
+def _ground_truth_pairs(ground_truth_file: str) -> Tuple[Set[Pair], Set[str]]:
     matches = _get_ground_truth(ground_truth_file)
     pair_set: Set[Pair] = set()
     left_target_rids: Set[str] = set()
 
-    for left_original, right_originals in matches.items():
-        if left_original not in original_to_rid:
-            raise ValueError(f"Ground truth left id not found in mapping: {left_original}")
-        left_rid = original_to_rid[left_original]
+    for left_rid, right_rids in matches.items():
         left_target_rids.add(left_rid)
-
-        for right_original in right_originals:
-            if right_original not in original_to_rid:
-                raise ValueError(f"Ground truth right id not found in mapping: {right_original}")
-            right_rid = original_to_rid[right_original]
-            pair_set.add((left_rid, right_rid))
+        for right_rid in right_rids:
+            if left_rid != right_rid:
+                pair_set.add((left_rid, right_rid))
 
     return pair_set, left_target_rids
 
@@ -132,15 +96,15 @@ def _compute_metrics(predicted_pairs: Set[Pair], actual_pairs: Set[Pair]) -> Dic
 
 
 def compare_ground_truth(configuration: dict) -> Dict[str, Dict[str, float]]:
-    ground_truth_file = configuration["match_file"]
+    ground_truth_file = configuration.get("match_file") or configuration.get("ground_truth")
+    if not ground_truth_file:
+        raise ValueError("Evaluation requires 'match_file' or 'ground_truth' in the configuration.")
     similarity_file = _get_similarity_file(configuration)
     output_format = configuration.get("output_format", "graphml")
     if output_format != "graphml":
         raise ValueError("Current evaluation implementation supports graphml output only.")
 
-    mapping_file = configuration.get("mapping_file") or _get_id_mapping_path(configuration)
-    original_to_rid, _ = _load_id_mapping(mapping_file)
-    actual_pairs, left_target_rids = _ground_truth_pairs_with_mapping(ground_truth_file, original_to_rid)
+    actual_pairs, left_target_rids = _ground_truth_pairs(ground_truth_file)
     predicted_pairs = _predicted_pairs_from_graphml(similarity_file)
 
     all_metrics = _compute_metrics(predicted_pairs, actual_pairs)
@@ -148,6 +112,8 @@ def compare_ground_truth(configuration: dict) -> Dict[str, Dict[str, float]]:
     predicted_pairs_left_only = {pair for pair in predicted_pairs if pair[0] in left_target_rids}
     actual_pairs_left_only = {pair for pair in actual_pairs if pair[0] in left_target_rids}
     left_only_metrics = _compute_metrics(predicted_pairs_left_only, actual_pairs_left_only)
+
+    print(f'[Result] all_mutual_top1: {all_metrics}, left_target_only: {left_only_metrics}')
 
     return {
         "all_mutual_top1": all_metrics,

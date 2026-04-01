@@ -2,6 +2,10 @@ import argparse
 import json
 import os
 import argparse
+import shlex
+import signal
+import subprocess
+import time
 from typing import Any
 from pandas import DataFrame
 from ruamel.yaml import YAML
@@ -19,17 +23,32 @@ from pipeline import (
     train_embeddings,
     compute_features,
 )
-from pipeline.candidate_enumeration import enumerate_candidates
-from pipeline.calculating_similarity import score_candidate_pairs
+from pipeline.candidate_enumeration import enumerate_candidates, fetch_candidates
+from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
 from pipeline.decision_making import decide_matches
 from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
 from utils.write_log import write_log
 
+ACTIVE_JAVA_PROC = None
+ACTIVE_CONSUMER = None
+
 # =========================
 # endpoints
 # =========================
+
+def _config_section(config: dict, primary_key: str, legacy_key: str | None = None) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    section = config.get(primary_key)
+    if isinstance(section, dict):
+        return section
+    if legacy_key:
+        legacy_section = config.get(legacy_key)
+        if isinstance(legacy_section, dict):
+            return legacy_section
+    return {}
 
 def normalization(config: dict, raw_data: dict | DataFrame):
     print("[normalization]")
@@ -43,15 +62,14 @@ def normalization(config: dict, raw_data: dict | DataFrame):
         #         "adress": ["d ? rue", "yes addre", "ad . r"]
         #     }
         # )
-
-        index_normalization(config, raw_data)
+        raw_data_path = config.get("data_source_A")
+        processed_data = index_normalization(config, raw_data, raw_data_path)
     else:
         # for bert mode, we do not need to index the records. We normalize records values and generate directly the appropriate df structure 
         for k, df in raw_data.items():
             if isinstance(df, pd.DataFrame) and not df.empty:
                 raw_data[k] = sequence_generating_m1(df)
-
-    processed_data = raw_data
+        processed_data = raw_data
     return processed_data
 
 def graph_construction(config, processed_data, state_manager: StateManager):
@@ -71,8 +89,7 @@ def random_walk(config, state_manager: StateManager):
     graph = state_manager.get("representation_graph")
     print("[random_walk]")
     if hasattr(graph, "get_graph") and hasattr(graph, "dyn_roots"):
-        walks_number = int(config.get("walks", {}).get("walks_number", 0))
-        return dynrandom_walks_generation(config, graph, walk_nums=walks_number)
+        return dynrandom_walks_generation(config, graph)
     return "sequences"
 
 
@@ -92,38 +109,52 @@ def bert_training(config, processed_data, state_manager: StateManager):
 
 
 def cg_feature_extraction(config, processed_data):
-    print("[cg_feature_extraction]")
-    if isinstance(processed_data, pd.DataFrame):
-        method = config.get("candidate_generation", {}).get("method", "fullindexing")
-        return compute_features(processed_data, method, config)
+    if config.get("candidate_generation", {}).get("status", True):
+        print("[cg_feature_extraction]")
+        if isinstance(processed_data, pd.DataFrame):
+            method = config.get("candidate_generation", {}).get("method", "fullindexing")
+            return compute_features(processed_data, method, config)
+        else:
+            print('error')
     else:
-        print('error')
+        print("[cg_feature_extraction] skip")
     return None
 
 
 def feature_index_construction(config, cg_feature, state_manager: StateManager):
-    print("[feature_index_construction]")
-    if not isinstance(cg_feature, list):
-        raise ValueError("cg_feature must be a feature list.")
+    if config.get("candidate_generation", {}).get("status", True):
+        print("[feature_index_construction]")
+        if not isinstance(cg_feature, list):
+            raise ValueError("cg_feature must be a feature list.")
 
-    index = state_manager.get("cg_feature_index")
-    if index is None:
-        raise ValueError("cg_feature_index must be initialized before feature_index_construction.")
-    if not hasattr(index, "build"):
-        raise ValueError("cg_feature_index must be a CGIndex instance.")
+        index = state_manager.get("cg_feature_index")
+        if index is None:
+            raise ValueError("cg_feature_index must be initialized before feature_index_construction.")
+        if not hasattr(index, "build"):
+            raise ValueError("cg_feature_index must be a CGIndex instance.")
 
-    build_cg_index(cg_feature, index)
-    state_manager.update("cg_feature_index", index)
+        build_cg_index(cg_feature, index)
+        state_manager.update("cg_feature_index", index)
+    else:
+        print("[feature_index_construction] skip")
     return None
 
 
 def candidate_enumeration(config, cg_feature, state_manager: StateManager):
-    print("[candidate_enumeration]")
-    index = state_manager.get("cg_feature_index")
-    if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
-        return enumerate_candidates(cg_feature, index)
+    if config.get("candidate_generation", {}).get("status", True):
+        print("[candidate_enumeration]")
+        index = state_manager.get("cg_feature_index")
+        if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
+            return enumerate_candidates(cg_feature, index)
+        else:
+            print("error")
     else:
-        print("error")
+        data_pairs_file = config.get("candidate_generation", {}).get("data_pairs_fixed", "")
+        if data_pairs_file:
+            print(f"[candidate_enumeration] fetch from file {data_pairs_file}")
+            return fetch_candidates(data_pairs_file)
+        else:
+            print(f"error: [candidate_enumeration] fetch from file {data_pairs_file}, file not found")
     return None
 
 def calculating_similarity(config, candidate_pairs, state_manager: StateManager):
@@ -131,15 +162,24 @@ def calculating_similarity(config, candidate_pairs, state_manager: StateManager)
     embedding_model = state_manager.get("embedding_model")
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized before calculating_similarity.")
-    sim_cfg = config.get("similarity", {})
+    sim_cfg = _config_section(config, "calculating_similarity", "similarity")
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
-    return score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
+    return score_mutual_top1_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
 
 
-def decision_making(config, matching_pairs, state_manager: StateManager):
+def decision_making(config, mutualtop_pairs, state_manager: StateManager):
     print("[decision_making]")
-    output_format = config.get("similarity", {}).get("output_format", "graphml")
-    predicted_matching = decide_matches(matching_pairs, output_format=output_format)
+    decision_cfg = _config_section(config, "decision_making", "similarity")
+    output_format = decision_cfg.get("output_format", config.get("output_format", "graphml"))
+    previous_pairs = state_manager.get("mutualtop_pairs")
+    embedding_model = state_manager.get("embedding_model")
+    final_pairs, predicted_matching = decide_matches(
+        mutualtop_pairs,
+        previous_pairs=previous_pairs,
+        model=embedding_model,
+        output_format=output_format,
+    )
+    state_manager.update("mutualtop_pairs", final_pairs)
     state_manager.update("predicted_matching", predicted_matching)
     return None
 
@@ -158,7 +198,7 @@ def evaluation(config, state_manager: StateManager):
     return None
 
 def bert_evaluation(config, processed_data, state_manager: StateManager):
-    print("[evaluation]")
+    print("[bert evaluation]")
     result = evaluate_from_saved_model(processed_data, config)
     state_manager.update("evaluation_result", result)
     return None
@@ -220,12 +260,12 @@ TASKS = {
     "calculating_similarity": {
         "deps": ["candidate_enumeration"],
         "input": ["candidate_pairs", "state_manager"],
-        "output": ["matching_pairs"],
+        "output": ["mutualtop_pairs"],
         "func": calculating_similarity
     },
     "decision_making": {
         "deps": ["calculating_similarity"],
-        "input": ["matching_pairs", "state_manager"],
+        "input": ["mutualtop_pairs", "state_manager"],
         "output": [],
         "func": decision_making
     },
@@ -369,7 +409,48 @@ def kafka_driver(config):
         return
     return consumer
 
+
+def _stop_process_group(proc, interrupt_first=False, wait_seconds=5):
+    if proc is None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+
+    signals = []
+    if interrupt_first:
+        signals.append(signal.SIGINT)
+    signals.extend([signal.SIGTERM, signal.SIGKILL])
+
+    for sig in signals:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+
+        try:
+            proc.wait(timeout=wait_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _handle_sigint(signum, frame):
+    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
+    print("\n[INFO] Ctrl+C received. Terminating Python and Java processes now.")
+    if ACTIVE_CONSUMER is not None:
+        try:
+            ACTIVE_CONSUMER.close()
+        except Exception:
+            pass
+        ACTIVE_CONSUMER = None
+    _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
+    ACTIVE_JAVA_PROC = None
+    raise SystemExit(130)
+
 def driver(config):
+    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
     mode = config["mode"].split("-")
     state = StateManager()
     data_store = {
@@ -408,43 +489,75 @@ def driver(config):
             if not data_store['state_manager'].cache:
                 data_store['state_manager'].load(config, stages)
             # start kafka
-            poll_timeout = 500
-            max_empty_polls = 500
+            poll_timeout = 5
+            max_empty_polls = 5
             empty_poll_count = 0
+
             consumer = kafka_driver(config)
 
-            data_buffer = []
-            while True:
-                
-                msg = consumer.poll(poll_timeout)  # Non-blocking batch pull
-                
+            java_path = config["simulator_path"]
+            spring_args = shlex.join([
+                f"--csv.file.path={config.get('data_source_B', '')}",
+                f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}"
+            ])
+            java_proc = subprocess.Popen(
+                ["mvn", f"-Dspring-boot.run.arguments={spring_args}", "spring-boot:run"],
+                cwd=java_path,
+                start_new_session=True
+            )
+            ACTIVE_JAVA_PROC = java_proc
 
-                if msg is None:  # no new message
-                    empty_poll_count += 1
-                    if empty_poll_count >= max_empty_polls:
-                        print("[INFO] No new messages for a while. Exiting consumer loop.")
-                        if data_buffer:
-                            data_store['raw_data'] = data_buffer
-                            data_store = run_pipeline(config, sub_tasks, data_store)
-                        break
-                    continue
-                if msg.error():
-                    if msg.error().code() == KafkaError._PARTITION_EOF:
-                        # end of partition
+            ACTIVE_CONSUMER = consumer
+            previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+            data_buffer = []
+            try:
+                signal.signal(signal.SIGINT, _handle_sigint)
+                while True:
+                    msg = consumer.poll(poll_timeout)  # Non-blocking batch pull
+
+                    # no new message
+                    if msg is None:  
+                        empty_poll_count += 1
+                        print(f'# empty poll count: {empty_poll_count}')
+                        if empty_poll_count >= max_empty_polls:
+                            print("[INFO] No new messages for a while. Exiting consumer loop.")
+                            if data_buffer:
+                                data_store['raw_data'] = pd.DataFrame(data_buffer)
+                                data_store = run_pipeline(config, sub_tasks, data_store)
+                                state_manager = data_store['state_manager']
+                                state_manager.save(config, stages)
+                            break
                         continue
-                    else:
-                        raise KafkaException(msg.error())
-                empty_poll_count = 0  # reset counter
-                
-                # get message
-                metadata = json.loads(msg.value().decode('utf-8'))
-                data_buffer.append(metadata)
-                if len(data_buffer) >= config["kafka"]["window_count"]:
-                    data_store['raw_data'] = data_buffer
-                    data_store = run_pipeline(config, sub_tasks, data_store)
-                    data_buffer = []
-            state_manager = data_store['state_manager']
-            state_manager.save(config, stages)
+                    if msg.error():
+                        if msg.error().code() == KafkaError._PARTITION_EOF:
+                            # end of partition
+                            continue
+                        else:
+                            raise KafkaException(msg.error())
+                    
+                    # new message
+                    empty_poll_count = 0  # reset counter
+                    # get message
+                    metadata = json.loads(msg.value().decode('utf-8'))
+                    data_buffer.append(metadata)
+                    if len(data_buffer) >= config["kafka"]["window_count"]:
+                        data_store['raw_data'] = pd.DataFrame(data_buffer)
+                        data_store = run_pipeline(config, sub_tasks, data_store)
+                        data_buffer = []
+                state_manager = data_store['state_manager']
+                state_manager.save(config, stages)
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint_handler)
+                if ACTIVE_CONSUMER is not None:
+                    try:
+                        ACTIVE_CONSUMER.close()
+                    except Exception:
+                        pass
+                    ACTIVE_CONSUMER = None
+                _stop_process_group(java_proc, interrupt_first=True)
+                ACTIVE_JAVA_PROC = None
+
         if "evaluation" in mode:
             
             stages = ["evaluation"]
@@ -530,7 +643,6 @@ if __name__ == '__main__':
     os.makedirs('tmp/', exist_ok=True)
     os.makedirs('logs/', exist_ok=True)
     os.makedirs('data/', exist_ok=True)
-    os.makedirs('storage/', exist_ok=True)
 
     print('#' * 46)
     print(f'###  Energy-Aware Energy Resolution System ###')

@@ -5,8 +5,20 @@ from typing import Iterable, List, Optional, Sequence
 from models import EmbeddingModel
 
 
+def _embedding_config(config) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    emb_cfg = config.get("embeddings_training")
+    if isinstance(emb_cfg, dict):
+        return emb_cfg
+    legacy_cfg = config.get("embeddings")
+    if isinstance(legacy_cfg, dict):
+        return legacy_cfg
+    return {}
+
+
 def initialize_embeddings(config) -> EmbeddingModel:
-    emb_cfg = config.get("embeddings", {}) if isinstance(config, dict) else {}
+    emb_cfg = _embedding_config(config)
     return EmbeddingModel(
         dimensions=int(emb_cfg.get("n_dimensions", 300)),
         window_size=int(emb_cfg.get("window_size", 3)),
@@ -20,10 +32,10 @@ def initialize_embeddings(config) -> EmbeddingModel:
 
 
 def retrain_embeddings(config, model: Optional[EmbeddingModel], sequences) -> EmbeddingModel:
-    if model is None:
+    if (model is None) or (not model):
         model = initialize_embeddings(config)
 
-    emb_cfg = config.get("embeddings", {}) if isinstance(config, dict) else {}
+    emb_cfg = _embedding_config(config)
     train_epochs = int(emb_cfg.get("inc_epochs", emb_cfg.get("epochs", getattr(model, "epochs", 5))))
 
     if len(model.wv.key_to_index) == 0:

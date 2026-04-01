@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -50,6 +51,19 @@ def _rid_to_str(value: Any) -> str:
         raise ValueError(f"Invalid rid value: {value!r}")
     if value is None:
         raise ValueError("rid cannot be None")
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            raise ValueError(f"rid must contain exactly one value, got: {value!r}")
+        value = value[0]
+    elif isinstance(value, str):
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            parsed = value
+        if isinstance(parsed, (list, tuple)):
+            if len(parsed) != 1:
+                raise ValueError(f"rid must contain exactly one value, got: {value!r}")
+            value = parsed[0]
     rid = str(value).strip()
     if not rid:
         raise ValueError("rid cannot be empty")

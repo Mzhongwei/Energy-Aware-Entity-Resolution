@@ -1,4 +1,4 @@
-mode: "bert-training-b_evaluation"
+mode: "embedding-training-inference-evaluation"
 version_name: "test"
 
 # bert mode, source data
@@ -7,14 +7,29 @@ testset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_
 evalset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/valid.csv"
 
 # incremental mode
-# meta_path: list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
-meta_path: ["name", "rid"]
+data_source_A: "/home/zhongwei/Data_integration/energy_aware_er/Data_example/fodors_zagats-tableA.csv"
+data_source_B: "/home/zhongwei/Data_integration/energy_aware_er/Data_example/fodors_zagats-tableB.csv"
+ground_truth: "/home/zhongwei/Data_integration/energy_aware_er/Data_example/fodors_zagats-matches.txt"
+simulator_path: "/home/zhongwei/Data_integration/dataStreamSimulator"
+kafka:
+  topicid: "entity_resolution_process"
+  groupid: "er_group"
+  bootstrap_servers: "localhost"
+  port: 9092
+
+  # sliding window strategy
+  window_strategy: "count"       # "count" or "time"
+  window_count: 26               # used if strategy is "count"
+  update_frequency: 0            # 0 = tumbling window, otherwise stride size
+
+## meta_path:list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
+# meta_path: ["name", "rid"]
 
 # STATE MANAGEMENT
 state_management:
 # bert mode
   bert-dir: "data/bert"
-# incremental mode
+# incremental mode. if execute several config files successively, the embedding_model-name (or version name) can not be the same
   graph-dir: "data/graph"
   graph-name: ""
   embedding-dir: "data/embedding"
@@ -27,23 +42,48 @@ state_management:
 # pipeline
 normalization:
 
+candidate_generation:
+  status: True
+  method: "fullindexing"
+  data_pairs_fixed: ""
+
 graph_construction:
+  # node types explained in README
+  node_types:
+    - "5#__tn"                   # numerical instance
+    - "5$__tt"                   # textual instance 
+    - "5$__st"                   # instence after tokenization
+    - "3$__idx"
+    - "1$__cid"
+  flatten: "tt"                  # split prefix for nodes
+  smoothing_method: "no"         # smooth method: log/no
+  directed: false                # whether the graph is directed
 
 random_walk:
+  write_walks: true
+  walk_length: 60                # step size
+  walks_number: 20               # number of sentences per root
+  backtrack: false               # whether to allow return to previous node
+  rw_stat: false                 # statistical result of random walk
 
-embedding_training:
-
-bert_training:
-
-cg_feature_extraction:
-
-feature_index_construction:
-
-candidate_enumeration:
-
+embeddings_training:
+  learning_method: "skipgram"    # skipgram / CBOW
+  window_size: 3
+  n_dimensions: 128
+  training_algorithm: "word2vec" # word2vec / fasttext
+  sampling_factor: 0.001
+  
 calculating_similarity:
 
 decision_making:
+  top_k: 10                      # top K most similar entries to keep
+  simlist_n: 10                  # how many records to evaluate similarity for
+  simlist_show: 5                # how many to print/show
+  strategy_suppl: "basic"        # similarity algorithm: basic / faiss
+  sim_structure: "graph"         # list / graph
+  output_format: "graphml"            # db / json / parquet / graphml
+
+bert_training:
 
 bert_inference:
 

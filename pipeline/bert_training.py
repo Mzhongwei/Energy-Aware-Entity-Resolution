@@ -15,7 +15,6 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
-
 def train_model(configuration, processed_data):
     """
     Docstring for train_model
@@ -55,7 +54,7 @@ def train_model(configuration, processed_data):
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        report_to="none"
+        report_to="none"   # delete this line if carboncode
     )
 
     trainer = Trainer(
