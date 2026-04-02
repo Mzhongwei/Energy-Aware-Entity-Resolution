@@ -10,6 +10,33 @@ listener_port = 8080
 manager_service = "manager-service"
 
 # =========================
+# Payload Serialization/Deserialization
+# =========================
+
+def serialize_for_json(obj):
+    """Convert non-JSON-serializable objects to JSON-safe format."""
+    if isinstance(obj, pd.DataFrame):
+        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    else:
+        return obj
+
+def deserialize_from_json(obj):
+    """Reconstruct non-JSON-serializable objects from JSON-safe format."""
+    if isinstance(obj, dict):
+        if obj.get("__dataframe__"):
+            return pd.DataFrame(obj.get("data", []))
+        else:
+            return {k: deserialize_from_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [deserialize_from_json(item) for item in obj]
+    else:
+        return obj
+
+# =========================
 # endpoints
 # =========================
 
@@ -75,20 +102,25 @@ def listener():
                 task = request.get("task", "")
                 print(f"Function to execute: {task}")
 
-                output = function_dispatcher(task, **request.get("inputs", {}))
+                # Deserialize inputs
+                inputs = deserialize_from_json(request.get("inputs", {}))
+                output = function_dispatcher(task, config=request.get("config"), **inputs)
 
                 callback = request.get("callback") or {}
                 callback_host = callback.get("host")
                 callback_port = callback.get("port")
 
                 if callback_host and callback_port:
+                    # Serialize output before sending
+                    serialized_output = serialize_for_json(output) if output is not None else None
                     response = {
                         "protocol_version": "2.0",
                         "task": task,
-                        "status": "ok" if output else "error",
-                        "result": output if output else f"Function '{task}' not found",
+                        "status": "ok" if output is not None else "error",
+                        "result": serialized_output if output is not None else f"Function '{task}' not found",
                     }
                     send(json.dumps(response), callback_host, int(callback_port))
+                    print(f"Sent response to callback at {callback_host}:{callback_port}")
                 else:
                     print("No callback provided; skipping response send.")
 
@@ -98,17 +130,20 @@ def listener():
                 print(f"Listener error: {e}")
 
 def send(payload, service, port):
-    with socket.create_connection((service, port), timeout=5) as sock:
-        data = (payload + "\n").encode("utf-8")
-        sock.sendall(data)
+    try:
+        with socket.create_connection((service, port), timeout=5) as sock:
+            data = (payload + "\n").encode("utf-8")
+            sock.sendall(data)
+    except Exception as e:
+        print(f"Error sending callback to {service}:{port}: {e}")
 
-def function_dispatcher(function_name: str, **kwargs):
+def function_dispatcher(function_name: str, config, **kwargs):
     function_map = {
         "normalization": normalization,
     }
     func = function_map.get(function_name)
     if func is not None:
-        return func(**kwargs)
+        return func(config=config, **kwargs)
     else:
         print(f"Function {function_name} not found in dispatcher.")
         return ""

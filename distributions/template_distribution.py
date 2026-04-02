@@ -22,9 +22,36 @@ from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
 from utils.write_log import write_log
 
-listener_host = "localhost"
+listener_host = "0.0.0.0"
 listener_port = 8080
 manager_service = "manager-service"
+
+# =========================
+# Payload Serialization/Deserialization
+# =========================
+
+def serialize_for_json(obj):
+    """Convert non-JSON-serializable objects to JSON-safe format."""
+    if isinstance(obj, pd.DataFrame):
+        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    else:
+        return obj
+
+def deserialize_from_json(obj):
+    """Reconstruct non-JSON-serializable objects from JSON-safe format."""
+    if isinstance(obj, dict):
+        if obj.get("__dataframe__"):
+            return pd.DataFrame(obj.get("data", []))
+        else:
+            return {k: deserialize_from_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [deserialize_from_json(item) for item in obj]
+    else:
+        return obj
 
 # =========================
 # endpoints
@@ -53,7 +80,9 @@ def normalization(config: dict, raw_data: dict | DataFrame):
     processed_data = raw_data
     return processed_data
 
-def graph_construction(config, processed_data, state_manager: StateManager):
+def graph_construction(config, processed_data, state_manager: StateManager = None):
+    if not state_manager:
+        return None
     graph = state_manager.get("representation_graph")
 
     if not isinstance(processed_data, pd.DataFrame):
@@ -66,7 +95,9 @@ def graph_construction(config, processed_data, state_manager: StateManager):
     return None
 
 
-def random_walk(config, state_manager: StateManager):
+def random_walk(config, state_manager: StateManager = None):
+    if not state_manager:
+        return None
     graph = state_manager.get("representation_graph")
     print("[random_walk]")
     if hasattr(graph, "get_graph") and hasattr(graph, "dyn_roots"):
@@ -75,18 +106,21 @@ def random_walk(config, state_manager: StateManager):
     return "sequences"
 
 
-def embedding_training(config, sequences, state_manager: StateManager):
+def embedding_training(config, sequences, state_manager: StateManager = None):
     print("[embedding_training]")
+    if not state_manager:
+        return None
     model = state_manager.get("embedding_model")
     model = train_embeddings(config, model, sequences)
     state_manager.update("embedding_model", model)
     return None
 
 
-def bert_training(config, processed_data, state_manager: StateManager):
+def bert_training(config, processed_data, state_manager: StateManager = None):
     print("[bert_training]")
     trainer, tokenizer = train_model(config, processed_data)
-    state_manager.update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
+    if state_manager:
+        state_manager.update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
     return None
 
 
@@ -100,8 +134,10 @@ def cg_feature_extraction(config, processed_data):
     return None
 
 
-def feature_index_construction(config, cg_feature, state_manager: StateManager):
+def feature_index_construction(config, cg_feature, state_manager: StateManager = None):
     print("[feature_index_construction]")
+    if not state_manager:
+        return None
     if not isinstance(cg_feature, list):
         raise ValueError("cg_feature must be a feature list.")
 
@@ -116,8 +152,10 @@ def feature_index_construction(config, cg_feature, state_manager: StateManager):
     return None
 
 
-def candidate_enumeration(config, cg_feature, state_manager: StateManager):
+def candidate_enumeration(config, cg_feature, state_manager: StateManager = None):
     print("[candidate_enumeration]")
+    if not state_manager:
+        return None
     index = state_manager.get("cg_feature_index")
     if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
         return enumerate_candidates(cg_feature, index)
@@ -125,8 +163,10 @@ def candidate_enumeration(config, cg_feature, state_manager: StateManager):
         print("error")
     return None
 
-def calculating_similarity(config, candidate_pairs, state_manager: StateManager):
+def calculating_similarity(config, candidate_pairs, state_manager: StateManager = None):
     print("[calculating_similarity]")
+    if not state_manager:
+        return None
     embedding_model = state_manager.get("embedding_model")
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized before calculating_similarity.")
@@ -135,31 +175,35 @@ def calculating_similarity(config, candidate_pairs, state_manager: StateManager)
     return score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
 
 
-def decision_making(config, matching_pairs, state_manager: StateManager):
+def decision_making(config, matching_pairs, state_manager: StateManager = None):
     print("[decision_making]")
     output_format = config.get("similarity", {}).get("output_format", "graphml")
     predicted_matching = decide_matches(matching_pairs, output_format=output_format)
-    state_manager.update("predicted_matching", predicted_matching)
+    if state_manager:
+        state_manager.update("predicted_matching", predicted_matching)
     return None
 
 
-def bert_inference(config, processed_data, state_manager: StateManager):
+def bert_inference(config, processed_data, state_manager: StateManager = None):
     print("[bert_inference]") 
     predicted_pairs = process_inference(processed_data, state_manager)
-    state_manager.update("predicted_matching", predicted_pairs)
+    if state_manager:
+        state_manager.update("predicted_matching", predicted_pairs)
     return None
 
 
-def evaluation(config, state_manager: StateManager):
+def evaluation(config, state_manager: StateManager = None):
     print("[evaluation]")
     result = compare_ground_truth(config)
-    state_manager.update("result", result)
+    if state_manager:
+        state_manager.update("result", result)
     return None
 
-def bert_evaluation(config, processed_data, state_manager: StateManager):
+def bert_evaluation(config, processed_data, state_manager: StateManager = None):
     print("[evaluation]")
     result = evaluate_from_saved_model(processed_data, config)
-    state_manager.update("evaluation_result", result)
+    if state_manager:
+        state_manager.update("evaluation_result", result)
     return None
 
 
@@ -201,20 +245,25 @@ def listener():
                 task = request.get("task", "")
                 print(f"Function to execute: {task}")
 
-                output = function_dispatcher(task, **request.get("inputs", {}))
+                # Deserialize inputs
+                inputs = deserialize_from_json(request.get("inputs", {}))
+                output = function_dispatcher(task, config=request.get("config"), **inputs)
 
                 callback = request.get("callback") or {}
                 callback_host = callback.get("host")
                 callback_port = callback.get("port")
 
                 if callback_host and callback_port:
+                    # Serialize output before sending
+                    serialized_output = serialize_for_json(output) if output is not None else None
                     response = {
                         "protocol_version": "2.0",
                         "task": task,
-                        "status": "ok" if output else "error",
-                        "result": output if output else f"Function '{task}' not found",
+                        "status": "ok" if output is not None else "error",
+                        "result": serialized_output if output is not None else f"Function '{task}' not found",
                     }
                     send(json.dumps(response), callback_host, int(callback_port))
+                    print(f"Sent response to callback at {callback_host}:{callback_port}")
                 else:
                     print("No callback provided; skipping response send.")
 
@@ -224,11 +273,14 @@ def listener():
                 print(f"Listener error: {e}")
 
 def send(payload, service, port):
-    with socket.create_connection((service, port), timeout=5) as sock:
-        data = (payload + "\n").encode("utf-8")
-        sock.sendall(data)
+    try:
+        with socket.create_connection((service, port), timeout=5) as sock:
+            data = (payload + "\n").encode("utf-8")
+            sock.sendall(data)
+    except Exception as e:
+        print(f"Error sending callback to {service}:{port}: {e}")
 
-def function_dispatcher(function_name: str, **kwargs):
+def function_dispatcher(function_name: str, config, **kwargs):
     function_map = {
         "normalization": normalization,
         "graph_construction": graph_construction,
@@ -246,7 +298,7 @@ def function_dispatcher(function_name: str, **kwargs):
     }
     func = function_map.get(function_name)
     if func is not None:
-        return func(**kwargs)
+        return func(config=config,**kwargs)
     else:
         print(f"Function {function_name} not found in dispatcher.")
         return ""

@@ -11,6 +11,21 @@ from governance import StateManager
 from utils.write_log import write_log
 
 # =========================
+# Payload Serialization
+# =========================
+
+def serialize_for_json(obj):
+    """Convert non-JSON-serializable objects to JSON-safe format."""
+    if isinstance(obj, pd.DataFrame):
+        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    else:
+        return obj
+
+# =========================
 # TASKS
 # =========================
 
@@ -46,7 +61,7 @@ TASKS = {
     "bert_training": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
-        "output": [],
+        "output": ["completed"],
         "service": "service-bert",
         "listen-port": 5004
     },
@@ -88,7 +103,7 @@ TASKS = {
     "bert_inference": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
-        "output": [],
+        "output": ["completed"],
         "service": "service-bert",
         "listen-port": 5010
     },
@@ -102,7 +117,7 @@ TASKS = {
     "bert_evaluation": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
-        "output": [],
+        "output": ["completed"],
         "service": "service-bert",
         "listen-port": 5012
     },
@@ -177,10 +192,15 @@ def run_pipeline(config, tasks, data_store):
 
             callback_port = task.get("listen-port") if task.get("output") else None
 
+            # Exclude StateManager from JSON payload; it stays in manager
+            serializable_inputs = {k: v for k, v in inputs.items() if k != "state_manager"}
+            serializable_inputs = serialize_for_json(serializable_inputs)
+
             request = {
                 "protocol_version": "2.0",
                 "task": name,
-                "inputs": {k: v for k, v in inputs.items()},
+                "config": config,
+                "inputs": serializable_inputs,
                 "callback": {
                     "host": "service-manager",
                     "port": callback_port,
@@ -188,69 +208,79 @@ def run_pipeline(config, tasks, data_store):
             }
 
             print(f"Connecting to service: {service_name}:{service_port}")
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect((service_name, service_port))
-                s.sendall((json.dumps(request, default=str) + "\n").encode("utf-8"))
-                print(f"Sent request for task '{name}' to {service_name}:{service_port}")
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.connect((service_name, service_port))
+                    s.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                    print(f"Sent request for task '{name}' to {service_name}:{service_port}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to connect to {service_name}:{service_port}: {e}")
 
             # Listen for the service response if output is expected (JSON envelope protocol v2)
             if task.get("output"):
                 listen_port = task.get("listen-port")
                 if listen_port:
                     print(f"Listening for response on port: {listen_port}")
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        s.bind(("localhost", listen_port))
-                        s.listen(1)
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                            s.bind(("0.0.0.0", listen_port))
+                            s.listen(1)
+                            s.settimeout(300)
 
-                        conn, addr = s.accept()
-                        with conn:
-                            print(f"Connected by {addr}")
+                            conn, addr = s.accept()
+                            with conn:
+                                print(f"Connected by {addr}")
 
-                            # Read full payload (newline-terminated JSON)
-                            chunks = []
-                            while True:
-                                chunk = conn.recv(4096)
-                                if not chunk:
-                                    break
-                                chunks.append(chunk)
-                                if b"\n" in chunk:
-                                    break
+                                chunks = []
+                                while True:
+                                    chunk = conn.recv(4096)
+                                    if not chunk:
+                                        break
+                                    chunks.append(chunk)
+                                    if b"\n" in chunk:
+                                        break
 
-                            raw_response = b"".join(chunks).decode("utf-8").strip()
-                            print(f"Received response: {raw_response}")
+                                raw_response = b"".join(chunks).decode("utf-8").strip()
+                                print(f"Received response: {raw_response}")
 
-                            try:
-                                response_obj = json.loads(raw_response)
-                            except json.JSONDecodeError as e:
-                                raise RuntimeError(f"Invalid JSON response for task '{name}': {e}")
+                                try:
+                                    response_obj = json.loads(raw_response)
+                                except json.JSONDecodeError as e:
+                                    raise RuntimeError(f"Invalid JSON response for task '{name}': {e}")
 
-                            if response_obj.get("protocol_version") != "2.0":
-                                raise RuntimeError(
-                                    f"Unsupported protocol version for task '{name}': "
-                                    f"{response_obj.get('protocol_version')}"
-                                )
+                                if response_obj.get("protocol_version") != "2.0":
+                                    raise RuntimeError(
+                                        f"Unsupported protocol version for task '{name}': "
+                                        f"{response_obj.get('protocol_version')}"
+                                    )
 
-                            if response_obj.get("task") != name:
-                                raise RuntimeError(
-                                    f"Task mismatch in response. Expected '{name}', "
-                                    f"got '{response_obj.get('task')}'"
-                                )
+                                if response_obj.get("task") != name:
+                                    raise RuntimeError(
+                                        f"Task mismatch in response. Expected '{name}', "
+                                        f"got '{response_obj.get('task')}'"
+                                    )
 
-                            if response_obj.get("status") != "ok":
-                                raise RuntimeError(
-                                    f"Service returned error for task '{name}': "
-                                    f"{response_obj.get('result')}"
-                                )
+                                if response_obj.get("status") != "ok":
+                                    raise RuntimeError(
+                                        f"Service returned error for task '{name}': "
+                                        f"{response_obj.get('result')}"
+                                    )
 
-                            output = response_obj.get("result")
+                                output = response_obj.get("result")
+                    except socket.timeout:
+                        raise RuntimeError(f"Timeout waiting for response from task '{name}'")
                 else:
                     print(f"No listen port specified for service {service_name}, skipping response handling.")
+
 
             # 4. process output
             output_keys = task.get("output", [])
 
             if len(output_keys) == 0:
+                pass
+            
+            elif output_keys == ["completed"]:
                 pass
 
             elif len(output_keys) == 1:
@@ -270,7 +300,8 @@ def run_pipeline(config, tasks, data_store):
             progress = True
 
         if not progress:
-            raise RuntimeError("DAG stuck! Check dependencies or inputs.")
+            unfinished = [t for t in tasks if t not in finished]
+            raise RuntimeError(f"DAG stuck! Unfinished tasks: {unfinished}. Check dependencies or inputs.")
 
     return data_store
 
@@ -440,6 +471,9 @@ def parse_args():
     parser.add_argument('-f', '--config_file', type=str, required=True)
     return parser.parse_args()
 
+def daemon():
+    while True:
+        time.sleep(60)
 
 # =========================
 # Mock data source (example)
@@ -464,6 +498,8 @@ if __name__ == '__main__':
     with open(config_file, 'r') as f:
         config = yaml.load(f)
     
+    print(f'dataset path: {config["trainset_path"]}')
+    
     # create folders
     os.makedirs('tmp/', exist_ok=True)
     os.makedirs('logs/', exist_ok=True)
@@ -478,4 +514,8 @@ if __name__ == '__main__':
     print(f'# Executuin mode chosen: {config["mode"]}')
     print(f'# The program will start soon')
 
+    import time
+    time.sleep(10)
     driver(config)
+    # Enter daemon mode to keep the pod running
+    daemon()
