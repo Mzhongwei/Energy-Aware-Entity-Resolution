@@ -1,0 +1,5 @@
+peft==0.3.0 # Required for StateManager... so for everything
+sentence-transformers==2.2.2
+accelerate==0.20.3
+datasets==2.14.5
+evaluate==0.4.0

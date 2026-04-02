@@ -2,207 +2,13 @@ import argparse
 import json
 import os
 import argparse
-import shlex
-import signal
-import subprocess
-import time
-from typing import Any
-from pandas import DataFrame
 from ruamel.yaml import YAML
 import pandas as pd
+import socket
 from confluent_kafka import Consumer, KafkaException, KafkaError
 
 from governance import StateManager
-from pipeline import (
-    sequence_generating_m1,
-    index_normalization,
-    train_model,
-    evaluate_from_saved_model,
-    compare_ground_truth,
-    process_inference,
-    train_embeddings,
-    compute_features,
-)
-from pipeline.candidate_enumeration import enumerate_candidates, fetch_candidates
-from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
-from pipeline.decision_making import decide_matches
-from pipeline.feature_index_construction import build_index as build_cg_index
-from pipeline.graph_construction import dyn_graph_generation
-from pipeline.random_walk import dynrandom_walks_generation
 from utils.write_log import write_log
-
-ACTIVE_JAVA_PROC = None
-ACTIVE_CONSUMER = None
-
-# =========================
-# endpoints
-# =========================
-
-def _config_section(config: dict, primary_key: str, legacy_key: str | None = None) -> dict:
-    if not isinstance(config, dict):
-        return {}
-    section = config.get(primary_key)
-    if isinstance(section, dict):
-        return section
-    if legacy_key:
-        legacy_section = config.get(legacy_key)
-        if isinstance(legacy_section, dict):
-            return legacy_section
-    return {}
-
-def normalization(config: dict, raw_data: dict | DataFrame):
-    print("[normalization]")
-    if 'embedding' in config['mode']:
-        # in incremental mode, we index records and normalize
- 
-        # # data example
-        # raw_data = pd.DataFrame(
-        #     data = {
-        #         "name": ["kkk", "ttt", ["hhh", "JJJ"]],
-        #         "adress": ["d ? rue", "yes addre", "ad . r"]
-        #     }
-        # )
-        raw_data_path = config.get("data_source_A")
-        processed_data = index_normalization(config, raw_data, raw_data_path)
-    else:
-        # for bert mode, we do not need to index the records. We normalize records values and generate directly the appropriate df structure 
-        for k, df in raw_data.items():
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                raw_data[k] = sequence_generating_m1(df)
-        processed_data = raw_data
-    return processed_data
-
-def graph_construction(config, processed_data, state_manager: StateManager):
-    graph = state_manager.get("representation_graph")
-
-    if not isinstance(processed_data, pd.DataFrame):
-        raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
-    if not hasattr(graph, "build_relation"):
-        raise ValueError("representation_graph must support build_relation for incremental updates.")
-
-    graph.build_relation(processed_data)
-    state_manager.update("representation_graph", graph)
-    return None
-
-
-def random_walk(config, state_manager: StateManager):
-    graph = state_manager.get("representation_graph")
-    print("[random_walk]")
-    if hasattr(graph, "get_graph") and hasattr(graph, "dyn_roots"):
-        return dynrandom_walks_generation(config, graph)
-    return "sequences"
-
-
-def embedding_training(config, sequences, state_manager: StateManager):
-    print("[embedding_training]")
-    model = state_manager.get("embedding_model")
-    model = train_embeddings(config, model, sequences)
-    state_manager.update("embedding_model", model)
-    return None
-
-
-def bert_training(config, processed_data, state_manager: StateManager):
-    print("[bert_training]")
-    trainer, tokenizer = train_model(config, processed_data)
-    state_manager.update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
-    return None
-
-
-def cg_feature_extraction(config, processed_data):
-    if config.get("candidate_generation", {}).get("status", True):
-        print("[cg_feature_extraction]")
-        if isinstance(processed_data, pd.DataFrame):
-            method = config.get("candidate_generation", {}).get("method", "fullindexing")
-            return compute_features(processed_data, method, config)
-        else:
-            print('error')
-    else:
-        print("[cg_feature_extraction] skip")
-    return None
-
-
-def feature_index_construction(config, cg_feature, state_manager: StateManager):
-    if config.get("candidate_generation", {}).get("status", True):
-        print("[feature_index_construction]")
-        if not isinstance(cg_feature, list):
-            raise ValueError("cg_feature must be a feature list.")
-
-        index = state_manager.get("cg_feature_index")
-        if index is None:
-            raise ValueError("cg_feature_index must be initialized before feature_index_construction.")
-        if not hasattr(index, "build"):
-            raise ValueError("cg_feature_index must be a CGIndex instance.")
-
-        build_cg_index(cg_feature, index)
-        state_manager.update("cg_feature_index", index)
-    else:
-        print("[feature_index_construction] skip")
-    return None
-
-
-def candidate_enumeration(config, cg_feature, state_manager: StateManager):
-    if config.get("candidate_generation", {}).get("status", True):
-        print("[candidate_enumeration]")
-        index = state_manager.get("cg_feature_index")
-        if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
-            return enumerate_candidates(cg_feature, index)
-        else:
-            print("error")
-    else:
-        data_pairs_file = config.get("candidate_generation", {}).get("data_pairs_fixed", "")
-        if data_pairs_file:
-            print(f"[candidate_enumeration] fetch from file {data_pairs_file}")
-            return fetch_candidates(data_pairs_file)
-        else:
-            print(f"error: [candidate_enumeration] fetch from file {data_pairs_file}, file not found")
-    return None
-
-def calculating_similarity(config, candidate_pairs, state_manager: StateManager):
-    print("[calculating_similarity]")
-    embedding_model = state_manager.get("embedding_model")
-    if embedding_model is None:
-        raise ValueError("embedding_model must be initialized before calculating_similarity.")
-    sim_cfg = _config_section(config, "calculating_similarity", "similarity")
-    batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
-    return score_mutual_top1_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
-
-
-def decision_making(config, mutualtop_pairs, state_manager: StateManager):
-    print("[decision_making]")
-    decision_cfg = _config_section(config, "decision_making", "similarity")
-    output_format = decision_cfg.get("output_format", config.get("output_format", "graphml"))
-    previous_pairs = state_manager.get("mutualtop_pairs")
-    embedding_model = state_manager.get("embedding_model")
-    final_pairs, predicted_matching = decide_matches(
-        mutualtop_pairs,
-        previous_pairs=previous_pairs,
-        model=embedding_model,
-        output_format=output_format,
-    )
-    state_manager.update("mutualtop_pairs", final_pairs)
-    state_manager.update("predicted_matching", predicted_matching)
-    return None
-
-
-def bert_inference(config, processed_data, state_manager: StateManager):
-    print("[bert_inference]") 
-    predicted_pairs = process_inference(processed_data, state_manager)
-    state_manager.update("predicted_matching", predicted_pairs)
-    return None
-
-
-def evaluation(config, state_manager: StateManager):
-    print("[evaluation]")
-    result = compare_ground_truth(config)
-    state_manager.update("result", result)
-    return None
-
-def bert_evaluation(config, processed_data, state_manager: StateManager):
-    print("[bert evaluation]")
-    result = evaluate_from_saved_model(processed_data, config)
-    state_manager.update("evaluation_result", result)
-    return None
-
 
 # =========================
 # TASKS
@@ -213,79 +19,92 @@ TASKS = {
         "deps": [],
         "input": ["raw_data"],
         "output": ["processed_data"],
-        "func": normalization
+        "service": "service-normalization",
+        "listen-port": 5000
     },
     "graph_construction": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
         "output": [],
-        "func": graph_construction
+        "service": "service-graph-construction",
+        "listen-port": 5001
     },
     "random_walk": {
         "deps": ["graph_construction"],
         "input": ["state_manager"],
         "output": ["sequences"],
-        "func": random_walk
+        "service": "service-random-walk",
+        "listen-port": 5002
     },
     "embedding_training": {
         "deps": ["random_walk"],
         "input": ["sequences", "state_manager"],
         "output": [],
-        "func": embedding_training
+        "service": "service-embedding-training",
+        "listen-port": 5003
     },
     "bert_training": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
         "output": [],
-        "func": bert_training
+        "service": "service-bert",
+        "listen-port": 5004
     },
     "cg_feature_extraction": {
         "deps": ["normalization"],
         "input": ["processed_data"],
         "output": ["cg_feature"],
-        "func": cg_feature_extraction
+        "service": "service-cg-feature-extraction",
+        "listen-port": 5005
     },
     "feature_index_construction": {
         "deps": ["cg_feature_extraction"],
         "input": ["cg_feature", "state_manager"],
         "output": [],
-        "func": feature_index_construction
+        "service": "service-feature-index-construction",
+        "listen-port": 5006
     },
     "candidate_enumeration": {
         "deps": ["cg_feature_extraction"],
         "input": ["cg_feature", "state_manager"],
         "output": ["candidate_pairs"],
-        "func": candidate_enumeration
+        "service": "service-candidate-enumeration",
+        "listen-port": 5007
     },
     "calculating_similarity": {
         "deps": ["candidate_enumeration"],
         "input": ["candidate_pairs", "state_manager"],
-        "output": ["mutualtop_pairs"],
-        "func": calculating_similarity
+        "output": ["matching_pairs"],
+        "service": "service-calculating-similarity",
+        "listen-port": 5008
     },
     "decision_making": {
         "deps": ["calculating_similarity"],
-        "input": ["mutualtop_pairs", "state_manager"],
+        "input": ["matching_pairs", "state_manager"],
         "output": [],
-        "func": decision_making
+        "service": "service-decision-making",
+        "listen-port": 5009
     },
     "bert_inference": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
         "output": [],
-        "func": bert_inference
+        "service": "service-bert",
+        "listen-port": 5010
     },
     "evaluation": {
         "deps": [],
         "input": ["state_manager"],
         "output": [],
-        "func": evaluation
+        "service": "service-evaluation",
+        "listen-port": 5011
     },
     "bert_evaluation": {
         "deps": ["normalization"],
         "input": ["processed_data", "state_manager"],
         "output": [],
-        "func": bert_evaluation
+        "service": "service-bert",
+        "listen-port": 5012
     },
 }
 
@@ -339,15 +158,94 @@ def run_pipeline(config, tasks, data_store):
             if missing:
                 continue
 
-            print(f"[RUN] {name}")
+            # print(f"[RUN] {name}")
 
-            func = task["func"]
+            # func = task["func"]
 
-            # 3. execute the missions
-            try:
-                output = func(config=config, **inputs)
-            except Exception as e:
-                raise RuntimeError(f"Task {name} failed: {e}")
+            # # 3. execute the missions
+            # try:
+            #     output = func(config=config, **inputs)
+            # except Exception as e:
+            #     raise RuntimeError(f"Task {name} failed: {e}")
+            
+            # Socket connection to the service (new protocol: single JSON envelope)
+            service_name = task.get("service")
+            if not service_name:
+                raise ValueError(f"Task {name} has no service configured")
+
+            service_port = task.get("service-port", 80) # default port 80 for services
+
+            callback_port = task.get("listen-port") if task.get("output") else None
+
+            request = {
+                "protocol_version": "2.0",
+                "task": name,
+                "inputs": {k: v for k, v in inputs.items()},
+                "callback": {
+                    "host": "service-manager",
+                    "port": callback_port,
+                } if callback_port else None,
+            }
+
+            print(f"Connecting to service: {service_name}:{service_port}")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((service_name, service_port))
+                s.sendall((json.dumps(request, default=str) + "\n").encode("utf-8"))
+                print(f"Sent request for task '{name}' to {service_name}:{service_port}")
+
+            # Listen for the service response if output is expected (JSON envelope protocol v2)
+            if task.get("output"):
+                listen_port = task.get("listen-port")
+                if listen_port:
+                    print(f"Listening for response on port: {listen_port}")
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        s.bind(("localhost", listen_port))
+                        s.listen(1)
+
+                        conn, addr = s.accept()
+                        with conn:
+                            print(f"Connected by {addr}")
+
+                            # Read full payload (newline-terminated JSON)
+                            chunks = []
+                            while True:
+                                chunk = conn.recv(4096)
+                                if not chunk:
+                                    break
+                                chunks.append(chunk)
+                                if b"\n" in chunk:
+                                    break
+
+                            raw_response = b"".join(chunks).decode("utf-8").strip()
+                            print(f"Received response: {raw_response}")
+
+                            try:
+                                response_obj = json.loads(raw_response)
+                            except json.JSONDecodeError as e:
+                                raise RuntimeError(f"Invalid JSON response for task '{name}': {e}")
+
+                            if response_obj.get("protocol_version") != "2.0":
+                                raise RuntimeError(
+                                    f"Unsupported protocol version for task '{name}': "
+                                    f"{response_obj.get('protocol_version')}"
+                                )
+
+                            if response_obj.get("task") != name:
+                                raise RuntimeError(
+                                    f"Task mismatch in response. Expected '{name}', "
+                                    f"got '{response_obj.get('task')}'"
+                                )
+
+                            if response_obj.get("status") != "ok":
+                                raise RuntimeError(
+                                    f"Service returned error for task '{name}': "
+                                    f"{response_obj.get('result')}"
+                                )
+
+                            output = response_obj.get("result")
+                else:
+                    print(f"No listen port specified for service {service_name}, skipping response handling.")
 
             # 4. process output
             output_keys = task.get("output", [])
@@ -409,48 +307,7 @@ def kafka_driver(config):
         return
     return consumer
 
-
-def _stop_process_group(proc, interrupt_first=False, wait_seconds=5):
-    if proc is None:
-        return
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
-
-    signals = []
-    if interrupt_first:
-        signals.append(signal.SIGINT)
-    signals.extend([signal.SIGTERM, signal.SIGKILL])
-
-    for sig in signals:
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return
-
-        try:
-            proc.wait(timeout=wait_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-
-
-def _handle_sigint(signum, frame):
-    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
-    print("\n[INFO] Ctrl+C received. Terminating Python and Java processes now.")
-    if ACTIVE_CONSUMER is not None:
-        try:
-            ACTIVE_CONSUMER.close()
-        except Exception:
-            pass
-        ACTIVE_CONSUMER = None
-    _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
-    ACTIVE_JAVA_PROC = None
-    raise SystemExit(130)
-
 def driver(config):
-    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
     mode = config["mode"].split("-")
     state = StateManager()
     data_store = {
@@ -489,75 +346,43 @@ def driver(config):
             if not data_store['state_manager'].cache:
                 data_store['state_manager'].load(config, stages)
             # start kafka
-            poll_timeout = 5
-            max_empty_polls = 5
+            poll_timeout = 500
+            max_empty_polls = 500
             empty_poll_count = 0
-
             consumer = kafka_driver(config)
 
-            java_path = config["simulator_path"]
-            spring_args = shlex.join([
-                f"--csv.file.path={config.get('data_source_B', '')}",
-                f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}"
-            ])
-            java_proc = subprocess.Popen(
-                ["mvn", f"-Dspring-boot.run.arguments={spring_args}", "spring-boot:run"],
-                cwd=java_path,
-                start_new_session=True
-            )
-            ACTIVE_JAVA_PROC = java_proc
-
-            ACTIVE_CONSUMER = consumer
-            previous_sigint_handler = signal.getsignal(signal.SIGINT)
-
             data_buffer = []
-            try:
-                signal.signal(signal.SIGINT, _handle_sigint)
-                while True:
-                    msg = consumer.poll(poll_timeout)  # Non-blocking batch pull
+            while True:
+                
+                msg = consumer.poll(poll_timeout)  # Non-blocking batch pull
+                
 
-                    # no new message
-                    if msg is None:  
-                        empty_poll_count += 1
-                        print(f'# empty poll count: {empty_poll_count}')
-                        if empty_poll_count >= max_empty_polls:
-                            print("[INFO] No new messages for a while. Exiting consumer loop.")
-                            if data_buffer:
-                                data_store['raw_data'] = pd.DataFrame(data_buffer)
-                                data_store = run_pipeline(config, sub_tasks, data_store)
-                                state_manager = data_store['state_manager']
-                                state_manager.save(config, stages)
-                            break
+                if msg is None:  # no new message
+                    empty_poll_count += 1
+                    if empty_poll_count >= max_empty_polls:
+                        print("[INFO] No new messages for a while. Exiting consumer loop.")
+                        if data_buffer:
+                            data_store['raw_data'] = data_buffer
+                            data_store = run_pipeline(config, sub_tasks, data_store)
+                        break
+                    continue
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        # end of partition
                         continue
-                    if msg.error():
-                        if msg.error().code() == KafkaError._PARTITION_EOF:
-                            # end of partition
-                            continue
-                        else:
-                            raise KafkaException(msg.error())
-                    
-                    # new message
-                    empty_poll_count = 0  # reset counter
-                    # get message
-                    metadata = json.loads(msg.value().decode('utf-8'))
-                    data_buffer.append(metadata)
-                    if len(data_buffer) >= config["kafka"]["window_count"]:
-                        data_store['raw_data'] = pd.DataFrame(data_buffer)
-                        data_store = run_pipeline(config, sub_tasks, data_store)
-                        data_buffer = []
-                state_manager = data_store['state_manager']
-                state_manager.save(config, stages)
-            finally:
-                signal.signal(signal.SIGINT, previous_sigint_handler)
-                if ACTIVE_CONSUMER is not None:
-                    try:
-                        ACTIVE_CONSUMER.close()
-                    except Exception:
-                        pass
-                    ACTIVE_CONSUMER = None
-                _stop_process_group(java_proc, interrupt_first=True)
-                ACTIVE_JAVA_PROC = None
-
+                    else:
+                        raise KafkaException(msg.error())
+                empty_poll_count = 0  # reset counter
+                
+                # get message
+                metadata = json.loads(msg.value().decode('utf-8'))
+                data_buffer.append(metadata)
+                if len(data_buffer) >= config["kafka"]["window_count"]:
+                    data_store['raw_data'] = data_buffer
+                    data_store = run_pipeline(config, sub_tasks, data_store)
+                    data_buffer = []
+            state_manager = data_store['state_manager']
+            state_manager.save(config, stages)
         if "evaluation" in mode:
             
             stages = ["evaluation"]
@@ -643,6 +468,7 @@ if __name__ == '__main__':
     os.makedirs('tmp/', exist_ok=True)
     os.makedirs('logs/', exist_ok=True)
     os.makedirs('data/', exist_ok=True)
+    os.makedirs('storage/', exist_ok=True)
 
     print('#' * 46)
     print(f'###  Energy-Aware Energy Resolution System ###')
