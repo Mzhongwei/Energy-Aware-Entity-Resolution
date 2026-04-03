@@ -1,4 +1,4 @@
-mode: "embedding-training"
+mode: "bert-training-b_evaluation"
 version_name: "test"
 
 # bert mode, source data

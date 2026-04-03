@@ -1,3 +1,6 @@
+import os
+
+import pandas as pd
 import torch
 from transformers import (
     AutoTokenizer,
@@ -5,7 +8,9 @@ from transformers import (
 )
 
 class InferenceService:
-    def __init__(self, save_dir, max_length=128):
+    def __init__(self, save_dir=None, max_length=128):
+        if save_dir is None:
+            save_dir = os.path.join("data", "bert", "test")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(save_dir)
         self.model = AutoModelForSequenceClassification.from_pretrained(save_dir)
@@ -36,11 +41,27 @@ class InferenceService:
             "similarity_degree": probs[1] if len(probs) > 1 else probs[0],
         }
 
-def process_inference(processed_data, state_manager): 
-    #predicted pairs with ID
-    inferenceService = InferenceService()
-    for row in processed_data:
-        row["labels"] = inferenceService.predict(row["text1"], row["text2"]).get('label_id')
-        if row["labels"] == 1:
-            state_manager.update("predicted_pairs", state_manager["predicted_pairs"] )
-    return processed_data
+def process_inference(processed_data, state_manager=None, save_dir=None):
+    inference_service = InferenceService(save_dir=save_dir)
+
+    if isinstance(processed_data, dict):
+        data_frame = processed_data.get("test")
+        if data_frame is None:
+            data_frame = processed_data.get("data")
+    else:
+        data_frame = processed_data
+
+    if isinstance(data_frame, pd.DataFrame):
+        rows = data_frame.to_dict(orient="records")
+    else:
+        rows = list(data_frame or [])
+
+    predicted_rows = []
+    for row in rows:
+        prediction = inference_service.predict(row["text1"], row["text2"])
+        row["labels"] = prediction.get("label_id")
+        if state_manager is not None and row["labels"] == 1:
+            state_manager.update("predicted_pairs", state_manager.get("predicted_pairs"))
+        predicted_rows.append(row)
+
+    return predicted_rows

@@ -1,157 +1,128 @@
-import socket
+import argparse
 import json
+import os
+
 import pandas as pd
+from ruamel.yaml import YAML
 
-from governance import StateManager
-
-from pipeline.bert_training import train_model
 from pipeline.bert_evaluation import evaluate_from_saved_model
-from pipeline.bert_inference import process_inference
+from pipeline.bert_inference import InferenceService
+from pipeline.bert_training import train_model
 
-listener_host = "0.0.0.0"
-listener_port = 8080
-manager_service = "manager-service"
+CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-bert.yaml")
 
-# =========================
-# Payload Serialization/Deserialization
-# =========================
 
-def serialize_for_json(obj):
-    """Convert non-JSON-serializable objects to JSON-safe format."""
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    elif isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    else:
-        return obj
+def load_config(config_path: str = CONFIG_PATH):
+    if not os.path.exists(config_path):
+        return {}
+    yaml = YAML(typ="safe")
+    with open(config_path, "r", encoding="utf-8") as file_handle:
+        loaded = yaml.load(file_handle) or {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _bert_save_dir(config):
+    state_config = config.get("state_management", {}) if isinstance(config, dict) else {}
+    bert_dir = state_config.get("bert-dir", "data/bert")
+    version_name = config.get("version_name", "test") if isinstance(config, dict) else "test"
+    return os.path.join(bert_dir, version_name)
+
 
 def deserialize_from_json(obj):
-    """Reconstruct non-JSON-serializable objects from JSON-safe format."""
     if isinstance(obj, dict):
         if obj.get("__dataframe__"):
             return pd.DataFrame(obj.get("data", []))
-        else:
-            return {k: deserialize_from_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+        return {k: deserialize_from_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
         return [deserialize_from_json(item) for item in obj]
-    else:
-        return obj
+    return obj
 
-# =========================
-# endpoints
-# =========================
 
-def bert_training(config, processed_data, state_manager: StateManager = None):
-    print("[bert_training]")
+def bert_training(config, processed_data):
     trainer, tokenizer = train_model(config, processed_data)
-    if state_manager:
-        state_manager.update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
-    return True
+    save_dir = _bert_save_dir(config)
+    os.makedirs(save_dir, exist_ok=True)
+    trainer.save_model(save_dir)
+    tokenizer.save_pretrained(save_dir)
+    return {"status": "trained", "save_dir": save_dir}
 
 
-def bert_inference(config, processed_data, state_manager: StateManager = None):
-    print("[bert_inference]") 
-    predicted_pairs = process_inference(processed_data, state_manager)
-    if state_manager:
-        state_manager.update("predicted_matching", predicted_pairs)
-    return True
+def bert_inference(config, processed_data):
+    save_dir = _bert_save_dir(config)
+    inference_service = InferenceService(save_dir=save_dir)
 
-
-def bert_evaluation(config, processed_data, state_manager: StateManager = None):
-    print("[evaluation]")
-    result = evaluate_from_saved_model(processed_data, config)
-    if state_manager:
-        state_manager.update("evaluation_result", result)
-    return True
-
-
-# =========================
-# Listener
-# =========================
-
-def listener():
-
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((listener_host, listener_port))
-    server_socket.listen()
-    print(f"Listener started on {listener_host}:{listener_port}")
-
-    while True:
-        client_socket, addr = server_socket.accept()
-        print(f"Accepted connection from {addr}")
-
-        with client_socket:
-            try:
-                raw = b""
-                while not raw.endswith(b"\n"):
-                    chunk = client_socket.recv(4096)
-                    if not chunk:
-                        break
-                    raw += chunk
-
-                if not raw:
-                    continue
-
-                data = raw.decode("utf-8").strip()
-                print(f"Received data: {data}")
-
-                request = json.loads(data)
-                if request.get("protocol_version") != "2.0":
-                    raise ValueError("Unsupported protocol_version")
-
-                task = request.get("task", "")
-                print(f"Function to execute: {task}")
-
-                # Deserialize inputs
-                inputs = deserialize_from_json(request.get("inputs", {}))
-                output = function_dispatcher(task, config=request.get("config"), **inputs)
-
-                callback = request.get("callback") or {}
-                callback_host = callback.get("host")
-                callback_port = callback.get("port")
-
-                if callback_host and callback_port:
-                    # Serialize output before sending
-                    serialized_output = serialize_for_json(output) if output is not None else None
-                    response = {
-                        "protocol_version": "2.0",
-                        "task": task,
-                        "status": "ok" if output is not None else "error",
-                        "result": serialized_output if output is not None else f"Function '{task}' not found",
-                    }
-                    send(json.dumps(response), callback_host, int(callback_port))
-                    print(f"Sent response to callback at {callback_host}:{callback_port}")
-                else:
-                    print("No callback provided; skipping response send.")
-
-            except json.JSONDecodeError as e:
-                print(f"Invalid JSON request: {e}")
-            except Exception as e:
-                print(f"Listener error: {e}")
-
-def send(payload, service, port):
-    try:
-        with socket.create_connection((service, port), timeout=5) as sock:
-            data = (payload + "\n").encode("utf-8")
-            sock.sendall(data)
-    except Exception as e:
-        print(f"Error sending callback to {service}:{port}: {e}")
-
-def function_dispatcher(function_name: str, config, **kwargs):
-    function_map = {
-        "bert_training": bert_training,
-        "bert_inference": bert_inference,
-        "bert_evaluation": bert_evaluation
-    }
-    func = function_map.get(function_name)
-    if func is not None:
-        return func(config=config, **kwargs)
+    if isinstance(processed_data, dict):
+        data_frame = processed_data.get("test")
+        if data_frame is None:
+            data_frame = processed_data.get("data")
     else:
-        print(f"Function {function_name} not found in dispatcher.")
-        return ""
+        data_frame = processed_data
 
-if __name__ == '__main__':
-    listener()
+    if isinstance(data_frame, pd.DataFrame):
+        rows = data_frame.to_dict(orient="records")
+    else:
+        rows = list(data_frame or [])
+
+    predictions = []
+    for row in rows:
+        prediction = inference_service.predict(row["text1"], row["text2"])
+        row["labels"] = prediction.get("label_id")
+        predictions.append(row)
+
+    return predictions
+
+
+def bert_evaluation(config, processed_data):
+    return evaluate_from_saved_model(processed_data, config)
+
+def serialize_for_json(obj):
+    if isinstance(obj, pd.DataFrame):
+        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
+    if isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    return obj
+
+
+def load_processed_data(processed_data_value: str):
+    if os.path.isfile(processed_data_value) and processed_data_value.lower().endswith(".csv"):
+        return pd.read_csv(processed_data_value)
+
+    if os.path.isfile(processed_data_value):
+        with open(processed_data_value, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                return content
+
+    try:
+        return deserialize_from_json(json.loads(processed_data_value))
+    except json.JSONDecodeError:
+        return processed_data_value
+
+
+def run_argo_once(mode: str, processed_data_value: str):
+    config = load_config()
+    config["mode"] = mode
+    processed_data = load_processed_data(processed_data_value)
+
+    if "training" in mode:
+        output = bert_training(config, processed_data)
+    elif "inference" in mode:
+        output = bert_inference(config, processed_data)
+    elif "evaluation" in mode:
+        output = bert_evaluation(config, processed_data)
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    print(json.dumps(serialize_for_json(output)))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="BERT distribution for Argo")
+    parser.add_argument("--mode", default="training")
+    parser.add_argument("--processed_data", default="")
+    args = parser.parse_args()
+    run_argo_once(mode=args.mode, processed_data_value=args.processed_data)
