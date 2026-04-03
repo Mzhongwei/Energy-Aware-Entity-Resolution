@@ -569,10 +569,14 @@ def driver(config):
 
             consumer = kafka_driver(config)
 
-            java_path = config["simulator_path"]
+            java_path = os.path.abspath(config["simulator_path"])
+            csv_path = config.get("data_source_B", "")
+            csv_path = os.path.abspath(csv_path) if csv_path else ""
+            kafka_bootstrap = f'{config["kafka"]["bootstrap_servers"]}:{config["kafka"]["port"]}'
             spring_args = shlex.join([
-                f"--csv.file.path={config.get('data_source_B', '')}",
-                f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}"
+                f"--csv.file.path={csv_path}",
+                f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}",
+                f"--spring.kafka.bootstrap-servers={kafka_bootstrap}",
             ])
             java_proc = subprocess.Popen(
                 ["mvn", f"-Dspring-boot.run.arguments={spring_args}", "spring-boot:run"],
@@ -704,6 +708,7 @@ def get_data_stream(config):
 # Main
 # =========================
 if __name__ == '__main__':
+    total_start = time.perf_counter()
     args = parse_args()
     config_path=args.config_file
 
@@ -733,4 +738,8 @@ if __name__ == '__main__':
     print(f'# Executuin mode chosen: {config["mode"]}')
     print(f'# The program will start soon')
 
-    driver(config)
+    try:
+        driver(config)
+    finally:
+        total_duration = time.perf_counter() - total_start
+        print(f"[TIME] Total runtime: {total_duration:.3f}s")

@@ -77,7 +77,7 @@ def index_normalization(config, raw_data, raw_data_path):
     counter_path = _counter_path()
     current_counter = _load_counter(counter_path)
     #start from 0
-    print(f'current counter{current_counter}, raw data len {len(raw_data)}')
+    print(f'# current counter{current_counter}, raw data len {len(raw_data)}')
     raw_data["rid"] = _generate_incremental_rids(len(raw_data), current_counter)
     _save_counter(counter_path, current_counter + len(raw_data))
 

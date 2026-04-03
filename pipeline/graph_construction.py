@@ -246,7 +246,9 @@ class DynGraphIgraph(RepresentationGraph):
 
     def _edge_weight_for_sampling(self, v_from: int, v_to: int) -> float:
         try:
-            eid = self.graph.get_eid(v_from, v_to)
+            eid = self.get_edge_index(v_from, v_to)
+            if eid is None:
+                raise KeyError("edge not found")
             base = float(self.graph.es[eid]['weight']) if 'weight' in self.graph.es[eid].attributes() else 1.0
         except Exception:
             base = 1.0
@@ -273,17 +275,57 @@ class DynGraphIgraph(RepresentationGraph):
         use_weight = bool(self.graph["weighted"])
         edge_weight = float(self._add_edge_weight(node2_index)) if use_weight else 1.0
 
-        eid = self.graph.get_eid(node1_index, node2_index, error=False)
-        if eid != -1:
+        eid = self.get_edge_index(node1_index, node2_index)
+        if eid is not None:
             if use_weight:
                 current = float(self.graph.es[eid]["weight"]) if "weight" in self.graph.es[eid].attributes() else 0.0
                 self.graph.es[eid]["weight"] = current + edge_weight
             return
 
         if use_weight:
-            self.graph.add_edge(node1_index, node2_index, weight=edge_weight)
+            self._add_edges_batch([(node1_index, node2_index)], [edge_weight])
         else:
-            self.graph.add_edge(node1_index, node2_index)
+            self._add_edges_batch([(node1_index, node2_index)])
+
+    def _can_batch_edges(self) -> bool:
+        smooth = self.graph["smooth"]
+        return smooth not in {"ICF", "log"}
+
+    def _queue_edge(
+        self,
+        node1_index: int,
+        node2_index: int,
+        pending_edges: Dict[Tuple[int, int], float],
+    ) -> None:
+        use_weight = bool(self.graph["weighted"])
+        edge_key = self._edge_key(node1_index, node2_index)
+        edge_weight = float(self._add_edge_weight(node2_index)) if use_weight else 1.0
+
+        eid = self.edge2eid.get(edge_key)
+        if eid is not None:
+            if use_weight:
+                current = float(self.graph.es[eid]["weight"]) if "weight" in self.graph.es[eid].attributes() else 0.0
+                self.graph.es[eid]["weight"] = current + edge_weight
+            return
+
+        if edge_key in pending_edges:
+            pending_edges[edge_key] += edge_weight
+            return
+
+        pending_edges[edge_key] = edge_weight
+
+    def _flush_pending_edges(self, pending_edges: Dict[Tuple[int, int], float]) -> None:
+        if not pending_edges:
+            return
+
+        use_weight = bool(self.graph["weighted"])
+        edges = list(pending_edges.keys())
+        if use_weight:
+            weights = [pending_edges[edge] for edge in edges]
+            self._add_edges_batch(edges, weights)
+        else:
+            self._add_edges_batch(edges)
+        pending_edges.clear()
 
     # ------------------------
     # Neighbor Sampler Cache
@@ -377,11 +419,14 @@ class DynGraphIgraph(RepresentationGraph):
         columns = list(df.columns)
         col_positions = {col: idx for idx, col in enumerate(columns)}
         row_iter = df.itertuples(index=False, name=None)
+        pending_edges: Dict[Tuple[int, int], float] = {}
+        use_batch_edges = self._can_batch_edges()
 
         if self.meta_path:
             update_instance_vertex_edge = self._update_instance_vertex_edge
             update_node = self._update_node
             add_edge = self._add_edge
+            queue_edge = self._queue_edge
 
             for row_values in tqdm(row_iter, total=len(df), desc="# Building/Updating graph"):
                 values = {}
@@ -406,7 +451,10 @@ class DynGraphIgraph(RepresentationGraph):
                     if a in values and b in values:
                         for v1 in values[a]:
                             for v2 in values[b]:
-                                add_edge(v1, v2)
+                                if use_batch_edges:
+                                    queue_edge(v1, v2, pending_edges)
+                                else:
+                                    add_edge(v1, v2)
         else:
             rid_pos = col_positions.get("rid")
             if rid_pos is None:
@@ -416,6 +464,7 @@ class DynGraphIgraph(RepresentationGraph):
             update_node = self._update_node
             update_instance_vertex_edge = self._update_instance_vertex_edge
             add_edge = self._add_edge
+            queue_edge = self._queue_edge
             add_ngrams_for_token_list = self._add_ngrams_for_token_list
 
             for row_values in tqdm(row_iter, total=len(df), desc="# Building/Updating graph"):
@@ -440,13 +489,22 @@ class DynGraphIgraph(RepresentationGraph):
                         for el in token_list:
                             instance_index = update_instance_vertex_edge(el, node_prefix)
                             for index in instance_index:
-                                add_edge(index, cid_index)
-                                add_edge(index, rid_index)
+                                if use_batch_edges:
+                                    queue_edge(index, cid_index, pending_edges)
+                                    queue_edge(index, rid_index, pending_edges)
+                                else:
+                                    add_edge(index, cid_index)
+                                    add_edge(index, rid_index)
                             affected_nodes.update(instance_index)
 
                         if not is_numeric:
-                            index_list = add_ngrams_for_token_list(token_list, cid_index, rid_index)
+                            if use_batch_edges:
+                                index_list = add_ngrams_for_token_list(token_list, cid_index, rid_index, pending_edges)
+                            else:
+                                index_list = add_ngrams_for_token_list(token_list, cid_index, rid_index)
                             affected_nodes.update(index_list)
+
+        self._flush_pending_edges(pending_edges)
 
         # extend & update samplers
         self._extend_sampler(self.graph.vcount())
@@ -461,7 +519,13 @@ class DynGraphIgraph(RepresentationGraph):
                     self._update_neighbors(neigh)
                     neighbor_updated.add(neigh)
 
-    def _add_ngrams_for_token_list(self, token_list: List[str], cid_index: int, rid_index: int):
+    def _add_ngrams_for_token_list(
+        self,
+        token_list: List[str],
+        cid_index: int,
+        rid_index: int,
+        pending_edges: Optional[Dict[Tuple[int, int], float]] = None,
+    ):
         index_list = set()
         cfg = self.ngram_config
         if not cfg:
@@ -474,8 +538,12 @@ class DynGraphIgraph(RepresentationGraph):
         for ng in self._gen_ngrams(toks, token_ns, skip=skip):
             name = f"ng::{len(ng)}::" + "␟".join(ng)
             ng_index = self._update_token(name, 'ng')
-            self._add_edge(ng_index, cid_index)
-            self._add_edge(ng_index, rid_index)
+            if pending_edges is None:
+                self._add_edge(ng_index, cid_index)
+                self._add_edge(ng_index, rid_index)
+            else:
+                self._queue_edge(ng_index, cid_index, pending_edges)
+                self._queue_edge(ng_index, rid_index, pending_edges)
             index_list.add(ng_index)
         return index_list
 
