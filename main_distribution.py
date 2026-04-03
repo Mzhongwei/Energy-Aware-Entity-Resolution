@@ -314,8 +314,10 @@ def safe_read_csv(path):
         return pd.DataFrame()
 
     if not os.path.exists(path):
+        print(f"CSV not found: {path}")
         return pd.DataFrame()
-
+    print(f"Reading CSV from: {path}")
+    print(pd.read_csv(path).head())
     return pd.read_csv(path)
 
 def kafka_driver(config):
@@ -498,7 +500,10 @@ if __name__ == '__main__':
     with open(config_file, 'r') as f:
         config = yaml.load(f)
     
-    print(f'dataset path: {config["trainset_path"]}')
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    print(f'file path: {base_dir}')
+    workpath = os.getcwd()
+    print(f'work dir: {workpath}')
     
     # create folders
     os.makedirs('tmp/', exist_ok=True)

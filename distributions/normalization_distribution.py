@@ -54,12 +54,11 @@ def normalization(config: dict, raw_data: dict | DataFrame):
         # )
 
         index_normalization(config, raw_data)
-    else:
+    else: 
         # for bert mode, we do not need to index the records. We normalize records values and generate directly the appropriate df structure 
         for k, df in raw_data.items():
             if isinstance(df, pd.DataFrame) and not df.empty:
                 raw_data[k] = sequence_generating_m1(df)
-
     processed_data = raw_data
     return processed_data
 
