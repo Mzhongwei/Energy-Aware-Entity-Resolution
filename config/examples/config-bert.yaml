@@ -2,9 +2,9 @@ mode: "bert-training-b_evaluation"
 version_name: "test"
 
 # bert mode, source data
-trainset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/train.csv"
-testset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/test.csv"
-evalset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/valid.csv"
+trainset_path: "Data_example/bert/train.csv"
+testset_path: "Data_example/bert/test.csv"
+evalset_path: "Data_example/bert/valid.csv"
 
 # incremental mode
 # meta_path: list or list of list (several paths), * 'rid' should appear in meta_path if it is setted

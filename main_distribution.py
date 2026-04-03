@@ -11,6 +11,7 @@ from pandas import DataFrame
 from ruamel.yaml import YAML
 import pandas as pd
 from confluent_kafka import Consumer, KafkaException, KafkaError
+from confluent_kafka.admin import AdminClient, NewTopic
 
 from governance import StateManager
 from pipeline import (
@@ -49,6 +50,71 @@ def _config_section(config: dict, primary_key: str, legacy_key: str | None = Non
         if isinstance(legacy_section, dict):
             return legacy_section
     return {}
+
+
+def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_seconds: float = 10.0) -> None:
+    kafka_config = config["kafka"]
+    bootstrap_servers = f'{kafka_config["bootstrap_servers"]}:{kafka_config["port"]}'
+    topic_name = kafka_config["topicid"]
+    num_partitions = int(kafka_config.get("partitions", 3))
+    replication_factor = int(kafka_config.get("replication_factor", 1))
+
+    admin_client = AdminClient({"bootstrap.servers": bootstrap_servers})
+    metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
+    topic_metadata = metadata.topics.get(topic_name)
+
+    topic_missing = (
+        topic_metadata is None
+        or (
+            topic_metadata.error is not None
+            and topic_metadata.error.code() == KafkaError.UNKNOWN_TOPIC_OR_PART
+        )
+    )
+
+    if topic_missing:
+        futures = admin_client.create_topics(
+            [NewTopic(topic_name, num_partitions=num_partitions, replication_factor=replication_factor)]
+        )
+        try:
+            futures[topic_name].result(timeout=timeout)
+            print(
+                f"[kafka] Created topic '{topic_name}' "
+                f"with {num_partitions} partitions and replication factor {replication_factor}."
+            )
+        except Exception as exc:
+            raise KafkaException(
+                KafkaError(
+                    KafkaError.UNKNOWN_TOPIC_OR_PART,
+                    f"Failed to create Kafka topic '{topic_name}': {exc}"
+                )
+            ) from exc
+
+    deadline = time.time() + ready_wait_seconds
+    last_error = None
+    while time.time() < deadline:
+        metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
+        topic_metadata = metadata.topics.get(topic_name)
+
+        if topic_metadata is not None and topic_metadata.error is None and topic_metadata.partitions:
+            return
+
+        if topic_metadata is not None and topic_metadata.error is not None:
+            last_error = topic_metadata.error
+        else:
+            last_error = KafkaError(
+                KafkaError.UNKNOWN_TOPIC_OR_PART,
+                f"Kafka topic '{topic_name}' is still unavailable on broker {bootstrap_servers}."
+            )
+        time.sleep(1)
+
+    if last_error is not None:
+        raise KafkaException(last_error)
+    raise KafkaException(
+        KafkaError(
+            KafkaError.UNKNOWN_TOPIC_OR_PART,
+            f"Kafka topic '{topic_name}' did not become ready within {ready_wait_seconds} seconds."
+        )
+    )
 
 def normalization(config: dict, raw_data: dict | DataFrame):
     print("[normalization]")
@@ -344,10 +410,15 @@ def run_pipeline(config, tasks, data_store):
             func = task["func"]
 
             # 3. execute the missions
+            task_start = time.perf_counter()
             try:
                 output = func(config=config, **inputs)
             except Exception as e:
-                raise RuntimeError(f"Task {name} failed: {e}")
+                task_duration = time.perf_counter() - task_start
+                print(f"[TIME] {name}: {task_duration:.3f}s (failed)")
+                raise RuntimeError(f"Task {name} failed after {task_duration:.3f}s: {e}")
+            task_duration = time.perf_counter() - task_start
+            print(f"[TIME] {name}: {task_duration:.3f}s")
 
             # 4. process output
             output_keys = task.get("output", [])
@@ -391,19 +462,22 @@ def safe_read_csv(path):
 
 def kafka_driver(config):
     try:
+        _ensure_kafka_topic_ready(config)
+
         # prepare kafka consumer
         consumer = Consumer({
             'bootstrap.servers': f'{config["kafka"]["bootstrap_servers"]}:{config["kafka"]["port"]}',
             'group.id': config['kafka']["groupid"],
             'auto.offset.reset': 'latest',   # latest / earliest
-            'enable.auto.commit': False
+            'enable.auto.commit': False,
+            'max.poll.interval.ms': 900000,
         })
 
         # subscribe a topic
         consumer.subscribe([config['kafka']['topicid']])
 
     except Exception as e:
-        app_logger = write_log(config["log"]["path"], "app", "app")
+        app_logger = write_log("logs", "main", "bug")
         app_logger.error(f"Fatal error in consumer service: {str(e)}")
         print(f"Fatal error in consumer service: {str(e)}")
         return
@@ -639,6 +713,13 @@ if __name__ == '__main__':
     with open(config_file, 'r') as f:
         config = yaml.load(f)
     
+    # check data path 
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    print(f'file path: {base_dir}')
+    workpath = os.getcwd()
+    print(f'work dir: {workpath}')
+
     # create folders
     os.makedirs('tmp/', exist_ok=True)
     os.makedirs('logs/', exist_ok=True)

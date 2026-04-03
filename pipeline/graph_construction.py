@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple, Iterable, Optional, Set
 
 import math
+import pandas as pd
 from tqdm import tqdm
 
 from models.representation_graph import RepresentationGraph
@@ -35,7 +36,7 @@ class DynGraphIgraph(RepresentationGraph):
         directed: bool = False,
         smooth: Optional[str] = None,
         meta_path: Optional[Iterable] = None,
-        ngram_config: Optional[Dict] = {"token_n": [2, 3], "char_n": [], "skip": 0},
+        ngram_config: Optional[Dict] = None,
         rare_bias: Optional[str] = "idf",
         rare_alpha: float = 1.0,
         undirected_weighted: bool = True,
@@ -57,7 +58,7 @@ class DynGraphIgraph(RepresentationGraph):
         self._check_flatten()
 
         self.samplers = []
-        self.ngram_config = ngram_config or {"token_n": [2, 3], "char_n": [], "skip": 0}
+        self.ngram_config = ngram_config if isinstance(ngram_config, dict) else None
         self._cache_ngram_size = cache_ngram_size
         self.rare_bias = rare_bias
         self.rare_alpha = float(rare_alpha)
@@ -152,32 +153,33 @@ class DynGraphIgraph(RepresentationGraph):
         node_index = super()._update_node(node_name, node_prefix)
         self.graph["words_count"] = int(self.graph["words_count"]) + 1
         node = self.graph.vs[node_index]
+        node_class = node["node_class"] if "node_class" in node.attributes() else None
 
         if self.meta_path:
             if node_prefix in getattr(self, "dyn_roots", {}).keys():
                 self.dyn_roots[node_prefix].add(int(node.index))
         else:
-            if "node_class" in node.attributes() and node["node_class"].get("isroot", False):
+            if isinstance(node_class, dict) and node_class.get("isroot", False):
                 self.dyn_roots.add(int(node.index))
         return int(node.index)
 
     def _update_token(self, ins_value: str, prefix: str) -> int:
         node_index = super()._update_token(ins_value, prefix)
         node = self.graph.vs[node_index]
+        node_class = node["node_class"] if "node_class" in node.attributes() else None
         if self.meta_path:
             if prefix in getattr(self, "dyn_roots", {}).keys():
                 self.dyn_roots[prefix].add(int(node.index))
         else:
-            if "node_class" in node.attributes() and node["node_class"].get("isroot", False):
+            if isinstance(node_class, dict) and node_class.get("isroot", False):
                 self.dyn_roots.add(int(node.index))
         return int(node.index)
 
     # ------------------------
-    # n-gram 生成（可缓存）
+    # n-gram helpers
     # ------------------------
     @lru_cache(maxsize=200_000)
     def _tokenize_cached(self, s: str) -> Tuple[str, ...]:
-        # 与你现有的 '_' 分词一致（若要更复杂，改这里或用 convert_token_value 的 token_list 直接传入）
         return tuple([t for t in str(s).strip().split('_') if t])
 
     def _gen_ngrams(self, tokens: Tuple[str, ...], token_ns: List[int], skip: int = 0) -> List[Tuple[str, ...]]:
@@ -192,7 +194,7 @@ class DynGraphIgraph(RepresentationGraph):
                 for i in range(L - n + 1):
                     out.append(tuple(tokens[i:i + n]))
         else:
-            # 简化的 k-skip-n-gram 生成（可替换成更完整的组合版本）
+            # k-skip-n-gram generation (simple version)
             for n in token_ns:
                 if L < n:
                     continue
@@ -206,39 +208,18 @@ class DynGraphIgraph(RepresentationGraph):
                             out.append(tuple(cand))
         return out
 
-    def _emit_tokens_and_ngrams(self, og_value: str, prefix_for_token: str) -> List[Tuple[str, str]]:
-        """返回 [(value_str, prefix)]，既包含 token，也包含 n-gram（前缀 'ng'）。"""
-        # app_debug.info(f"og_value: {og_value}")
+    def _emit_tokens(self, og_value: str, prefix_for_token: str) -> List[Tuple[str, str]]:
+        """Return flattened tokens for a single textual value."""
         res: List[Tuple[str, str]] = []
         toks = self._tokenize_cached(og_value)
-        # app_debug.info(f"toks: {toks}")
         if len(toks) == 0:
             return res
-        # 原 token
+
         for t in toks:
             if self.meta_path:
                 res.append((t, prefix_for_token))
             else:
                 res.append((t, 'st'))
-
-        # # n-gram（按配置）
-        # cfg = self.ngram_config
-        # if cfg:
-        #     token_ns = cfg.get('token_n', [])
-        #     skip = cfg.get('skip', 0)
-
-        #     if self.meta_path:
-        #         pr = prefix_for_token
-        #     else:
-        #         pr = "st"
-
-        #     for ng in self._gen_ngrams(toks, token_ns, skip=skip):
-        #         name = f"{pr}::{len(ng)}::" + "␟".join(ng)
-        #         res.append((name, pr))
-        #         app_debug.info(f"debug: name-{name}, pr-{pr}")
-        #         app_debug.info(f'res: {res}')
-            
-            # 字符 n-gram 可在此扩展（char_n）
         return res
 
     def _normalize_cell_tokens(self, cell_value, column_name: str) -> Tuple[List[str], bool]:
@@ -250,7 +231,7 @@ class DynGraphIgraph(RepresentationGraph):
         return convert_token_value(cell_value)
 
     # ------------------------
-    # 采样权重与稀有偏置
+    # Sampling Weights and Rare-Item Bias
     # ------------------------
     def _rare_weight_of_vertex(self, vidx: int) -> float:
         if self.rare_bias is None:
@@ -273,7 +254,7 @@ class DynGraphIgraph(RepresentationGraph):
         return max(1e-12, base * rare)
 
     def _add_edge_weight(self, to_index: int):
-        # 根据 smooth 计算权重（保留你原来的策略）
+        # Calculate the weights using the smooth method 
         degree = 1
         if self.graph['smooth'] == 'ICF':
             degree = self.graph.degree(to_index, mode='OUT')
@@ -292,8 +273,8 @@ class DynGraphIgraph(RepresentationGraph):
         use_weight = bool(self.graph["weighted"])
         edge_weight = float(self._add_edge_weight(node2_index)) if use_weight else 1.0
 
-        if self.graph.are_connected(node1_index, node2_index):
-            eid = self.graph.get_eid(node1_index, node2_index)
+        eid = self.graph.get_eid(node1_index, node2_index, error=False)
+        if eid != -1:
             if use_weight:
                 current = float(self.graph.es[eid]["weight"]) if "weight" in self.graph.es[eid].attributes() else 0.0
                 self.graph.es[eid]["weight"] = current + edge_weight
@@ -305,7 +286,7 @@ class DynGraphIgraph(RepresentationGraph):
             self.graph.add_edge(node1_index, node2_index)
 
     # ------------------------
-    # 邻居采样器缓存
+    # Neighbor Sampler Cache
     # ------------------------
     def _extend_sampler(self, size: int):
         if len(self.samplers) < size:
@@ -313,7 +294,7 @@ class DynGraphIgraph(RepresentationGraph):
 
     def _update_neighbors(self, index: int):
         v = self.graph.vs[index]
-        neighbors = self.graph.neighbors(index, mode='OUT')  # 无向也等价
+        neighbors = self.graph.neighbors(index, mode='OUT')  # same thing for directed and undirected graph
         graph = self.graph
         vs = graph.vs
 
@@ -322,7 +303,7 @@ class DynGraphIgraph(RepresentationGraph):
             vs = graph.vs
             use_w = bool(graph["weighted"])
 
-            # 每种类型各放一桶
+            # one type -> one bucket
             buckets = defaultdict(lambda: {"neighbors": [], "weights": []})
 
             for nb in neighbors:
@@ -332,7 +313,7 @@ class DynGraphIgraph(RepresentationGraph):
                 buckets[t]["neighbors"].append(nb)
                 buckets[t]["weights"].append(w)
 
-            # 为每种类型构建 NodeSampler
+            # construct NodeSampler for each type
             sampler_for_index = {}
             for t, data in buckets.items():
                 if not data["neighbors"]:
@@ -351,11 +332,11 @@ class DynGraphIgraph(RepresentationGraph):
                         threshold=1000
                     )
 
-            # 确保 samplers 长度足够，然后赋值
+            # Make sure the samplers are long enough, assign the values
             self.samplers[index] = sampler_for_index
 
         else:
-            # 无向图也可走加权
+            # Weighted paths in undirected graphs
             use_w = bool(graph["weighted"])
             if not use_w:
                 self.samplers[index] = NodeSampler(neighbors=neighbors, weighted=False, threshold=1000)
@@ -372,50 +353,51 @@ class DynGraphIgraph(RepresentationGraph):
         return None
 
     # ------------------------
-    # 将一个单元格值更新进图（原 token + n-gram）
+    # Update a cell value in the graph.
     # ------------------------
     def _update_instance_vertex_edge(self, ins_value: str, prefix: str):
         instances_index = set()
-        # 原始值自身作为一个节点（沿用你的逻辑）
         instance_index = self._update_node(f'tt__{ins_value}', prefix)
         instances_index.add(instance_index)
 
-        # app_debug.info(f'node name: {ins_value}, node index: {instance_index}')
         if self.to_flatten == "all" or prefix in self.to_flatten:
-            # 这里将原值展开为 token + n-gram（按 ngram_config）
-            # app_debug.info('start flatten')
-            for val, pfx in self._emit_tokens_and_ngrams(ins_value, prefix_for_token=prefix):
-                # app_debug.info(f'iterate: {val}, prefixe: {pfx}')
+            for val, pfx in self._emit_tokens(ins_value, prefix_for_token=prefix):
                 if not val:
                     continue
                 val_index = self._update_token(f'tt__{val}', pfx)
-                # print(f"after toke, idex-{val_index}, name-{val}")
                 instances_index.add(val_index)
-                # app_debug.info(f'token name: {val}, token index: {val_index}')
 
         return instances_index
 
     # ------------------------
-    # 构图（兼容 meta_path 与普通模式）
+    # Construct graph (meta-path + simple mode + optional n-gram)
     # ------------------------
     def build_relation(self, df):
         affected_nodes = set()
+        columns = list(df.columns)
+        col_positions = {col: idx for idx, col in enumerate(columns)}
+        row_iter = df.itertuples(index=False, name=None)
+
         if self.meta_path:
-            for _, df_row in tqdm(df.iterrows(), total=len(df), desc="# Building/Updating graph"):
+            update_instance_vertex_edge = self._update_instance_vertex_edge
+            update_node = self._update_node
+            add_edge = self._add_edge
+
+            for row_values in tqdm(row_iter, total=len(df), desc="# Building/Updating graph"):
                 values = {}
-                for col in df.columns:
+                for col, pos in col_positions.items():
                     if col in self.meta_node:
                         values.setdefault(col, [])
-                        token_list, _ = self._normalize_cell_tokens(df_row[col], col)
+                        token_list, _ = self._normalize_cell_tokens(row_values[pos], col)
                         if token_list is not None and len(token_list) > 0:
                             for el in token_list:
-                                index_set = self._update_instance_vertex_edge(el, col)
+                                index_set = update_instance_vertex_edge(el, col)
                                 for index in index_set:
                                     if index not in values[col]:
                                         values[col].append(index)
                                     affected_nodes.add(index)
                         else:
-                            index = self._update_node("nan", col)
+                            index = update_node("nan", col)
                             if index not in values[col]:
                                 values[col].append(index)
                             affected_nodes.add(index)
@@ -424,48 +406,47 @@ class DynGraphIgraph(RepresentationGraph):
                     if a in values and b in values:
                         for v1 in values[a]:
                             for v2 in values[b]:
-                                self._add_edge(v1, v2)
+                                add_edge(v1, v2)
         else:
-            for _, df_row in tqdm(df.iterrows(), total=len(df), desc="# Building/Updating graph"):
-                rid_tokens, _ = self._normalize_cell_tokens(df_row["rid"], "rid")
+            rid_pos = col_positions.get("rid")
+            if rid_pos is None:
+                raise ValueError("Missing 'rid' column during graph construction.")
+
+            data_columns = [(col, pos) for col, pos in col_positions.items() if col != "rid"]
+            update_node = self._update_node
+            update_instance_vertex_edge = self._update_instance_vertex_edge
+            add_edge = self._add_edge
+            add_ngrams_for_token_list = self._add_ngrams_for_token_list
+
+            for row_values in tqdm(row_iter, total=len(df), desc="# Building/Updating graph"):
+                rid_tokens, _ = self._normalize_cell_tokens(row_values[rid_pos], "rid")
                 if not rid_tokens:
                     raise ValueError("Missing rid token during graph construction.")
                 rid_node = rid_tokens[0]
-                rid_index = self._update_node(rid_node, "idx")
+                rid_index = update_node(rid_node, "idx")
                 affected_nodes.add(rid_index)
 
-                row = df_row.dropna()
-                for cid_node in df.columns:
-                    if cid_node == "rid":
+                for cid_node, pos in data_columns:
+                    og_value = row_values[pos]
+                    if pd.isna(og_value):
                         continue
-                    try:
-                        cid_index = self._update_node(f'cid__{cid_node}', "cid")
-                        affected_nodes.add(cid_index)
 
-                        og_value = row[cid_node]
-                        # app_debug.info(f"og_value: {og_value}")
+                    cid_index = update_node(f'cid__{cid_node}', "cid")
+                    affected_nodes.add(cid_index)
 
-                        token_list, is_numeric = convert_token_value(og_value)
-                        # app_debug.info(f"token_list: {token_list}")
-                        if token_list is not None:
-                            for el in token_list:
-                                # app_debug.info(f"el if tokens: {el}")
-                                # app_debug.info(f'idx_index: {rid_index}, id: {rid_node}')
-                                node_prefix = "tn" if is_numeric else "tt"
-                                instance_index = self._update_instance_vertex_edge(el, node_prefix)
-                                # app_debug.info(f'instance index: {instance_index}')
-                                for index in instance_index:
-                                    # app_debug.info(f"2. {index}-{self.graph.vs[index]['type']}: {self.graph.vs[index]['name']}, {rid_index}-{self.graph.vs[rid_index]['type']}: {self.graph.vs[rid_index]['name']}")
-                                    self._add_edge(index, cid_index)
-                                    self._add_edge(index, rid_index)
-                                affected_nodes.update(instance_index)
+                    token_list, is_numeric = convert_token_value(og_value)
+                    if token_list is not None:
+                        node_prefix = "tn" if is_numeric else "tt"
+                        for el in token_list:
+                            instance_index = update_instance_vertex_edge(el, node_prefix)
+                            for index in instance_index:
+                                add_edge(index, cid_index)
+                                add_edge(index, rid_index)
+                            affected_nodes.update(instance_index)
 
-                            # —— 额外：在 token_list 级别直接加 n-gram 节点（跨 token 的 n-gram）——
-                            if not is_numeric:
-                                index_list = self._add_ngrams_for_token_list(token_list, cid_index, rid_index)
-                                affected_nodes.update(index_list)
-                    except KeyError:
-                        continue
+                        if not is_numeric:
+                            index_list = add_ngrams_for_token_list(token_list, cid_index, rid_index)
+                            affected_nodes.update(index_list)
 
         # extend & update samplers
         self._extend_sampler(self.graph.vcount())
@@ -484,17 +465,17 @@ class DynGraphIgraph(RepresentationGraph):
         index_list = set()
         cfg = self.ngram_config
         if not cfg:
-            return
+            return index_list
         token_ns = cfg.get('token_n', [])
         skip = cfg.get('skip', 0)
+        if not token_ns:
+            return index_list
         toks = tuple(token_list)
         for ng in self._gen_ngrams(toks, token_ns, skip=skip):
             name = f"ng::{len(ng)}::" + "␟".join(ng)
             ng_index = self._update_token(name, 'ng')
             self._add_edge(ng_index, cid_index)
             self._add_edge(ng_index, rid_index)
-            # app_debug.info(f"1. {ng_index}-{self.graph.vs[ng_index]['type']}: {self.graph.vs[ng_index]['name']}, {rid_index}-{self.graph.vs[rid_index]['type']}: {self.graph.vs[rid_index]['name']}")
-
             index_list.add(ng_index)
         return index_list
 
@@ -529,13 +510,16 @@ def dyn_graph_generation(configuration):
     node_types = graph_cfg.get("node_types", [])
     directed = graph_cfg.get("directed", False)
     smooth = graph_cfg.get("smoothing_method")
-    # 你的 convert_token_value 可能按空格切词；这里假设它能把字符串拆成 token_list
+    ngram_config = graph_cfg.get("ngram")
+    if not isinstance(ngram_config, dict):
+        ngram_config = None
+    # convert_token_value() --> token_list
     g = DynGraphIgraph(
         node_types=node_types,
         flatten=flatten,
         directed=directed,
         smooth=smooth,
-        ngram_config={'token_n': [2, 3], 'char_n': [], 'skip': 0},
+        ngram_config=ngram_config,
         rare_bias='idf',
         rare_alpha=0.7,
         undirected_weighted=False,
@@ -550,7 +534,7 @@ def dyn_graph_generation(configuration):
     return g
 
 # ------------------------
-# 可选：简单的自检
+# test
 # ------------------------
 if __name__ == "__main__":
     import pandas as pd
@@ -562,7 +546,6 @@ if __name__ == "__main__":
     ]
     df = pd.DataFrame(data)
 
-    # 你的 convert_token_value 可能按空格切词；这里假设它能把字符串拆成 token_list
     g = DynGraphIgraph(
         node_types=["5#__idx", "0#__cid", "0#__tt", "0#__tn", "0#__ng"],
         flatten=['tt'],
@@ -575,7 +558,7 @@ if __name__ == "__main__":
     )
 
     g.build_relation(df)
-    # 检查 name2idx 是否可用
+    # check name2idx
     print("Vertex count:", g.graph.vcount())
     print("Edge count:", g.graph.ecount())
     print("Index of 'ng::3::Honey␟Basil␟Amber':", g.get_vertex_index("ng::3::Honey␟Basil␟Amber"))
