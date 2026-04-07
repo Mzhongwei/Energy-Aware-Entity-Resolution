@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple, Iterable, Optional, Set
 
 import math
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -14,6 +15,24 @@ from utils.write_log import write_log
 from utils.utils import OUTPUT_FORMAT, TIME_FORMAT, convert_token_value
 
 app_debug = write_log("logs", "debug", "dynamic_graph")
+
+
+def _is_missing_cell_value(value) -> bool:
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return True
+        return bool(np.asarray(pd.isna(value)).all())
+    if isinstance(value, (list, tuple, set)):
+        if not value:
+            return True
+        return all(_is_missing_cell_value(item) for item in value)
+    if isinstance(value, dict):
+        return not value
+
+    missing = pd.isna(value)
+    if isinstance(missing, (np.ndarray, pd.Series)):
+        return bool(np.asarray(missing).all())
+    return bool(missing)
 
 
 def _graph_config(configuration):
@@ -477,7 +496,7 @@ class DynGraphIgraph(RepresentationGraph):
 
                 for cid_node, pos in data_columns:
                     og_value = row_values[pos]
-                    if pd.isna(og_value):
+                    if _is_missing_cell_value(og_value):
                         continue
 
                     cid_index = update_node(f'cid__{cid_node}', "cid")

@@ -242,8 +242,25 @@ def convert_token_value(original_value):
 
     Modify this function if we need to treat other data types
     """
+    if isinstance(original_value, np.ndarray):
+        original_value = original_value.tolist()
+    elif isinstance(original_value, (tuple, set)):
+        original_value = list(original_value)
+
     if original_value in ("", None):
         return None, False
+
+    if isinstance(original_value, list):
+        cleaned_values = []
+        is_numeric = True
+        for el in original_value:
+            if el in ("", None):
+                continue
+            if pd.isna(el):
+                continue
+            cleaned_values.append(clean_str(str(el)))
+            is_numeric = is_numeric and isinstance(el, (int, float, np.integer, np.floating))
+        return (cleaned_values or None), (is_numeric if cleaned_values else False)
 
     try:
         # Try to safely evaluate a literal value (e.g., "123", "[1, 2]", etc.)

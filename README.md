@@ -163,8 +163,6 @@ The current system revolves around a few central runtime objects.
   It carries transient data such as `raw_data`, `processed_data`, `sequences`, `cg_feature`, `candidate_pairs`, and the shared `state_manager`.
 
 
-## Current Notes
+## Notes
 
-- Some endpoint functions in [main_distribution.py](main_distribution.py) still contain placeholder fallback logic.
-- The project is already partially refactored into pipeline modules, but endpoint orchestration and pipeline implementations are still being aligned.
-- The intended runtime pattern is: load state once, update in memory during the pipeline, and save once at the end.
+- dataStreamSimulator: services/dataStreamSimulator/src/main/resources/application.properties.example--> delete `.example`

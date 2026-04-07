@@ -5,6 +5,7 @@ import argparse
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from typing import Any
 from pandas import DataFrame
@@ -374,6 +375,32 @@ def can_run(task_name, finished, tasks):
 
     return False
 
+
+def _estimate_cache_item_bytes(value):
+    if value is None:
+        return 0
+
+    if isinstance(value, pd.DataFrame):
+        return int(value.memory_usage(index=True, deep=True).sum())
+
+    if isinstance(value, dict):
+        size = sys.getsizeof(value)
+        for key, item in value.items():
+            size += sys.getsizeof(key)
+            size += _estimate_cache_item_bytes(item)
+        return size
+
+    if isinstance(value, (list, tuple, set)):
+        size = sys.getsizeof(value)
+        for item in value:
+            size += _estimate_cache_item_bytes(item)
+        return size
+
+    if isinstance(value, StateManager):
+        return sys.getsizeof(value) + _estimate_cache_item_bytes(value.cache)
+
+    return sys.getsizeof(value)
+
 def run_pipeline(config, tasks, data_store):
 
     finished = set()
@@ -439,6 +466,12 @@ def run_pipeline(config, tasks, data_store):
                         raise ValueError(f"{name} missing output: {k}")
                     data_store[k] = output[k]
 
+            cache_summary = ", ".join(
+                f"{key}={_estimate_cache_item_bytes(value)}B"
+                for key, value in data_store.items()
+            )
+            print(f"[CACHE] after {name}: {cache_summary}")
+
             finished.add(name)
             progress = True
 
@@ -470,7 +503,7 @@ def kafka_driver(config):
             'group.id': config['kafka']["groupid"],
             'auto.offset.reset': 'latest',   # latest / earliest
             'enable.auto.commit': False,
-            'max.poll.interval.ms': 900000,
+            'max.poll.interval.ms': 1800000,
         })
 
         # subscribe a topic
@@ -717,13 +750,6 @@ if __name__ == '__main__':
     yaml = YAML()
     with open(config_file, 'r') as f:
         config = yaml.load(f)
-    
-    # check data path 
-    import os
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    print(f'file path: {base_dir}')
-    workpath = os.getcwd()
-    print(f'work dir: {workpath}')
 
     # create folders
     os.makedirs('tmp/', exist_ok=True)
