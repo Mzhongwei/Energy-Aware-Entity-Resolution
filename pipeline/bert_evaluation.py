@@ -13,8 +13,15 @@ from .bert_utils import build_compute_metrics, build_tokenize_fn
 
 
 def evaluate_from_saved_model(processed_data, config):
-    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    save_dir = os.path.join(BASE_DIR, f"data/bert/{config['version_name']}")
+    state_config = config.get("state_management", {}) if isinstance(config, dict) else {}
+    bert_dir = state_config.get("bert-dir", "data/bert")
+    if not os.path.isabs(bert_dir):
+        bert_dir = os.path.join("/app", bert_dir)
+    save_dir = os.path.join(bert_dir, config.get("version_name", "test"))
+
+    if not os.path.isdir(save_dir):
+        raise FileNotFoundError(f"Local BERT model directory not found: {save_dir}")
+
     tokenizer = AutoTokenizer.from_pretrained(save_dir)
     model = AutoModelForSequenceClassification.from_pretrained(save_dir)
 

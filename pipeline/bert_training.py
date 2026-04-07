@@ -31,12 +31,22 @@ def train_model(configuration, processed_data):
     model = model_llm.get_model()
     tokenizer = model_llm.get_tokenizer()
 
+    train_frame = processed_data.get('train')
+    eval_frame = processed_data.get('eval')
+    if train_frame is None or eval_frame is None:
+        raise ValueError("processed_data must include non-empty 'train' and 'eval' datasets.")
+    if len(train_frame) == 0 or len(eval_frame) == 0:
+        raise ValueError(
+            "processed_data contains empty training or evaluation data. "
+            "Check that Data_example/bert/*.csv is present in the mounted PVC and the config paths are correct."
+        )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
     dataset = DatasetDict({
-        "train": Dataset.from_pandas(processed_data['train']),
-        "eval": Dataset.from_pandas(processed_data['eval'])
+        "train": Dataset.from_pandas(train_frame),
+        "eval": Dataset.from_pandas(eval_frame)
     })
 
     dataset = dataset.map(build_tokenize_fn(tokenizer), batched=True)

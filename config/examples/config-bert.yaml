@@ -1,4 +1,4 @@
-mode: "bert-training-b_evaluation"
+mode: "bert-b_evaluation-inference"
 version_name: "test"
 
 # bert mode, source data
@@ -9,6 +9,12 @@ evalset_path: "Data_example/bert/valid.csv"
 # incremental mode
 # meta_path: list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
 meta_path: ["name", "rid"]
+
+kafka:
+  topicid: "entity_resolution_process"
+  groupid: "er_group"
+  bootstrap_servers: "localhost"
+  port: 9092
 
 # STATE MANAGEMENT
 state_management:

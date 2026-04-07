@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 
 import pandas as pd
 from pandas import DataFrame
@@ -39,19 +40,26 @@ def serialize_for_json(obj):
 
 
 def normalization(config: dict, raw_data: dict | DataFrame):
-    print("[normalization]")
+    print("[normalization]", file=sys.stderr)
     if 'embedding' in config['mode']:
         # in incremental mode, we index records and normalize
  
         # # data example
-        # raw_data = pd.DataFrame(
+        # raw_data = pd.DataFrame(Traceback (most recent call last):File "/app/distributions/normalization_distribution.py", line 92, in <module>run_argo_once(mode=args.mode, raw_data_value=args.raw_data)File "/app/distributions/normalization_distribution.py", line 83, in run_argo_onceoutput = normalization(config=config, raw_data=load_raw_data(raw_data_value))File "/app/distributions/normalization_distribution.py", line 54, in normalizationprocessed_data = index_normalization(config, raw_data, raw_data_path)File "/app/pipeline/normalization.py", line 84, in index_normalizationif "rid" not in raw_data.columns:AttributeError: 'dict' object has no attribute 'columns'
         #     data = {
         #         "name": ["kkk", "ttt", ["hhh", "JJJ"]],
         #         "adress": ["d ? rue", "yes addre", "ad . r"]
         #     }
         # )
         raw_data_path = config.get("data_source_A")
-        processed_data = index_normalization(config, raw_data, raw_data_path)
+        raw_df = raw_data
+        if isinstance(raw_data, dict):
+            # Argo input often wraps rows in a dict payload, keep the first DataFrame-like value.
+            if isinstance(raw_data.get("data"), pd.DataFrame):
+                raw_df = raw_data["data"]
+            else:
+                raw_df = next((value for value in raw_data.values() if isinstance(value, pd.DataFrame)), pd.DataFrame())
+        processed_data = index_normalization(config, raw_df, raw_data_path)
     else:
         if "bert" in config.get("mode", ""):
             if "training" in config["mode"]:
