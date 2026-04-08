@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from models import CGIndex
+from models.cg_index import CGIndex
 
 from .cg_feature_extraction import _as_field_list, _cg_block
 

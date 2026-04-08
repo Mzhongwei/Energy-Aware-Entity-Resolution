@@ -9,7 +9,7 @@ from ruamel.yaml import YAML
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
-CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-bert.yaml")
+CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 
 
 def load_config(config_path: str = CONFIG_PATH):
@@ -76,6 +76,7 @@ def normalization(config: dict, raw_data: dict | DataFrame):
             if isinstance(df, pd.DataFrame) and not df.empty:
                 raw_data[key] = sequence_generating_m1(df)
         processed_data = raw_data
+    print("[normalization] completed, processed_data: {processed_data}".format(processed_data=processed_data), file=sys.stderr)
     return processed_data
 
 

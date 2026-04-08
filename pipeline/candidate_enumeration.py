@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, List
 
-from models import CGIndex
+from models.cg_index import CGIndex
 
 def query_indexed_ids(feature: Any, indexed_record_index: CGIndex) -> List[str]:
     if indexed_record_index is None:

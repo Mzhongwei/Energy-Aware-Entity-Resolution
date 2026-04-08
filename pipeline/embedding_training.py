@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional, Sequence
 
-from models import EmbeddingModel
+from models.embedding_model import EmbeddingModel
 
 
 def _embedding_config(config) -> dict:

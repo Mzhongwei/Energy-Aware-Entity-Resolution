@@ -1,21 +1,18 @@
-mode: "embedding-training-inference-evaluation"
+mode: "embedding-inference"
 version_name: "test"
 
-# bert mode, source data
-trainset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/train.csv"
-testset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/test.csv"
-evalset_path: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/valid.csv"
-
 # incremental mode
-data_source_A: "/home/zhongwei/Data_integration/energy_aware_er/Data_example/fodors_zagats-tableA.csv"
-data_source_B: "/home/zhongwei/Data_integration/energy_aware_er/Data_example/fodors_zagats-tableB.csv"
-ground_truth: "/home/zhongwei/Data_integration/energy_aware_er/Data_example/fodors_zagats-matches.txt"
-simulator_path: "/home/zhongwei/Data_integration/dataStreamSimulator"
+data_source_A: "Data_example/fodors_zagat-tableA.csv"
+data_source_B: "Data_example/fodors_zagat-tableB.csv"
+ground_truth: "Data_example/fodors_zagat-matches.txt"
+simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
   groupid: "er_group"
   bootstrap_servers: "localhost"
   port: 9092
+  partitions: 3
+  replication_factor: 1
 
   # sliding window strategy
   window_strategy: "count"       # "count" or "time"
@@ -32,11 +29,11 @@ state_management:
 # incremental mode. if execute several config files successively, the embedding_model-name (or version name) can not be the same
   graph-dir: "/app/cache/graph"
   graph-name: ""
-  embedding-dir: "data/embedding"
+  embedding-dir: "/app/cache/embedding"
   embedding_model-name: ""
   feature_index-dir: "/app/cache/index"
   feature_index-name: ""
-  predicted_match-dir: "data/predicted"
+  predicted_match-dir: "/app/cache/predicted"
   predicted_match-name: ""
 
 # pipeline
@@ -58,6 +55,11 @@ graph_construction:
   flatten: "tt"                  # split prefix for nodes
   smoothing_method: "no"         # smooth method: log/no
   directed: false                # whether the graph is directed
+  ngram:                         # config node_type like ["5#__idx", "0#__cid", "0#__tt", "0#__tn", "0#__ng"] if ngram activated
+    # token_n: [2, 3]
+    # char_n: []
+    # skip: 0                    # How many positions can there be between words when forming an n-gram
+
 
 random_walk:
   write_walks: true

@@ -9,7 +9,7 @@ FALLBACK_MODE="${1:-default}"
 CONFIG_SRC=""
 
 # Try predefined config paths in order
-for p in /app/config/examples/config-bert.yaml /app/examples/config.yaml; do
+for p in /app/config/examples/config-embedding.yaml /app/examples/config.yaml; do
   if [ -f "$p" ]; then
     CONFIG_SRC="$p"
     break
