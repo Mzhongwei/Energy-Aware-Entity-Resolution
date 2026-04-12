@@ -18,6 +18,7 @@ from governance import StateManager
 from pipeline import (
     sequence_generating_m1,
     index_normalization,
+    clear_id_counters,
     train_model,
     evaluate_from_saved_model,
     compare_ground_truth,
@@ -117,7 +118,7 @@ def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_se
         )
     )
 
-def normalization(config: dict, raw_data: dict | DataFrame):
+def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool):
     print("[normalization]")
     if 'embedding' in config['mode']:
         # in incremental mode, we index records and normalize
@@ -130,7 +131,7 @@ def normalization(config: dict, raw_data: dict | DataFrame):
         #     }
         # )
         raw_data_path = config.get("data_source_A")
-        processed_data = index_normalization(config, raw_data, raw_data_path)
+        processed_data = index_normalization(config, raw_data, raw_data_path, is_training)
     else:
         # for bert mode, we do not need to index the records. We normalize records values and generate directly the appropriate df structure 
         for k, df in raw_data.items():
@@ -278,7 +279,7 @@ def bert_evaluation(config, processed_data, state_manager: StateManager):
 TASKS = {
     "normalization": {
         "deps": [],
-        "input": ["raw_data"],
+        "input": ["raw_data", "is_training"],
         "output": ["processed_data"],
         "func": normalization
     },
@@ -376,28 +377,37 @@ def can_run(task_name, finished, tasks):
     return False
 
 
-def _estimate_cache_item_bytes(value):
+def _estimate_cache_item_bytes(value, seen=None):
+    if seen is None:
+        seen = set()
+
     if value is None:
         return 0
 
     if isinstance(value, pd.DataFrame):
         return int(value.memory_usage(index=True, deep=True).sum())
 
+    if isinstance(value, (dict, list, tuple, set, StateManager)):
+        obj_id = id(value)
+        if obj_id in seen:
+            return 0
+        seen.add(obj_id)
+
     if isinstance(value, dict):
         size = sys.getsizeof(value)
         for key, item in value.items():
             size += sys.getsizeof(key)
-            size += _estimate_cache_item_bytes(item)
+            size += _estimate_cache_item_bytes(item, seen)
         return size
 
     if isinstance(value, (list, tuple, set)):
         size = sys.getsizeof(value)
         for item in value:
-            size += _estimate_cache_item_bytes(item)
+            size += _estimate_cache_item_bytes(item, seen)
         return size
 
     if isinstance(value, StateManager):
-        return sys.getsizeof(value) + _estimate_cache_item_bytes(value.cache)
+        return sys.getsizeof(value) + _estimate_cache_item_bytes(value.cache, seen)
 
     return sys.getsizeof(value)
 
@@ -466,11 +476,11 @@ def run_pipeline(config, tasks, data_store):
                         raise ValueError(f"{name} missing output: {k}")
                     data_store[k] = output[k]
 
-            cache_summary = ", ".join(
-                f"{key}={_estimate_cache_item_bytes(value)}B"
-                for key, value in data_store.items()
-            )
-            print(f"[CACHE] after {name}: {cache_summary}")
+            # cache_summary = ", ".join(
+            #     f"{key}={_estimate_cache_item_bytes(value)}B"
+            #     for key, value in data_store.items()
+            # )
+            # print(f"[CACHE] after {name}: {cache_summary}")
 
             finished.add(name)
             progress = True
@@ -563,10 +573,12 @@ def driver(config):
     data_store = {
         "state_manager": state,
         "raw_data": None,
+        "is_training": False,
     }
     
     if "embedding" in mode:
         if "training" in mode:
+            data_store["is_training"] = True
             stages = [
                 "normalization",
                 "graph_construction",
@@ -580,6 +592,7 @@ def driver(config):
             data_store = run_pipeline(config, sub_tasks, data_store)
             data_store['state_manager'].save(config, stages)
         if "inference" in mode:
+            data_store["is_training"] = False
             
             stages = [
                 "normalization",
@@ -767,5 +780,10 @@ if __name__ == '__main__':
     try:
         driver(config)
     finally:
+        if "embedding" in str(config.get("mode", "")):
+            try:
+                clear_id_counters(config)
+            except Exception as exc:
+                print(f"[WARN] Failed to clear data/ids counters: {exc}")
         total_duration = time.perf_counter() - total_start
         print(f"[TIME] Total runtime: {total_duration:.3f}s")
