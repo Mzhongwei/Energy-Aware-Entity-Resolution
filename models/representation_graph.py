@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import igraph as ig
 from igraph import Graph
@@ -10,12 +10,31 @@ class RepresentationGraph:
     def __init__(self, directed: bool = False) -> None:
         self.graph: Graph = ig.Graph(directed=directed)
         self.name2idx: Dict[str, int] = {}
+        self.edge2eid: Dict[Tuple[int, int], int] = {}
         self.graph["weighted"] = directed
 
     def rebuild_index_map(self) -> None:
         self.name2idx.clear()
         for v in self.graph.vs:
             self.name2idx[v["name"]] = int(v.index)
+
+    def _edge_key(self, node1_index: int, node2_index: int) -> Tuple[int, int]:
+        node1_index = int(node1_index)
+        node2_index = int(node2_index)
+        if self.graph.is_directed():
+            return (node1_index, node2_index)
+        if node1_index <= node2_index:
+            return (node1_index, node2_index)
+        return (node2_index, node1_index)
+
+    def rebuild_edge_index(self) -> None:
+        self.edge2eid.clear()
+        for edge in self.graph.es:
+            source, target = edge.tuple
+            self.edge2eid[self._edge_key(source, target)] = int(edge.index)
+
+    def get_edge_index(self, node1_index: int, node2_index: int) -> Optional[int]:
+        return self.edge2eid.get(self._edge_key(node1_index, node2_index))
 
     def clean_attributes(self) -> Graph:
         allowed_types = (str, int, float, bool)
@@ -35,6 +54,7 @@ class RepresentationGraph:
             self.graph["weighted"] = self.graph.is_directed()
 
         self.rebuild_index_map()
+        self.rebuild_edge_index()
         self._after_graph_loaded()
 
     def _after_graph_loaded(self) -> None:
@@ -99,8 +119,23 @@ class RepresentationGraph:
         return self._update_node(ins_value, node_type, **attrs)
 
     def _add_edge(self, node1_index: int, node2_index: int) -> None:
-        if not self.graph.are_connected(node1_index, node2_index):
-            self.graph.add_edge(node1_index, node2_index)
+        if self.get_edge_index(node1_index, node2_index) is None:
+            self._add_edges_batch([(int(node1_index), int(node2_index))])
+
+    def _add_edges_batch(self, edges: List[Tuple[int, int]], weights: Optional[List[float]] = None) -> List[int]:
+        if not edges:
+            return []
+
+        start_eid = self.graph.ecount()
+        if weights is None:
+            self.graph.add_edges(edges)
+        else:
+            self.graph.add_edges(edges, attributes={"weight": weights})
+
+        new_eids = list(range(start_eid, self.graph.ecount()))
+        for eid, edge in zip(new_eids, edges):
+            self.edge2eid[self._edge_key(edge[0], edge[1])] = eid
+        return new_eids
 
     def get_vertex_index(self, name: str) -> Optional[int]:
         return self.name2idx.get(name)
@@ -111,4 +146,5 @@ class RepresentationGraph:
             return
         self.graph.delete_vertices(idxs)
         self.rebuild_index_map()
+        self.rebuild_edge_index()
         self._after_topology_changed()

@@ -113,7 +113,7 @@ def compare_ground_truth(configuration: dict) -> Dict[str, Dict[str, float]]:
     actual_pairs_left_only = {pair for pair in actual_pairs if pair[0] in left_target_rids}
     left_only_metrics = _compute_metrics(predicted_pairs_left_only, actual_pairs_left_only)
 
-    print(f'[Result] all_mutual_top1: {all_metrics}, left_target_only: {left_only_metrics}')
+    print(f'[Result] version: {configuration["version_name"]}, all_mutual_top1: {all_metrics}, left_target_only: {left_only_metrics}')
 
     return {
         "all_mutual_top1": all_metrics,

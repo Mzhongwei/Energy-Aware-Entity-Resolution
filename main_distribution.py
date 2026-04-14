@@ -2,10 +2,18 @@ import argparse
 import json
 import os
 import argparse
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from typing import Any
+from pandas import DataFrame
 from ruamel.yaml import YAML
 import pandas as pd
 import socket
 from confluent_kafka import Consumer, KafkaException, KafkaError
+from confluent_kafka.admin import AdminClient, NewTopic
 
 from governance import StateManager
 from utils.write_log import write_log
@@ -14,14 +22,97 @@ from utils.write_log import write_log
 # Payload Serialization
 # =========================
 
-def serialize_for_json(obj):
-    """Convert non-JSON-serializable objects to JSON-safe format."""
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    elif isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
+def _config_section(config: dict, primary_key: str, legacy_key: str | None = None) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    section = config.get(primary_key)
+    if isinstance(section, dict):
+        return section
+    if legacy_key:
+        legacy_section = config.get(legacy_key)
+        if isinstance(legacy_section, dict):
+            return legacy_section
+    return {}
+
+
+def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_seconds: float = 10.0) -> None:
+    kafka_config = config["kafka"]
+    bootstrap_servers = f'{kafka_config["bootstrap_servers"]}:{kafka_config["port"]}'
+    topic_name = kafka_config["topicid"]
+    num_partitions = int(kafka_config.get("partitions", 3))
+    replication_factor = int(kafka_config.get("replication_factor", 1))
+
+    admin_client = AdminClient({"bootstrap.servers": bootstrap_servers})
+    metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
+    topic_metadata = metadata.topics.get(topic_name)
+
+    topic_missing = (
+        topic_metadata is None
+        or (
+            topic_metadata.error is not None
+            and topic_metadata.error.code() == KafkaError.UNKNOWN_TOPIC_OR_PART
+        )
+    )
+
+    if topic_missing:
+        futures = admin_client.create_topics(
+            [NewTopic(topic_name, num_partitions=num_partitions, replication_factor=replication_factor)]
+        )
+        try:
+            futures[topic_name].result(timeout=timeout)
+            print(
+                f"[kafka] Created topic '{topic_name}' "
+                f"with {num_partitions} partitions and replication factor {replication_factor}."
+            )
+        except Exception as exc:
+            raise KafkaException(
+                KafkaError(
+                    KafkaError.UNKNOWN_TOPIC_OR_PART,
+                    f"Failed to create Kafka topic '{topic_name}': {exc}"
+                )
+            ) from exc
+
+    deadline = time.time() + ready_wait_seconds
+    last_error = None
+    while time.time() < deadline:
+        metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
+        topic_metadata = metadata.topics.get(topic_name)
+
+        if topic_metadata is not None and topic_metadata.error is None and topic_metadata.partitions:
+            return
+
+        if topic_metadata is not None and topic_metadata.error is not None:
+            last_error = topic_metadata.error
+        else:
+            last_error = KafkaError(
+                KafkaError.UNKNOWN_TOPIC_OR_PART,
+                f"Kafka topic '{topic_name}' is still unavailable on broker {bootstrap_servers}."
+            )
+        time.sleep(1)
+
+    if last_error is not None:
+        raise KafkaException(last_error)
+    raise KafkaException(
+        KafkaError(
+            KafkaError.UNKNOWN_TOPIC_OR_PART,
+            f"Kafka topic '{topic_name}' did not become ready within {ready_wait_seconds} seconds."
+        )
+    )
+
+def normalization(config: dict, raw_data: dict | DataFrame):
+    print("[normalization]")
+    if 'embedding' in config['mode']:
+        # in incremental mode, we index records and normalize
+ 
+        # # data example
+        # raw_data = pd.DataFrame(
+        #     data = {
+        #         "name": ["kkk", "ttt", ["hhh", "JJJ"]],
+        #         "adress": ["d ? rue", "yes addre", "ad . r"]
+        #     }
+        # )
+        raw_data_path = config.get("data_source_A")
+        processed_data = index_normalization(config, raw_data, raw_data_path)
     else:
         return obj
 
@@ -142,6 +233,32 @@ def can_run(task_name, finished, tasks):
 
     return False
 
+
+def _estimate_cache_item_bytes(value):
+    if value is None:
+        return 0
+
+    if isinstance(value, pd.DataFrame):
+        return int(value.memory_usage(index=True, deep=True).sum())
+
+    if isinstance(value, dict):
+        size = sys.getsizeof(value)
+        for key, item in value.items():
+            size += sys.getsizeof(key)
+            size += _estimate_cache_item_bytes(item)
+        return size
+
+    if isinstance(value, (list, tuple, set)):
+        size = sys.getsizeof(value)
+        for item in value:
+            size += _estimate_cache_item_bytes(item)
+        return size
+
+    if isinstance(value, StateManager):
+        return sys.getsizeof(value) + _estimate_cache_item_bytes(value.cache)
+
+    return sys.getsizeof(value)
+
 def run_pipeline(config, tasks, data_store):
 
     finished = set()
@@ -177,102 +294,19 @@ def run_pipeline(config, tasks, data_store):
 
             # func = task["func"]
 
-            # # 3. execute the missions
-            # try:
-            #     output = func(config=config, **inputs)
-            # except Exception as e:
-            #     raise RuntimeError(f"Task {name} failed: {e}")
-            
-            # Socket connection to the service (new protocol: single JSON envelope)
-            service_name = task.get("service")
-            if not service_name:
-                raise ValueError(f"Task {name} has no service configured")
-
-            service_port = task.get("service-port", 80) # default port 80 for services
-
-            callback_port = task.get("listen-port") if task.get("output") else None
-
-            # Exclude StateManager from JSON payload; it stays in manager
-            serializable_inputs = {k: v for k, v in inputs.items() if k != "state_manager"}
-            serializable_inputs = serialize_for_json(serializable_inputs)
-
-            request = {
-                "protocol_version": "2.0",
-                "task": name,
-                "config": config,
-                "inputs": serializable_inputs,
-                "callback": {
-                    "host": "service-manager",
-                    "port": callback_port,
-                } if callback_port else None,
-            }
-
-            print(f"Connecting to service: {service_name}:{service_port}")
+            # 3. execute the missions
+            task_start = time.perf_counter()
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((service_name, service_port))
                     s.sendall((json.dumps(request) + "\n").encode("utf-8"))
                     print(f"Sent request for task '{name}' to {service_name}:{service_port}")
             except Exception as e:
-                raise RuntimeError(f"Failed to connect to {service_name}:{service_port}: {e}")
-
-            # Listen for the service response if output is expected (JSON envelope protocol v2)
-            if task.get("output"):
-                listen_port = task.get("listen-port")
-                if listen_port:
-                    print(f"Listening for response on port: {listen_port}")
-                    try:
-                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                            s.bind(("0.0.0.0", listen_port))
-                            s.listen(1)
-                            s.settimeout(300)
-
-                            conn, addr = s.accept()
-                            with conn:
-                                print(f"Connected by {addr}")
-
-                                chunks = []
-                                while True:
-                                    chunk = conn.recv(4096)
-                                    if not chunk:
-                                        break
-                                    chunks.append(chunk)
-                                    if b"\n" in chunk:
-                                        break
-
-                                raw_response = b"".join(chunks).decode("utf-8").strip()
-                                print(f"Received response: {raw_response}")
-
-                                try:
-                                    response_obj = json.loads(raw_response)
-                                except json.JSONDecodeError as e:
-                                    raise RuntimeError(f"Invalid JSON response for task '{name}': {e}")
-
-                                if response_obj.get("protocol_version") != "2.0":
-                                    raise RuntimeError(
-                                        f"Unsupported protocol version for task '{name}': "
-                                        f"{response_obj.get('protocol_version')}"
-                                    )
-
-                                if response_obj.get("task") != name:
-                                    raise RuntimeError(
-                                        f"Task mismatch in response. Expected '{name}', "
-                                        f"got '{response_obj.get('task')}'"
-                                    )
-
-                                if response_obj.get("status") != "ok":
-                                    raise RuntimeError(
-                                        f"Service returned error for task '{name}': "
-                                        f"{response_obj.get('result')}"
-                                    )
-
-                                output = response_obj.get("result")
-                    except socket.timeout:
-                        raise RuntimeError(f"Timeout waiting for response from task '{name}'")
-                else:
-                    print(f"No listen port specified for service {service_name}, skipping response handling.")
-
+                task_duration = time.perf_counter() - task_start
+                print(f"[TIME] {name}: {task_duration:.3f}s (failed)")
+                raise RuntimeError(f"Task {name} failed after {task_duration:.3f}s: {e}")
+            task_duration = time.perf_counter() - task_start
+            print(f"[TIME] {name}: {task_duration:.3f}s")
 
             # 4. process output
             output_keys = task.get("output", [])
@@ -295,6 +329,12 @@ def run_pipeline(config, tasks, data_store):
                     if k not in output:
                         raise ValueError(f"{name} missing output: {k}")
                     data_store[k] = output[k]
+
+            cache_summary = ", ".join(
+                f"{key}={_estimate_cache_item_bytes(value)}B"
+                for key, value in data_store.items()
+            )
+            print(f"[CACHE] after {name}: {cache_summary}")
 
             finished.add(name)
             progress = True
@@ -322,19 +362,22 @@ def safe_read_csv(path):
 
 def kafka_driver(config):
     try:
+        _ensure_kafka_topic_ready(config)
+
         # prepare kafka consumer
         consumer = Consumer({
             'bootstrap.servers': f'{config["kafka"]["bootstrap_servers"]}:{config["kafka"]["port"]}',
             'group.id': config['kafka']["groupid"],
             'auto.offset.reset': 'latest',   # latest / earliest
-            'enable.auto.commit': False
+            'enable.auto.commit': False,
+            'max.poll.interval.ms': 1800000,
         })
 
         # subscribe a topic
         consumer.subscribe([config['kafka']['topicid']])
 
     except Exception as e:
-        app_logger = write_log(config["log"]["path"], "app", "app")
+        app_logger = write_log("logs", "main", "bug")
         app_logger.error(f"Fatal error in consumer service: {str(e)}")
         print(f"Fatal error in consumer service: {str(e)}")
         return
@@ -383,6 +426,25 @@ def driver(config):
             max_empty_polls = 500
             empty_poll_count = 0
             consumer = kafka_driver(config)
+
+            java_path = os.path.abspath(config["simulator_path"])
+            csv_path = config.get("data_source_B", "")
+            csv_path = os.path.abspath(csv_path) if csv_path else ""
+            kafka_bootstrap = f'{config["kafka"]["bootstrap_servers"]}:{config["kafka"]["port"]}'
+            spring_args = shlex.join([
+                f"--csv.file.path={csv_path}",
+                f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}",
+                f"--spring.kafka.bootstrap-servers={kafka_bootstrap}",
+            ])
+            java_proc = subprocess.Popen(
+                ["mvn", f"-Dspring-boot.run.arguments={spring_args}", "spring-boot:run"],
+                cwd=java_path,
+                start_new_session=True
+            )
+            ACTIVE_JAVA_PROC = java_proc
+
+            ACTIVE_CONSUMER = consumer
+            previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
             data_buffer = []
             while True:
@@ -491,6 +553,7 @@ def get_data_stream(config):
 # Main
 # =========================
 if __name__ == '__main__':
+    total_start = time.perf_counter()
     args = parse_args()
     config_path=args.config_file
 
@@ -499,12 +562,6 @@ if __name__ == '__main__':
     yaml = YAML()
     with open(config_file, 'r') as f:
         config = yaml.load(f)
-    
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    print(f'file path: {base_dir}')
-    workpath = os.getcwd()
-    print(f'work dir: {workpath}')
-    
     # create folders
     os.makedirs('tmp/', exist_ok=True)
     os.makedirs('logs/', exist_ok=True)
@@ -519,8 +576,8 @@ if __name__ == '__main__':
     print(f'# Executuin mode chosen: {config["mode"]}')
     print(f'# The program will start soon')
 
-    import time
-    time.sleep(10)
-    driver(config)
-    # Enter daemon mode to keep the pod running
-    daemon()
+    try:
+        driver(config)
+    finally:
+        total_duration = time.perf_counter() - total_start
+        print(f"[TIME] Total runtime: {total_duration:.3f}s")
