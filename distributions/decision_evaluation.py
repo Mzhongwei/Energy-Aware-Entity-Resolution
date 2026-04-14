@@ -313,9 +313,8 @@ def decision_making(config, matching_pairs):
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
 
     matching_pairs = _normalize_matching_pairs(matching_pairs)
-    previous_pairs = get("predicted_matching_pairs")
-    if previous_pairs is not None:
-        previous_pairs = _normalize_matching_pairs(previous_pairs)
+    # Do not reuse previous_pairs across workflow runs: the shared PVC cache is persistent.
+    previous_pairs = None
 
     output_format = config.get("similarity", {}).get("output_format", "graphml")
     config["output_format"] = output_format
