@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 
 from tqdm import tqdm
 
-from models import SimilarityGraph
+from models.similarity_graph import SimilarityGraph
 
 
 ScoredPair = Tuple[str, str, float]

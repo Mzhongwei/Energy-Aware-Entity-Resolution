@@ -113,6 +113,28 @@ def _parse_json_payload(content: str):
         return None
 
 
+def _unwrap_string_payload(value):
+    current = value
+    for _ in range(5):
+        if not isinstance(current, str):
+            break
+        stripped = current.strip()
+        if not stripped:
+            break
+
+        parsed = _parse_json_payload(stripped)
+        if parsed is None:
+            try:
+                parsed = ast.literal_eval(stripped)
+            except Exception:
+                break
+
+        if parsed == current:
+            break
+        current = parsed
+    return current
+
+
 def load_input_payload(input_value: str):
     original_input = input_value
     if input_value.startswith("@"):
@@ -128,14 +150,14 @@ def load_input_payload(input_value: str):
     if os.path.isfile(input_value):
         with open(input_value, "r", encoding="utf-8") as file_handle:
             content = file_handle.read()
-        parsed = _parse_json_payload(content)
+        parsed = _unwrap_string_payload(content)
         if parsed is not None:
             _log(f"[load_input_payload] source={input_value} type={type(parsed).__name__} size={_safe_len(parsed)}")
             return parsed
         _log(f"[load_input_payload] source={input_value} type=str size={len(content)}")
         return content
 
-    parsed = _parse_json_payload(input_value)
+    parsed = _unwrap_string_payload(input_value)
     if parsed is not None:
         _log(f"[load_input_payload] source=inline type={type(parsed).__name__} size={_safe_len(parsed)}")
         return parsed
@@ -224,6 +246,8 @@ def ensure_embedding_model(config: dict):
 
 
 def _normalize_candidate_pairs(candidate_pairs):
+    candidate_pairs = _unwrap_string_payload(candidate_pairs)
+
     if isinstance(candidate_pairs, dict):
         if "candidate_pairs" in candidate_pairs:
             candidate_pairs = candidate_pairs["candidate_pairs"]
@@ -231,14 +255,7 @@ def _normalize_candidate_pairs(candidate_pairs):
             candidate_pairs = candidate_pairs["data"]
 
     if isinstance(candidate_pairs, str):
-        parsed = _parse_json_payload(candidate_pairs)
-        if parsed is not None:
-            candidate_pairs = parsed
-        else:
-            try:
-                candidate_pairs = ast.literal_eval(candidate_pairs)
-            except Exception:
-                pass
+        candidate_pairs = _unwrap_string_payload(candidate_pairs)
 
     if not isinstance(candidate_pairs, list):
         raise ValueError(f"candidate_pairs must be a list. got={type(candidate_pairs).__name__}")
@@ -279,7 +296,10 @@ def calculating_similarity(config, candidate_pairs):
     candidate_pairs_score = score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
     preview = candidate_pairs_score[:3] if isinstance(candidate_pairs_score, list) else candidate_pairs_score
     _log(f"[calculating_similarity] score_count={_safe_len(candidate_pairs_score)} preview={preview}")
-    return candidate_pairs_score
+    return {
+        "matching_pairs": candidate_pairs_score,
+        "count": len(candidate_pairs_score),
+    }
 
 
 def run_argo_once(
