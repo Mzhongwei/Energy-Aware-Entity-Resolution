@@ -29,6 +29,29 @@ def safe_read_csv(path):
     return pd.read_csv(path)
 
 
+def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
+    source_a = config.get("data_source_A")
+    source_b = config.get("data_source_B")
+
+    # For ER evaluation datasets (e.g. Fodors/Zagat), ground-truth ids assume
+    # A and B are indexed in one continuous sequence.
+    if source_a and source_b:
+        df_a = safe_read_csv(source_a)
+        df_b = safe_read_csv(source_b)
+        if not df_a.empty and not df_b.empty:
+            return pd.concat([df_a, df_b], ignore_index=True)
+
+    if isinstance(raw_data, dict):
+        if isinstance(raw_data.get("data"), pd.DataFrame):
+            return raw_data["data"]
+        return next((value for value in raw_data.values() if isinstance(value, pd.DataFrame)), pd.DataFrame())
+
+    if isinstance(raw_data, pd.DataFrame):
+        return raw_data
+
+    return pd.DataFrame()
+
+
 def serialize_for_json(obj):
     if isinstance(obj, pd.DataFrame):
         return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
@@ -52,13 +75,15 @@ def normalization(config: dict, raw_data: dict | DataFrame):
         #     }
         # )
         raw_data_path = config.get("data_source_A")
-        raw_df = raw_data
-        if isinstance(raw_data, dict):
-            # Argo input often wraps rows in a dict payload, keep the first DataFrame-like value.
-            if isinstance(raw_data.get("data"), pd.DataFrame):
-                raw_df = raw_data["data"]
-            else:
-                raw_df = next((value for value in raw_data.values() if isinstance(value, pd.DataFrame)), pd.DataFrame())
+        raw_df = _resolve_embedding_raw_df(config, raw_data)
+        print(
+            "[normalization] embedding_input_rows={rows} source_A={source_a} source_B={source_b}".format(
+                rows=len(raw_df),
+                source_a=config.get("data_source_A"),
+                source_b=config.get("data_source_B"),
+            ),
+            file=sys.stderr,
+        )
         processed_data = index_normalization(config, raw_df, raw_data_path)
     else:
         if "bert" in config.get("mode", ""):
@@ -86,9 +111,18 @@ def load_raw_data(raw_data_value: str) -> dict | DataFrame:
     return {"data": pd.DataFrame([{"value": raw_data_value}])}
 
 
-def run_argo_once(mode: str, raw_data_value: str):
+def run_argo_once(
+    mode: str,
+    raw_data_value: str,
+    data_source_a: str = "",
+    data_source_b: str = "",
+):
     config = load_config()
     config["mode"] = mode
+    if isinstance(data_source_a, str) and data_source_a.strip():
+        config["data_source_A"] = data_source_a.strip()
+    if isinstance(data_source_b, str) and data_source_b.strip():
+        config["data_source_B"] = data_source_b.strip()
     output = normalization(config=config, raw_data=load_raw_data(raw_data_value))
     print(json.dumps(serialize_for_json(output)))
 
@@ -97,5 +131,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Normalization distribution for Argo")
     parser.add_argument("--mode", default="default")
     parser.add_argument("--raw_data", default="")
+    parser.add_argument("--data_source_A", default="")
+    parser.add_argument("--data_source_B", default="")
     args = parser.parse_args()
-    run_argo_once(mode=args.mode, raw_data_value=args.raw_data)
+    run_argo_once(
+        mode=args.mode,
+        raw_data_value=args.raw_data,
+        data_source_a=args.data_source_A,
+        data_source_b=args.data_source_B,
+    )

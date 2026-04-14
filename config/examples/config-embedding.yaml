@@ -1,4 +1,4 @@
-mode: "embedding-inference"
+mode: "embedding-inference-evaluation"
 version_name: "test"
 
 # incremental mode
