@@ -1,8 +1,10 @@
 import argparse
 import ast
+import hashlib
 import json
 import os
 import sys
+import time
 
 import pandas as pd
 from ruamel.yaml import YAML
@@ -12,7 +14,9 @@ from pipeline.embedding_training import train_embeddings
 from pipeline.calculating_similarity import score_candidate_pairs
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-STATE_CACHE_PATH = "/app/cache/state_cache.json"
+WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
+STATE_CACHE_PATH = f"/app/cache/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/cache/state_cache.json"
+STATE_MANIFEST_PATH = "/app/cache/state_manifest.json"
 
 
 def _log(message: str):
@@ -59,6 +63,83 @@ def _resolve_cache_file(path: str) -> str:
     if os.path.isdir(path):
         return os.path.join(path, "state_cache.json")
     return path
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _sha256_file(path: str) -> str:
+    if not os.path.exists(path):
+        return ""
+    digest = hashlib.sha256()
+    with open(path, "rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_state_manifest(path: str = STATE_MANIFEST_PATH) -> dict:
+    try:
+        if not os.path.exists(path):
+            return {"versions": {}}
+        with open(path, "r", encoding="utf-8") as file_handle:
+            loaded = json.load(file_handle)
+        if isinstance(loaded, dict):
+            loaded.setdefault("versions", {})
+            return loaded
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    return {"versions": {}}
+
+
+def _persist_state_manifest(manifest: dict, path: str = STATE_MANIFEST_PATH):
+    manifest_dir = os.path.dirname(path)
+    if manifest_dir:
+        os.makedirs(manifest_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file_handle:
+        json.dump(manifest, file_handle)
+
+
+def _register_manifest_artifact(config: dict, logical_name: str, artifact_path: str):
+    version_name = str(config.get("version_name", "test"))
+    manifest = _load_state_manifest()
+    versions = manifest.setdefault("versions", {})
+    version_entry = versions.setdefault(version_name, {})
+    version_entry["updated_at"] = _now_iso()
+    version_entry["last_run_id"] = WORKFLOW_NAME
+    version_entry["window"] = {
+        "id": os.environ.get("WINDOW_ID", ""),
+        "reason": os.environ.get("WINDOW_REASON", ""),
+        "record_count": os.environ.get("WINDOW_RECORD_COUNT", ""),
+        "start_offset": os.environ.get("WINDOW_START_OFFSET", ""),
+        "end_offset": os.environ.get("WINDOW_END_OFFSET", ""),
+    }
+    artifacts = version_entry.setdefault("artifacts", {})
+    artifacts[logical_name] = {
+        "path": artifact_path,
+        "exists": os.path.exists(artifact_path),
+        "sha256": _sha256_file(artifact_path),
+        "updated_at": _now_iso(),
+    }
+    _persist_state_manifest(manifest)
+    _log(
+        f"[manifest] version={version_name} run_id={WORKFLOW_NAME} "
+        f"window_id={version_entry['window'].get('id', '')} artifact={logical_name} path={artifact_path}"
+    )
+
+
+def _manifest_artifact_path(config: dict, logical_name: str) -> str:
+    version_name = str(config.get("version_name", "test"))
+    manifest = _load_state_manifest()
+    path = (
+        manifest.get("versions", {})
+        .get(version_name, {})
+        .get("artifacts", {})
+        .get(logical_name, {})
+        .get("path")
+    )
+    return path if isinstance(path, str) else ""
 
 
 def _load_state_cache(path: str = STATE_CACHE_PATH):
@@ -220,6 +301,7 @@ def update(key, value):
     else:
         _log(f"[state] saving non-model embedding payload to {emb_path}")
         _write_text(emb_path, model)
+    _register_manifest_artifact(config, "embedding_model", emb_path)
 
 
 def ensure_embedding_model(config: dict):
@@ -229,7 +311,7 @@ def ensure_embedding_model(config: dict):
         return current
 
     state_cfg = _state_config(config)
-    emb_path = _embedding_artifact_path(state_cfg, config)
+    emb_path = _manifest_artifact_path(config, "embedding_model") or _embedding_artifact_path(state_cfg, config)
     _log(f"[state] embedding path={emb_path} exists={_file_has_content(emb_path)}")
     if _file_has_content(emb_path):
         try:
@@ -237,6 +319,7 @@ def ensure_embedding_model(config: dict):
             STATE_CACHE["embedding_model"] = model
             _persist_state_cache()
             _log("[state] embedding_model loaded from disk")
+            _register_manifest_artifact(config, "embedding_model", emb_path)
             return model
         except Exception:
             _log("[state] failed to load embedding_model from disk")
