@@ -25,7 +25,7 @@ kafka:
 # STATE MANAGEMENT
 state_management:
 # bert mode
-  bert-dir: "data/bert"
+  bert-dir: "/app/data/bert"
 # incremental mode. if execute several config files successively, the embedding_model-name (or version name) can not be the same
   graph-dir: "/app/cache/graph"
   graph-name: ""

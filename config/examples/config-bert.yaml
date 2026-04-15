@@ -19,15 +19,15 @@ kafka:
 # STATE MANAGEMENT
 state_management:
 # bert mode
-  bert-dir: "data/bert"
+  bert-dir: "/app/data/bert"
 # incremental mode. if execute several config files successively, the embedding_model-name (or version name) can not be the same
-  graph-dir: "data/graph"
+  graph-dir: "/app/cache/graph"
   graph-name: ""
-  embedding-dir: "data/embedding"
+  embedding-dir: "/app/cache/embedding"
   embedding_model-name: ""
-  feature_index-dir: "data/index"
+  feature_index-dir: "/app/cache/index"
   feature_index-name: ""
-  predicted_match-dir: "data/predicted"
+  predicted_match-dir: "/app/cache/predicted"
   predicted_match-name: ""
 
 # pipeline
