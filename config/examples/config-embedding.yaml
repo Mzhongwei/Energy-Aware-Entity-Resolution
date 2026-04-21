@@ -2,9 +2,9 @@ mode: "embedding-inference-evaluation"
 version_name: "test"
 
 # incremental mode
-data_source_A: "Data_example/fodors_zagat-tableA.csv"
-data_source_B: "Data_example/fodors_zagat-tableB.csv"
-ground_truth: "Data_example/fodors_zagat-matches.txt"
+data_source_A: "Data_example/fodors_zagats-tableA.csv"
+data_source_B: "Data_example/fodors_zagats-tableB.csv"
+ground_truth: "Data_example/fodors_zagats-matches.txt"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
@@ -38,6 +38,9 @@ state_management:
 
 # pipeline
 normalization:
+  # Set true for deterministic reruns (stable rid mapping from idx__0 each run).
+  # Keep false for incremental streaming behavior where rid counters continue.
+  reset_counter_on_start: true
 
 candidate_generation:
   status: True

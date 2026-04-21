@@ -29,6 +29,45 @@ def safe_read_csv(path):
     return pd.read_csv(path)
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+    return default
+
+
+def _counter_path_for_version(version_name: str) -> str:
+    save_dir = os.path.join("data", "ids")
+    os.makedirs(save_dir, exist_ok=True)
+    return os.path.join(save_dir, f"{version_name}.txt")
+
+
+def _maybe_reset_rid_counter(config: dict) -> str:
+    norm_cfg = config.get("normalization", {}) if isinstance(config, dict) else {}
+    norm_cfg = norm_cfg if isinstance(norm_cfg, dict) else {}
+    reset_counter = _as_bool(norm_cfg.get("reset_counter_on_start", False), default=False)
+    version_name = str(config.get("version_name", "test"))
+    counter_path = _counter_path_for_version(version_name)
+
+    if reset_counter:
+        with open(counter_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write("0")
+        print(
+            f"[normalization] reset_counter_on_start enabled; counter reset to 0 path={counter_path} version={version_name}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[normalization] reset_counter_on_start disabled; keeping existing counter path={counter_path} version={version_name}",
+            file=sys.stderr,
+        )
+
+    return counter_path
+
+
 def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
     source_a = config.get("data_source_A")
     source_b = config.get("data_source_B")
@@ -76,6 +115,7 @@ def normalization(config: dict, raw_data: dict | DataFrame):
         # )
         raw_data_path = config.get("data_source_A")
         raw_df = _resolve_embedding_raw_df(config, raw_data)
+        _maybe_reset_rid_counter(config)
         print(
             "[normalization] embedding_input_rows={rows} source_A={source_a} source_B={source_b}".format(
                 rows=len(raw_df),
