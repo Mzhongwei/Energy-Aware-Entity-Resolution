@@ -11,7 +11,7 @@ from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-STATE_CACHE_PATH = "/app/cache/state_cache.json"
+STATE_CACHE_PATH = "/app/data/state_cache.json"
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -139,7 +139,7 @@ def _state_config(config: dict) -> dict:
 
 
 def _graph_artifact_path(state_config: dict, config: dict) -> str:
-    graph_dir = state_config.get("graph-dir", "/app/cache/graph")
+    graph_dir = state_config.get("graph-dir", "/app/data/graph")
     version_name = config.get("version_name", "test")
     graph_name = state_config.get("graph-name") or version_name
     os.makedirs(graph_dir, exist_ok=True)
@@ -147,7 +147,7 @@ def _graph_artifact_path(state_config: dict, config: dict) -> str:
 
 
 def _graph_manifest_path(state_config: dict, config: dict) -> str:
-    graph_dir = state_config.get("graph-dir", "/app/cache/graph")
+    graph_dir = state_config.get("graph-dir", "/app/data/graph")
     version_name = config.get("version_name", "test")
     graph_name = state_config.get("graph-name") or version_name
     os.makedirs(graph_dir, exist_ok=True)

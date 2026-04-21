@@ -21,13 +21,13 @@ state_management:
 # bert mode
   bert-dir: "/app/data/bert"
 # incremental mode. if execute several config files successively, the embedding_model-name (or version name) can not be the same
-  graph-dir: "/app/cache/graph"
+  graph-dir: "/app/data/graph"
   graph-name: ""
-  embedding-dir: "/app/cache/embedding"
+  embedding-dir: "/app/data/embedding"
   embedding_model-name: ""
-  feature_index-dir: "/app/cache/index"
+  feature_index-dir: "/app/data/index"
   feature_index-name: ""
-  predicted_match-dir: "/app/cache/predicted"
+  predicted_match-dir: "/app/data/predicted"
   predicted_match-name: ""
 
 # pipeline

@@ -16,8 +16,8 @@ from pipeline.evaluation import compare_ground_truth
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
-STATE_CACHE_PATH = f"/app/cache/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/cache/state_cache.json"
-STATE_MANIFEST_PATH = "/app/cache/state_manifest.json"
+STATE_CACHE_PATH = f"/app/data/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/data/state_cache.json"
+STATE_MANIFEST_PATH = "/app/data/state_manifest.json"
 
 
 def _log(message: str):

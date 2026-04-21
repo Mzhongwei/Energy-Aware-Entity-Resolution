@@ -12,7 +12,7 @@ from pipeline.candidate_enumeration import enumerate_candidates
 from models.cg_index import CGIndex
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-STATE_CACHE_PATH = "/app/cache/state_cache.json"
+STATE_CACHE_PATH = "/app/data/state_cache.json"
 
 
 def load_config(config_path: str = CONFIG_PATH):
