@@ -1,7 +1,7 @@
 import argparse
+import glob
 import os
 import shutil
-import shlex
 import signal
 import subprocess
 import sys
@@ -67,26 +67,40 @@ def _handle_sigint(signum, frame):
     ACTIVE_JAVA_PROC = None
     raise SystemExit(130)
 
+
+def _resolve_simulator_jar(java_path: str) -> str:
+    jar_candidates = sorted(
+        candidate
+        for candidate in glob.glob(os.path.join(java_path, "target", "*.jar"))
+        if not candidate.endswith(".original")
+    )
+    if not jar_candidates:
+        raise FileNotFoundError(
+            f"No built simulator jar found under {os.path.join(java_path, 'target')}. "
+            "Build the image so Maven packages the application first."
+        )
+    return jar_candidates[0]
+
 def start_producer(config):
     global ACTIVE_JAVA_PROC
     java_path = os.path.abspath(config["simulator_path"])
     csv_path = config.get("data_source_B", "")
     csv_path = os.path.abspath(csv_path) if csv_path else ""
     kafka_bootstrap = f'{config["kafka"]["bootstrap_servers"]}:{config["kafka"]["port"]}'
-    spring_args = shlex.join([
-        f"--csv.file.path={csv_path}",
-        f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}",
-        f"--spring.kafka.bootstrap-servers={kafka_bootstrap}",
-    ])
+    java_exec = shutil.which("java")
+    if not java_exec:
+        raise FileNotFoundError("'java' executable was not found in PATH.")
 
-    if shutil.which("mvn"):
-        maven_command = ["mvn"]
-    elif os.path.exists(os.path.join(java_path, "mvnw")):
-        maven_command = ["./mvnw"]
-    else:
-        raise FileNotFoundError("Neither 'mvn' nor './mvnw' was found for Kafka producer startup.")
+    jar_path = _resolve_simulator_jar(java_path)
     java_proc = subprocess.Popen(
-        maven_command + [f"-Dspring-boot.run.arguments={spring_args}", "spring-boot:run"],
+        [
+            java_exec,
+            "-jar",
+            jar_path,
+            f"--csv.file.path={csv_path}",
+            f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}",
+            f"--spring.kafka.bootstrap-servers={kafka_bootstrap}",
+        ],
         cwd=java_path,
         start_new_session=True
     )

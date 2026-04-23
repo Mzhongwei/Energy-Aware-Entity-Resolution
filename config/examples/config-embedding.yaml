@@ -17,10 +17,7 @@ kafka:
   # sliding window strategy
   window_strategy: "count"       # "count" or "time"
   window_count: 26               # used if strategy is "count"
-  update_frequency: 0            # 0 = tumbling window, otherwise stride size
-  window_source: "csv"          # "csv" (file windows) or "kafka" (poll broker per iteration)
-  poll_timeout_seconds: 5        # used when window_source="kafka"
-  empty_poll_limit: 5            # stop iteration after consecutive empty polls
+  update_frequency: 0            # "csv" (file windows) or "kafka" (poll broker per iteration)
 
 ## meta_path:list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
 # meta_path: ["name", "rid"]
@@ -41,9 +38,6 @@ state_management:
 
 # pipeline
 normalization:
-  # Set true for deterministic reruns (stable rid mapping from idx__0 each run).
-  # Keep false for incremental streaming behavior where rid counters continue.
-  reset_counter_on_start: true
 
 candidate_generation:
   status: True

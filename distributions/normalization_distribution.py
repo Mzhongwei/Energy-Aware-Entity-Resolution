@@ -10,13 +10,6 @@ from ruamel.yaml import YAML
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-USE_RAW_DATA_FOR_EMBEDDING = os.environ.get("EAER_USE_RAW_DATA_FOR_EMBEDDING", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-    "y",
-}
 
 
 def load_config(config_path: str = CONFIG_PATH):
@@ -59,19 +52,11 @@ def _maybe_reset_rid_counter(config: dict) -> str:
     version_name = str(config.get("version_name", "test"))
     counter_path = _counter_path_for_version(version_name)
 
-    window_id = os.environ.get("WINDOW_ID", "").strip()
-    allow_reset_for_window = not window_id or window_id.startswith("bootstrap")
-
-    if reset_counter and allow_reset_for_window:
+    if reset_counter:
         with open(counter_path, "w", encoding="utf-8") as file_handle:
             file_handle.write("0")
         print(
             f"[normalization] reset_counter_on_start enabled; counter reset to 0 path={counter_path} version={version_name}",
-            file=sys.stderr,
-        )
-    elif reset_counter and not allow_reset_for_window:
-        print(
-            f"[normalization] reset_counter_on_start enabled but skipped for window_id={window_id}; preserving incremental ids path={counter_path}",
             file=sys.stderr,
         )
     else:
@@ -84,19 +69,6 @@ def _maybe_reset_rid_counter(config: dict) -> str:
 
 
 def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
-    # In looped streaming mode, the window controller passes a concrete raw window
-    # payload and we must consume that payload instead of full static sources.
-    if USE_RAW_DATA_FOR_EMBEDDING:
-        if isinstance(raw_data, dict):
-            candidate = raw_data.get("data")
-            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
-                return candidate
-            fallback = next((value for value in raw_data.values() if isinstance(value, pd.DataFrame) and not value.empty), None)
-            if isinstance(fallback, pd.DataFrame):
-                return fallback
-        elif isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
-            return raw_data
-
     source_a = config.get("data_source_A")
     source_b = config.get("data_source_B")
 
@@ -129,18 +101,11 @@ def serialize_for_json(obj):
     return obj
 
 
-def normalization(config: dict, raw_data: dict | DataFrame):
+def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = False):
     print("[normalization]", file=sys.stderr)
     if 'embedding' in config['mode']:
         # in incremental mode, we index records and normalize
- 
-        # # data example
-        # raw_data = pd.DataFrame(Traceback (most recent call last):File "/app/distributions/normalization_distribution.py", line 92, in <module>run_argo_once(mode=args.mode, raw_data_value=args.raw_data)File "/app/distributions/normalization_distribution.py", line 83, in run_argo_onceoutput = normalization(config=config, raw_data=load_raw_data(raw_data_value))File "/app/distributions/normalization_distribution.py", line 54, in normalizationprocessed_data = index_normalization(config, raw_data, raw_data_path)File "/app/pipeline/normalization.py", line 84, in index_normalizationif "rid" not in raw_data.columns:AttributeError: 'dict' object has no attribute 'columns'
-        #     data = {
-        #         "name": ["kkk", "ttt", ["hhh", "JJJ"]],
-        #         "adress": ["d ? rue", "yes addre", "ad . r"]
-        #     }
-        # )
+
         raw_data_path = config.get("data_source_A")
         raw_df = _resolve_embedding_raw_df(config, raw_data)
         _maybe_reset_rid_counter(config)
@@ -152,7 +117,7 @@ def normalization(config: dict, raw_data: dict | DataFrame):
             ),
             file=sys.stderr,
         )
-        processed_data = index_normalization(config, raw_df, raw_data_path)
+        processed_data = index_normalization(config, raw_df, raw_data_path, is_training)
     else:
         if "bert" in config.get("mode", ""):
             if "training" in config["mode"]:
@@ -191,7 +156,8 @@ def run_argo_once(
         config["data_source_A"] = data_source_a.strip()
     if isinstance(data_source_b, str) and data_source_b.strip():
         config["data_source_B"] = data_source_b.strip()
-    output = normalization(config=config, raw_data=load_raw_data(raw_data_value))
+    is_training = "training" in mode.lower()
+    output = normalization(config=config, raw_data=load_raw_data(raw_data_value), is_training=is_training)
     print(json.dumps(serialize_for_json(output)))
 
 
