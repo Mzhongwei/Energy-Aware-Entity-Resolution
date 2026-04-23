@@ -10,6 +10,13 @@ from ruamel.yaml import YAML
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
+USE_RAW_DATA_FOR_EMBEDDING = os.environ.get("EAER_USE_RAW_DATA_FOR_EMBEDDING", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+    "y",
+}
 
 
 def load_config(config_path: str = CONFIG_PATH):
@@ -52,11 +59,19 @@ def _maybe_reset_rid_counter(config: dict) -> str:
     version_name = str(config.get("version_name", "test"))
     counter_path = _counter_path_for_version(version_name)
 
-    if reset_counter:
+    window_id = os.environ.get("WINDOW_ID", "").strip()
+    allow_reset_for_window = not window_id or window_id.startswith("bootstrap")
+
+    if reset_counter and allow_reset_for_window:
         with open(counter_path, "w", encoding="utf-8") as file_handle:
             file_handle.write("0")
         print(
             f"[normalization] reset_counter_on_start enabled; counter reset to 0 path={counter_path} version={version_name}",
+            file=sys.stderr,
+        )
+    elif reset_counter and not allow_reset_for_window:
+        print(
+            f"[normalization] reset_counter_on_start enabled but skipped for window_id={window_id}; preserving incremental ids path={counter_path}",
             file=sys.stderr,
         )
     else:
@@ -69,6 +84,19 @@ def _maybe_reset_rid_counter(config: dict) -> str:
 
 
 def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
+    # In looped streaming mode, the window controller passes a concrete raw window
+    # payload and we must consume that payload instead of full static sources.
+    if USE_RAW_DATA_FOR_EMBEDDING:
+        if isinstance(raw_data, dict):
+            candidate = raw_data.get("data")
+            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                return candidate
+            fallback = next((value for value in raw_data.values() if isinstance(value, pd.DataFrame) and not value.empty), None)
+            if isinstance(fallback, pd.DataFrame):
+                return fallback
+        elif isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
+            return raw_data
+
     source_a = config.get("data_source_A")
     source_b = config.get("data_source_B")
 

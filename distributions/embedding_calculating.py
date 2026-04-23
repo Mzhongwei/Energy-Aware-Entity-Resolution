@@ -373,6 +373,12 @@ def calculating_similarity(config, candidate_pairs):
         raise ValueError("embedding_model must be initialized or loaded before calculating_similarity.")
     candidate_pairs = _normalize_candidate_pairs(candidate_pairs)
     _log(f"[calculating_similarity] candidate_pairs={len(candidate_pairs)}")
+    if not candidate_pairs:
+        _log("[calculating_similarity] candidate_pairs is empty; skipping scoring and returning empty result")
+        return {
+            "matching_pairs": [],
+            "count": 0,
+        }
     sim_cfg = config.get("similarity", {})
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
     _log(f"[calculating_similarity] batch_threshold={batch_threshold}")

@@ -1,5 +1,5 @@
-mode: "embedding-inference-evaluation"
-version_name: "test"
+mode: "embedding-training-inference-evaluation"
+version_name: "testkafka6"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"
@@ -9,7 +9,7 @@ simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
   groupid: "er_group"
-  bootstrap_servers: "localhost"
+  bootstrap_servers: "kafka-server"
   port: 9092
   partitions: 3
   replication_factor: 1
@@ -18,6 +18,9 @@ kafka:
   window_strategy: "count"       # "count" or "time"
   window_count: 26               # used if strategy is "count"
   update_frequency: 0            # 0 = tumbling window, otherwise stride size
+  window_source: "csv"          # "csv" (file windows) or "kafka" (poll broker per iteration)
+  poll_timeout_seconds: 5        # used when window_source="kafka"
+  empty_poll_limit: 5            # stop iteration after consecutive empty polls
 
 ## meta_path:list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
 # meta_path: ["name", "rid"]
