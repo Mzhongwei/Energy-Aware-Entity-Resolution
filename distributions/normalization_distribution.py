@@ -7,6 +7,7 @@ import pandas as pd
 from pandas import DataFrame
 from ruamel.yaml import YAML
 
+from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
@@ -69,6 +70,16 @@ def _maybe_reset_rid_counter(config: dict) -> str:
 
 
 def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
+    if isinstance(raw_data, dict):
+        if isinstance(raw_data.get("data"), pd.DataFrame):
+            return raw_data["data"]
+        payload_df = next((value for value in raw_data.values() if isinstance(value, pd.DataFrame)), pd.DataFrame())
+        if not payload_df.empty:
+            return payload_df
+
+    if isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
+        return raw_data
+
     source_a = config.get("data_source_A")
     source_b = config.get("data_source_B")
 
@@ -144,6 +155,43 @@ def load_raw_data(raw_data_value: str) -> dict | DataFrame:
     return {"data": pd.DataFrame([{"value": raw_data_value}])}
 
 
+def _raw_data_from_kafka_payload(payload) -> dict | DataFrame:
+    if isinstance(payload, pd.DataFrame):
+        return {"data": payload}
+    if isinstance(payload, dict):
+        data_value = payload.get("data")
+        if isinstance(data_value, pd.DataFrame):
+            return {"data": data_value}
+        if isinstance(data_value, list):
+            return {"data": pd.DataFrame(data_value)}
+        return payload
+    if isinstance(payload, list):
+        return {"data": pd.DataFrame(payload)}
+    return {"data": pd.DataFrame([{"value": str(payload)}])}
+
+
+def _is_window_payload_from_source_consumer(message: dict, payload) -> bool:
+    if not isinstance(message, dict):
+        return False
+    if str(message.get("stage", "")) != "source_consumer":
+        return False
+
+    if isinstance(payload, pd.DataFrame):
+        return not payload.empty
+
+    if isinstance(payload, dict):
+        data_value = payload.get("data")
+        if isinstance(data_value, pd.DataFrame):
+            return not data_value.empty
+        if isinstance(data_value, list):
+            return len(data_value) > 0
+
+    if isinstance(payload, list):
+        return len(payload) > 0
+
+    return False
+
+
 def run_argo_once(
     mode: str,
     raw_data_value: str,
@@ -156,7 +204,26 @@ def run_argo_once(
         config["data_source_A"] = data_source_a.strip()
     if isinstance(data_source_b, str) and data_source_b.strip():
         config["data_source_B"] = data_source_b.strip()
-    is_training = "training" in mode.lower()
+    is_training = "training" in mode
+    print(f"[DEBUG] mode = {mode}", file=sys.stderr)
+    if "embedding" in mode and "inference" in mode and "training" not in mode and kafka_chain_enabled(config, "normalization"):
+        print(f"[INFO] Running Kafka chain for normalization in mode '{mode}'...", file=sys.stderr)
+        returned = run_kafka_stage(
+            config,
+            "normalization",
+            lambda payload, message, kafka_config: normalization(
+                kafka_config,
+                _raw_data_from_kafka_payload(payload),
+                is_training,
+            )
+            if _is_window_payload_from_source_consumer(message, payload)
+            else None,
+        )
+        if returned is not None:
+            print(json.dumps(serialize_for_json(returned)))
+        else:
+            print(json.dumps(serialize_for_json({})))
+        return
     output = normalization(config=config, raw_data=load_raw_data(raw_data_value), is_training=is_training)
     print(json.dumps(serialize_for_json(output)))
 

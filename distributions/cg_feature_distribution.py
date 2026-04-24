@@ -7,6 +7,7 @@ import pandas as pd
 from pandas import DataFrame
 from ruamel.yaml import YAML
 
+from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from pipeline.cg_feature_extraction import compute_features
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
@@ -67,15 +68,41 @@ def _parse_json_payload(content: str):
         return None
 
 
+def _coerce_processed_data_to_df(processed_data) -> DataFrame:
+    if isinstance(processed_data, pd.DataFrame):
+        return processed_data
+
+    if isinstance(processed_data, dict):
+        payload = processed_data.get("payload") if "payload" in processed_data else processed_data
+
+        if isinstance(payload, pd.DataFrame):
+            return payload
+
+        data_value = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(data_value, pd.DataFrame):
+            return data_value
+        if isinstance(data_value, list):
+            return pd.DataFrame(data_value)
+
+        if isinstance(payload, list):
+            return pd.DataFrame(payload)
+
+    if isinstance(processed_data, list):
+        return pd.DataFrame(processed_data)
+
+    return pd.DataFrame()
+
+
 def cg_feature_extraction(config, processed_data):
     print("[cg_feature_extraction]", file=sys.stderr)
-    if isinstance(processed_data, pd.DataFrame):
+    processed_df = _coerce_processed_data_to_df(processed_data)
+    if not processed_df.empty:
         method = config.get("candidate_generation", {}).get("method", "fullindexing")
-        computed = compute_features(processed_data, method, config)
+        computed = compute_features(processed_df, method, config)
         print(f'[CG FEATURE EXTRACTION] computed features: {computed}', file=sys.stderr)
         return computed
     else:
-        print('error : Invalid processed_data format', file=sys.stderr)
+        print(f'error : Invalid processed_data format type={type(processed_data)}', file=sys.stderr)
     return None
 
 
@@ -94,6 +121,10 @@ def load_processed_data(processed_data_value: str) -> dict | DataFrame:
         parsed = _parse_json_payload(content)
         if parsed is not None:
             return parsed
+        try:
+            return pd.read_csv(processed_data_value)
+        except Exception:
+            pass
         return content
 
     parsed = _parse_json_payload(processed_data_value)
@@ -104,6 +135,16 @@ def load_processed_data(processed_data_value: str) -> dict | DataFrame:
 def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
     config = load_config()
     config["mode"] = mode
+
+    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, "cg_feature_extraction"):
+        print(f"[INFO] Running Kafka chain for CG feature extraction in mode '{mode}'...")
+        returned = run_kafka_stage(config, "cg_feature_extraction", lambda payload, message, kafka_config: cg_feature_extraction(kafka_config, payload))
+        if returned is not None:
+            print(json.dumps(serialize_for_json(returned)))
+        else:
+            print(json.dumps(serialize_for_json({})))
+        return
+
     output = cg_feature_extraction(config, load_processed_data(processed_data_value))
     payload = json.dumps(serialize_for_json(output))
     if output_path and output_path != "-":

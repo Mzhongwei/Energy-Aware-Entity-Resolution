@@ -9,6 +9,7 @@ import time
 import pandas as pd
 from ruamel.yaml import YAML
 
+from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from models.embedding_model import EmbeddingModel
 from models.similarity_graph import SimilarityGraph
 from pipeline.decision_making import decide_matches
@@ -439,6 +440,16 @@ def run_argo_once(
         selected_function = "decision_making" if isinstance(matching_pairs, str) and matching_pairs.strip() else "evaluation"
     config["function"] = selected_function
     _log(f"[run] function={selected_function} mode={mode} output_path={output_path}")
+
+    if "inference" in mode and "training" not in mode and selected_function == "decision_making" and kafka_chain_enabled(config, "decision_making"):
+        print(f"[INFO] Running Kafka chain for {selected_function} in mode '{mode}'...")
+        returned = run_kafka_stage(config, "decision_making", lambda payload, message, kafka_config: decision_making(kafka_config, payload))
+        payload = json.dumps(serialize_for_json(returned))
+        if output_path and output_path != "-":
+            with open(output_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(payload)
+        else:
+            print(payload)
 
     if selected_function == "decision_making":
         if not isinstance(matching_pairs, str) or not matching_pairs.strip():

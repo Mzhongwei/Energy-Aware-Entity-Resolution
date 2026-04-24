@@ -6,6 +6,7 @@ import sys
 import pandas as pd
 from ruamel.yaml import YAML
 
+from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from models.representation_graph import RepresentationGraph
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
@@ -364,6 +365,17 @@ def run_argo_once(mode: str, function: str, processed_data: str, output_path: st
     config["mode"] = mode
     config["function"] = function
     processed_data_value = load_processed_data(processed_data)
+    print(f"Processed data loaded: type={type(processed_data_value)}, value_preview={str(processed_data_value)[:100]}", file=sys.stderr)
+
+    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, function):
+        print(f"[INFO] Running Kafka chain for function '{function}' in mode '{mode}'...", file=sys.stderr)
+        returned = run_kafka_stage(config, function, lambda payload, message, kafka_config: graph_construction(kafka_config, payload) if function == "graph_construction" else random_walk(kafka_config))
+        payload = json.dumps(serialize_for_json(returned))
+        if output_path and output_path != "-":
+            with open(output_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(payload)
+        else:
+            print(payload)
 
     function_map = {
         "graph_construction": lambda: graph_construction(config, processed_data_value),

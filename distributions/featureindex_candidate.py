@@ -6,6 +6,7 @@ import sys
 import pandas as pd
 from ruamel.yaml import YAML
 
+from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.feature_index_construction import create_cg_index
 from pipeline.candidate_enumeration import enumerate_candidates
@@ -215,6 +216,16 @@ def run_argo_once(mode: str, function: str, cg_feature: str, output_path: str = 
     config["mode"] = mode
     config["function"] = function
     cg_feature_value = load_cg_feature(cg_feature)
+
+    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, function or "candidate_enumeration"):
+        print(f"[INFO] Running Kafka chain for function '{function}' in mode '{mode}'...")
+        returned = run_kafka_stage(config, function or "candidate_enumeration", lambda payload, message, kafka_config: feature_index_construction(payload) if function == "feature_index_construction" else candidate_enumeration(payload))
+        payload = json.dumps(serialize_for_json(returned))
+        if output_path and output_path != "-":
+            with open(output_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(payload)
+        else:
+            print(payload)
     
     function_map = {
         "feature_index_construction": feature_index_construction,

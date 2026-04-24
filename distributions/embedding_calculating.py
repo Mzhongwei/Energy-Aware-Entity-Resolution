@@ -9,6 +9,7 @@ import time
 import pandas as pd
 from ruamel.yaml import YAML
 
+from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from models.embedding_model import EmbeddingModel
 from pipeline.embedding_training import train_embeddings
 from pipeline.calculating_similarity import score_candidate_pairs
@@ -402,6 +403,17 @@ def run_argo_once(
     config["mode"] = mode
     config["function"] = function
     _log(f"[run] function={function} mode={mode} output_path={output_path}")
+
+    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, function):
+        print(f"[INFO] Running Kafka chain for {function} in mode '{mode}'...")
+        returned = run_kafka_stage(config, function, lambda payload, message, kafka_config: embedding_training(kafka_config, payload) if function == "embedding_training" else calculating_similarity(kafka_config, payload))
+        payload = json.dumps(serialize_for_json(returned))
+        if output_path and output_path != "-":
+            with open(output_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(payload)
+        else:
+            print(payload)
+
 
     if function == "embedding_training":
         if not isinstance(sequences, str) or not sequences.strip():
