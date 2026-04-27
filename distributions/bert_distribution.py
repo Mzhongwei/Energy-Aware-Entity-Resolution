@@ -89,11 +89,14 @@ def bert_inference(config, processed_data):
         row["labels"] = prediction.get("label_id")
         predictions.append(row)
 
+    print("[bert_inference] completed, predictions: {predictions}".format(predictions=predictions))
     return predictions
 
 
 def bert_evaluation(config, processed_data):
-    return evaluate_from_saved_model(processed_data, config)
+    evaluation_results = evaluate_from_saved_model(processed_data, config)
+    print("[bert_evaluation] completed, evaluation_results: {evaluation_results}".format(evaluation_results=evaluation_results))
+    return evaluation_results
 
 def serialize_for_json(obj):
     if isinstance(obj, pd.DataFrame):
