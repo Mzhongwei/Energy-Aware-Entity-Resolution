@@ -52,6 +52,7 @@ def _validate_local_checkpoint(save_dir: str) -> None:
             )
         )
 
+
     def predict(self, text1, text2):
         inputs = self.tokenizer(
             text1,

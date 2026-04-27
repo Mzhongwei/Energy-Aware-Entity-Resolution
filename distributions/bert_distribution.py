@@ -6,10 +6,14 @@ import pandas as pd
 from ruamel.yaml import YAML
 
 from pipeline.bert_evaluation import evaluate_from_saved_model
-from pipeline.bert_inference import InferenceService
+from pipeline.bert_inference import process_inference
 from pipeline.bert_training import train_model
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-bert.yaml")
+WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
+STATE_CACHE_PATH = f"/app/data/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/data/state_cache.json"
+
+STATE_CACHE = {}
 
 
 def load_config(config_path: str = CONFIG_PATH):
@@ -58,44 +62,123 @@ def deserialize_from_json(obj):
     return obj
 
 
+def _state_config(config):
+    if not isinstance(config, dict):
+        return {}
+    state_config = config.get("state_management", {}) or config.get("state_config", {}) or {}
+    return state_config if isinstance(state_config, dict) else {}
+
+
+def _write_text(path, value):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file_handle:
+        if isinstance(value, str):
+            file_handle.write(value)
+        else:
+            file_handle.write(json.dumps(serialize_for_json(value), ensure_ascii=False))
+
+
+def _load_state_cache():
+    if not os.path.exists(STATE_CACHE_PATH):
+        return {}
+    try:
+        with open(STATE_CACHE_PATH, "r", encoding="utf-8") as file_handle:
+            loaded = json.load(file_handle)
+        loaded = deserialize_from_json(loaded)
+        return loaded if isinstance(loaded, dict) else {}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return {}
+
+
+def _persist_state_cache():
+    cache_dir = os.path.dirname(STATE_CACHE_PATH)
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+    with open(STATE_CACHE_PATH, "w", encoding="utf-8") as file_handle:
+        json.dump(serialize_for_json(STATE_CACHE), file_handle)
+
+
+def _bert_artifact_dir(config):
+    state_config = _state_config(config)
+    bert_dir = state_config.get("bert-dir", "data/bert")
+    if not os.path.isabs(bert_dir):
+        bert_dir = os.path.join("/app", bert_dir)
+    version_name = config.get("version_name", "test") if isinstance(config, dict) else "test"
+    return os.path.join(bert_dir, version_name)
+
+
+def _predicted_artifact_path(config):
+    state_config = _state_config(config)
+    predicted_dir = state_config.get("predicted_match-dir", "data/predicted")
+    predicted_name = state_config.get("predicted_match-name") or config.get("version_name", "test")
+    if not os.path.isabs(predicted_dir):
+        predicted_dir = os.path.join("/app", predicted_dir)
+    os.makedirs(predicted_dir, exist_ok=True)
+    return os.path.join(predicted_dir, f"{predicted_name}.txt")
+
+
+def _evaluation_artifact_path(config):
+    state_config = _state_config(config)
+    predicted_dir = state_config.get("predicted_match-dir", "data/predicted")
+    predicted_name = state_config.get("predicted_match-name") or config.get("version_name", "test")
+    if not os.path.isabs(predicted_dir):
+        predicted_dir = os.path.join("/app", predicted_dir)
+    os.makedirs(predicted_dir, exist_ok=True)
+    return os.path.join(predicted_dir, f"{predicted_name}.result.txt")
+
+
+def update(key, value):
+    config = load_config()
+    STATE_CACHE[key] = value
+
+    if key == "bert_model":
+        save_dir = _bert_artifact_dir(config)
+        os.makedirs(save_dir, exist_ok=True)
+        trainer = value.get("trainer") if isinstance(value, dict) else None
+        tokenizer = value.get("tokenizer") if isinstance(value, dict) else None
+        if trainer is not None and tokenizer is not None:
+            trainer.save_model(save_dir)
+            tokenizer.save_pretrained(save_dir)
+        else:
+            _write_text(os.path.join(save_dir, "bert_model.txt"), value)
+        STATE_CACHE[key] = {"save_dir": save_dir}
+        _persist_state_cache()
+        return save_dir
+
+    if key == "predicted_matching":
+        _write_text(_predicted_artifact_path(config), value)
+        _persist_state_cache()
+        return value
+
+    if key in {"result", "evaluation_result"}:
+        _write_text(_evaluation_artifact_path(config), value)
+        _persist_state_cache()
+        return value
+
+    _persist_state_cache()
+    return value
+
+
+STATE_CACHE.update(_load_state_cache())
+
+
 def bert_training(config, processed_data):
     trainer, tokenizer = train_model(config, processed_data)
-    save_dir = _bert_save_dir(config)
-    os.makedirs(save_dir, exist_ok=True)
-    trainer.save_model(save_dir)
-    tokenizer.save_pretrained(save_dir)
+    save_dir = update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
     return {"status": "trained", "save_dir": save_dir}
 
 
 def bert_inference(config, processed_data):
-    save_dir = _bert_save_dir(config)
-    inference_service = InferenceService(save_dir=save_dir)
-
-    if isinstance(processed_data, dict):
-        data_frame = processed_data.get("test")
-        if data_frame is None:
-            data_frame = processed_data.get("data")
-    else:
-        data_frame = processed_data
-
-    if isinstance(data_frame, pd.DataFrame):
-        rows = data_frame.to_dict(orient="records")
-    else:
-        rows = list(data_frame or [])
-
-    predictions = []
-    print("[bert_inference] starting inference on {num_rows} rows".format(num_rows=len(rows)))
-    for row in rows:
-        prediction = inference_service.predict(row["text1"], row["text2"])
-        row["labels"] = prediction.get("label_id")
-        predictions.append(row)
-
-    print("[bert_inference] completed, predictions: {predictions}".format(predictions=predictions))
-    return predictions
+    predicted_pairs = process_inference(processed_data, save_dir=_bert_save_dir(config))
+    update("predicted_matching", predicted_pairs)
+    return predicted_pairs
 
 
 def bert_evaluation(config, processed_data):
     evaluation_results = evaluate_from_saved_model(processed_data, config)
+    update("evaluation_result", evaluation_results)
     print("[bert_evaluation] completed, evaluation_results: {evaluation_results}".format(evaluation_results=evaluation_results))
     return evaluation_results
 
