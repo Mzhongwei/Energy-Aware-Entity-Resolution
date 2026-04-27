@@ -84,6 +84,7 @@ def bert_inference(config, processed_data):
         rows = list(data_frame or [])
 
     predictions = []
+    print("[bert_inference] starting inference on {num_rows} rows".format(num_rows=len(rows)))
     for row in rows:
         prediction = inference_service.predict(row["text1"], row["text2"])
         row["labels"] = prediction.get("label_id")
@@ -142,6 +143,7 @@ def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
             raise ValueError("For training mode, processed_data must be a dict with 'train' and 'eval' DataFrames.")
         output = bert_training(config, processed_data)
     elif "inference" in mode:
+        print("[run_argo_once] starting inference")
         output = bert_inference(config, processed_data)
     elif "evaluation" in mode:
         if not isinstance(processed_data, dict) or "test" not in processed_data:
