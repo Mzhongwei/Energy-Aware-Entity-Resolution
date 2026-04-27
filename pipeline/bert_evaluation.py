@@ -22,8 +22,8 @@ def evaluate_from_saved_model(processed_data, config):
     if not os.path.isdir(save_dir):
         raise FileNotFoundError(f"Local BERT model directory not found: {save_dir}")
 
-    tokenizer = AutoTokenizer.from_pretrained(save_dir)
-    model = AutoModelForSequenceClassification.from_pretrained(save_dir)
+    tokenizer = AutoTokenizer.from_pretrained(save_dir, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(save_dir, local_files_only=True)
 
     dataset = DatasetDict({
         "test": Dataset.from_pandas(processed_data['test']),

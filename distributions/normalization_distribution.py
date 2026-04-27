@@ -7,7 +7,6 @@ import pandas as pd
 from pandas import DataFrame
 from ruamel.yaml import YAML
 
-from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
@@ -206,6 +205,9 @@ def run_argo_once(
         config["data_source_B"] = data_source_b.strip()
     is_training = "training" in mode
     print(f"[DEBUG] mode = {mode}", file=sys.stderr)
+    if "embedding" in mode:
+        from kafka_chain import kafka_chain_enabled, run_kafka_stage
+
     if "embedding" in mode and "inference" in mode and "training" not in mode and kafka_chain_enabled(config, "normalization"):
         print(f"[INFO] Running Kafka chain for normalization in mode '{mode}'...", file=sys.stderr)
         returned = run_kafka_stage(

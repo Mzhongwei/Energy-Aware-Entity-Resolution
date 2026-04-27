@@ -1,4 +1,4 @@
-mode: "bert-training"
+mode: "bert-inference"
 version_name: "test"
 
 # bert mode, source data

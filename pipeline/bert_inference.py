@@ -11,12 +11,46 @@ class InferenceService:
     def __init__(self, save_dir=None, max_length=128):
         if save_dir is None:
             save_dir = os.path.join("data", "bert", "test")
+        save_dir = os.path.abspath(save_dir)
+        _validate_local_checkpoint(save_dir)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(save_dir)
-        self.model = AutoModelForSequenceClassification.from_pretrained(save_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(save_dir, local_files_only=True)
+        self.model = AutoModelForSequenceClassification.from_pretrained(save_dir, local_files_only=True)
         self.model.to(self.device)
         self.model.eval()
         self.max_length = max_length
+
+
+def _validate_local_checkpoint(save_dir: str) -> None:
+    if not os.path.isdir(save_dir):
+        raise FileNotFoundError(
+            "Local BERT model directory not found: {path}. "
+            "Run training first or mount the model volume in this container.".format(path=save_dir)
+        )
+
+    model_weight_files = ("pytorch_model.bin", "model.safetensors")
+    tokenizer_files = ("tokenizer_config.json", "tokenizer.json", "vocab.txt", "spiece.model")
+    required_common = ("config.json",)
+
+    missing_common = [name for name in required_common if not os.path.isfile(os.path.join(save_dir, name))]
+    has_model_weights = any(os.path.isfile(os.path.join(save_dir, name)) for name in model_weight_files)
+    has_tokenizer = any(os.path.isfile(os.path.join(save_dir, name)) for name in tokenizer_files)
+
+    if missing_common or not has_model_weights or not has_tokenizer:
+        details = []
+        if missing_common:
+            details.append("missing common files: {files}".format(files=", ".join(missing_common)))
+        if not has_model_weights:
+            details.append("missing model weights: one of {files}".format(files=", ".join(model_weight_files)))
+        if not has_tokenizer:
+            details.append("missing tokenizer files: one of {files}".format(files=", ".join(tokenizer_files)))
+
+        raise FileNotFoundError(
+            "Incomplete local BERT checkpoint at {path}: {details}".format(
+                path=save_dir,
+                details="; ".join(details),
+            )
+        )
 
     def predict(self, text1, text2):
         inputs = self.tokenizer(

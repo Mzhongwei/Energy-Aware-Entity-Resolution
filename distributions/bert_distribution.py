@@ -137,6 +137,7 @@ def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
     config = load_config()
     config["mode"] = mode
     processed_data = load_processed_data(processed_data_value)
+    print(f"[{mode}] starting")
 
     if "training" in mode:
         if not isinstance(processed_data, dict) or "train" not in processed_data or "eval" not in processed_data:
