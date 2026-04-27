@@ -173,6 +173,7 @@ def bert_training(config, processed_data):
 def bert_inference(config, processed_data):
     predicted_pairs = process_inference(processed_data, save_dir=_bert_save_dir(config))
     update("predicted_matching", predicted_pairs)
+    print("[bert_inference] completed, predicted_pairs count: {count}".format(count=len(predicted_pairs)))
     return predicted_pairs
 
 
