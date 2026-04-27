@@ -2,15 +2,18 @@ import argparse
 import json
 import os
 import sys
+from time import time
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
+from utils.buffers import load_latest_buffer, _write_buffer, _wait_for_buffer, _write_eos
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-
+BUFFER_PATH = "/app/data/buffers/"
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -110,7 +113,6 @@ def serialize_for_json(obj):
         return [serialize_for_json(item) for item in obj]
     return obj
 
-
 def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = False):
     print("[normalization]", file=sys.stderr)
     if 'embedding' in config['mode']:
@@ -154,43 +156,6 @@ def load_raw_data(raw_data_value: str) -> dict | DataFrame:
     return {"data": pd.DataFrame([{"value": raw_data_value}])}
 
 
-def _raw_data_from_kafka_payload(payload) -> dict | DataFrame:
-    if isinstance(payload, pd.DataFrame):
-        return {"data": payload}
-    if isinstance(payload, dict):
-        data_value = payload.get("data")
-        if isinstance(data_value, pd.DataFrame):
-            return {"data": data_value}
-        if isinstance(data_value, list):
-            return {"data": pd.DataFrame(data_value)}
-        return payload
-    if isinstance(payload, list):
-        return {"data": pd.DataFrame(payload)}
-    return {"data": pd.DataFrame([{"value": str(payload)}])}
-
-
-def _is_window_payload_from_source_consumer(message: dict, payload) -> bool:
-    if not isinstance(message, dict):
-        return False
-    if str(message.get("stage", "")) != "source_consumer":
-        return False
-
-    if isinstance(payload, pd.DataFrame):
-        return not payload.empty
-
-    if isinstance(payload, dict):
-        data_value = payload.get("data")
-        if isinstance(data_value, pd.DataFrame):
-            return not data_value.empty
-        if isinstance(data_value, list):
-            return len(data_value) > 0
-
-    if isinstance(payload, list):
-        return len(payload) > 0
-
-    return False
-
-
 def run_argo_once(
     mode: str,
     raw_data_value: str,
@@ -205,26 +170,30 @@ def run_argo_once(
         config["data_source_B"] = data_source_b.strip()
     is_training = "training" in mode
     print(f"[DEBUG] mode = {mode}", file=sys.stderr)
-    if "embedding" in mode:
-        from kafka_chain import kafka_chain_enabled, run_kafka_stage
 
-    if "embedding" in mode and "inference" in mode and "training" not in mode and kafka_chain_enabled(config, "normalization"):
-        print(f"[INFO] Running Kafka chain for normalization in mode '{mode}'...", file=sys.stderr)
-        returned = run_kafka_stage(
-            config,
-            "normalization",
-            lambda payload, message, kafka_config: normalization(
-                kafka_config,
-                _raw_data_from_kafka_payload(payload),
-                is_training,
-            )
-            if _is_window_payload_from_source_consumer(message, payload)
-            else None,
-        )
-        if returned is not None:
-            print(json.dumps(serialize_for_json(returned)))
-        else:
-            print(json.dumps(serialize_for_json({})))
+    if "embedding" in mode and "inference" in mode and "training" not in mode:
+        print(f"[INFO] Running buffer chain for normalization in mode '{mode}'...", file=sys.stderr)
+        load_buffer_path = BUFFER_PATH + "rawdata"
+        first_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=120)
+        if first_ready is None:
+            print("[INFO] No incoming raw buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
+            _write_eos(BUFFER_PATH + "normalized", reason=f"normalization_timeout_no_initial_buffer_for_mode_{mode}")
+            return
+        raw_data = load_latest_buffer(load_buffer_path)
+        while raw_data is not None:
+            if raw_data.empty:
+                print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
+                next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+                raw_data = load_latest_buffer(load_buffer_path) if next_ready is not None else None
+                continue
+            returned = normalization(config=config, raw_data=raw_data, is_training=is_training)
+            if returned is not None:
+                _write_buffer([{"value": json.dumps(returned, default=str)}], BUFFER_PATH + "normalized")
+            else:
+                print(json.dumps(serialize_for_json({})))
+            next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            raw_data = load_latest_buffer(load_buffer_path) if next_ready is not None else None
+        _write_eos(BUFFER_PATH + "normalized", reason=f"normalization_completed_for_mode_{mode}")
         return
     output = normalization(config=config, raw_data=load_raw_data(raw_data_value), is_training=is_training)
     print(json.dumps(serialize_for_json(output)))

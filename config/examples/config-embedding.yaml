@@ -19,49 +19,6 @@ kafka:
   window_count: 26               # used if strategy is "count"
   update_frequency: 0            # "csv" (file windows) or "kafka" (poll broker per iteration)
 
-kafka_chain:
-  enabled: true
-  end_of_stream: "end_of_stream"
-  poll_timeout: 5
-  max_empty_polls: 10
-  stages:
-    normalization:
-      input_topic: "entity_resolution_process"
-      output_topic: "entity_resolution_normalized"
-      groupid: "er_normalization"
-    cg_feature_extraction:
-      input_topic: "entity_resolution_normalized"
-      output_topic: "entity_resolution_cg_feature"
-      groupid: "er_cg_feature"
-    graph_construction:
-      input_topic: "entity_resolution_normalized"
-      output_topic: "entity_resolution_graph"
-      groupid: "er_graph_construction"
-    random_walk:
-      input_topic: "entity_resolution_graph"
-      output_topic: "entity_resolution_sequences"
-      groupid: "er_random_walk"
-    feature_index_construction:
-      input_topic: "entity_resolution_cg_feature"
-      output_topic: "entity_resolution_candidate_pairs"
-      groupid: "er_feature_index"
-    candidate_enumeration:
-      input_topic: "entity_resolution_cg_feature"
-      output_topic: "entity_resolution_candidate_pairs"
-      groupid: "er_candidate_enumeration"
-    embedding_training:
-      input_topic: "entity_resolution_sequences"
-      output_topic: "entity_resolution_embeddings"
-      groupid: "er_embedding_training"
-    calculating_similarity:
-      input_topic: "entity_resolution_candidate_pairs"
-      output_topic: "entity_resolution_matching_pairs"
-      groupid: "er_calculating_similarity"
-    decision_making:
-      input_topic: "entity_resolution_matching_pairs"
-      output_topic: ""
-      groupid: "er_decision_making"
-
 ## meta_path:list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
 # meta_path: ["name", "rid"]
 
