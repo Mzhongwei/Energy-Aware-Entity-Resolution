@@ -8,7 +8,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
-from utils.buffers import load_latest_buffer, _write_buffer, _wait_for_buffer, _write_eos
+from utils.buffers import _clear_buffer_directory, load_first_buffer, _write_buffer, _wait_for_buffer, _write_eos
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
@@ -156,12 +156,7 @@ def load_raw_data(raw_data_value: str) -> dict | DataFrame:
     return {"data": pd.DataFrame([{"value": raw_data_value}])}
 
 
-def run_argo_once(
-    mode: str,
-    raw_data_value: str,
-    data_source_a: str = "",
-    data_source_b: str = "",
-):
+def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_source_b: str = "",):
     config = load_config()
     config["mode"] = mode
     if isinstance(data_source_a, str) and data_source_a.strip():
@@ -169,35 +164,34 @@ def run_argo_once(
     if isinstance(data_source_b, str) and data_source_b.strip():
         config["data_source_B"] = data_source_b.strip()
     is_training = "training" in mode
-    print(f"[DEBUG] mode = {mode}", file=sys.stderr)
-
-    if "embedding" in mode and "inference" in mode and "training" not in mode:
-        print(f"[INFO] Running buffer chain for normalization in mode '{mode}'...", file=sys.stderr)
-        load_buffer_path = BUFFER_PATH + "rawdata"
-        first_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=120)
-        if first_ready is None:
-            print("[INFO] No incoming raw buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
-            _write_eos(BUFFER_PATH + "normalized", reason=f"normalization_timeout_no_initial_buffer_for_mode_{mode}")
-            return
-        raw_data = load_latest_buffer(load_buffer_path)
-        while raw_data is not None:
-            if raw_data.empty:
-                print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
-                next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
-                raw_data = load_latest_buffer(load_buffer_path) if next_ready is not None else None
-                continue
-            returned = normalization(config=config, raw_data=raw_data, is_training=is_training)
-            if returned is not None:
-                _write_buffer([{"value": json.dumps(returned, default=str)}], BUFFER_PATH + "normalized")
-            else:
-                print(json.dumps(serialize_for_json({})))
-            next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
-            raw_data = load_latest_buffer(load_buffer_path) if next_ready is not None else None
-        _write_eos(BUFFER_PATH + "normalized", reason=f"normalization_completed_for_mode_{mode}")
-        return
     output = normalization(config=config, raw_data=load_raw_data(raw_data_value), is_training=is_training)
     print(json.dumps(serialize_for_json(output)))
 
+def run_argo_incremental():
+    config = load_config()
+
+    print(f"[INFO] Running buffer chain for normalization", file=sys.stderr)
+    _clear_buffer_directory(BUFFER_PATH + "processed_data")
+    load_buffer_path = BUFFER_PATH + "raw_data"
+    first_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    if first_ready is None:
+        print("[INFO] No incoming raw buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
+        _write_eos(BUFFER_PATH + "processed_data", reason=f"normalization_timeout_no_initial_buffer")
+        return
+    raw_data = load_first_buffer(load_buffer_path)
+    while raw_data is not None:
+        if raw_data.empty:
+            print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
+            next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            raw_data = load_first_buffer(load_buffer_path) if next_ready is not None else None
+            continue
+        returned = normalization(config=config, raw_data=raw_data, is_training=False)
+        if returned is not None:
+            _write_buffer(returned, BUFFER_PATH + "processed_data", extension="csv")
+        next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+        raw_data = load_first_buffer(load_buffer_path) if next_ready is not None else None
+    _write_eos(BUFFER_PATH + "processed_data", reason=f"normalization_completed")
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Normalization distribution for Argo")
@@ -206,9 +200,12 @@ if __name__ == "__main__":
     parser.add_argument("--data_source_A", default="")
     parser.add_argument("--data_source_B", default="")
     args = parser.parse_args()
-    run_argo_once(
-        mode=args.mode,
-        raw_data_value=args.raw_data,
-        data_source_a=args.data_source_A,
-        data_source_b=args.data_source_B,
-    )
+    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
+        run_argo_incremental()
+    else:
+        run_argo_batch(
+            mode=args.mode,
+            raw_data_value=args.raw_data,
+            data_source_a=args.data_source_A,
+            data_source_b=args.data_source_B,
+        )

@@ -5,9 +5,6 @@ import signal
 import subprocess
 import time
 
-import urllib.error
-import urllib.parse
-import urllib.request
 from ruamel.yaml import YAML
 import pandas as pd
 from confluent_kafka import Consumer, KafkaException, KafkaError, Producer as KafkaProducer
@@ -20,7 +17,7 @@ from utils.buffers import _clear_buffer_directory, _write_buffer, _write_eos
 ACTIVE_JAVA_PROC = None
 ACTIVE_CONSUMER = None
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-BUFFER_DIR = "/app/data/buffers/rawdata"
+BUFFER_DIR = "/app/data/buffers/raw_data"
 
 # =========================
 # endpoints
@@ -187,7 +184,10 @@ def _handle_sigint(signum, frame):
         ACTIVE_CONSUMER = None
     _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
     ACTIVE_JAVA_PROC = None
-    raise SystemExit(130)
+
+def _daemon():
+    while True:
+        time.sleep(1)
 
 
 def _commit_processed_offsets(consumer: Consumer, msg, reason: str):
@@ -209,7 +209,7 @@ def start_consumer(config):
     
     # start kafka
     poll_timeout = 5
-    max_empty_polls = 10
+    max_empty_polls = 5
     startup_grace_seconds =  120
     empty_poll_count = 0
 
@@ -247,7 +247,7 @@ def start_consumer(config):
                     print("[INFO] No new messages for a while. Exiting consumer loop.", flush=True)
                     if data_buffer:
                         data_store['raw_data'] = pd.DataFrame(data_buffer)
-                        _write_buffer(data_buffer, BUFFER_DIR)
+                        _write_buffer(data_buffer, BUFFER_DIR, extension="csv")
                         _commit_processed_offsets(consumer, last_valid_msg, "buffer flush on idle")
                         data_buffer = []
                         _write_eos(BUFFER_DIR, reason="source_consumer_idle_timeout")
@@ -295,7 +295,7 @@ def start_consumer(config):
             last_valid_msg = msg
             if len(data_buffer) >= config["kafka"]["window_count"]:
                 data_store['raw_data'] = pd.DataFrame(data_buffer)
-                _write_buffer(data_buffer, BUFFER_DIR)
+                _write_buffer(data_buffer, BUFFER_DIR, extension="csv")
                 _commit_processed_offsets(consumer, last_valid_msg, "window flush")
                 data_buffer = []
     finally:
@@ -312,6 +312,7 @@ def start_consumer(config):
             except Exception:
                 pass
         ACTIVE_JAVA_PROC = None
+        _daemon()
 
 def parse_args():
     parser = argparse.ArgumentParser()

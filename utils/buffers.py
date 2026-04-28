@@ -3,18 +3,28 @@ from time import time, time_ns
 import os
 import sys
 import pandas as pd
+from ruamel.yaml import YAML
 from pandas.errors import EmptyDataError
+
+CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
+
+def load_config(config_path: str = CONFIG_PATH):
+    if not os.path.exists(config_path):
+        return {}
+    yaml = YAML(typ="safe")
+    with open(config_path, "r", encoding="utf-8") as file_handle:
+        loaded = yaml.load(file_handle) or {}
+    return loaded if isinstance(loaded, dict) else {}
 
 def _wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
     start_time = time()
     while time() - start_time < timeout_seconds:
-        last_buffer_file = _get_last_buffer_file(buffer_dir)
+        last_buffer_file = _get_first_buffer_file(buffer_dir)
         if last_buffer_file:
             return last_buffer_file
-    print(f"[WARNING] No buffer file found in '{buffer_dir}' after waiting for {timeout_seconds} seconds.", flush=True)
     return None
 
-def _get_last_buffer_file(buffer_dir: str) -> str | None:
+def _get_first_buffer_file(buffer_dir: str) -> str | None:
     if not os.path.isdir(buffer_dir):
         return None
     buffer_files = [
@@ -24,8 +34,34 @@ def _get_last_buffer_file(buffer_dir: str) -> str | None:
     ]
     if not buffer_files:
         return None
-    buffer_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=True)
+    buffer_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=False)
     return os.path.join(buffer_dir, buffer_files[0])
+
+def get_latest_graphml_file(buffer_dir: str) -> str | None:
+    if not os.path.isdir(buffer_dir):
+        return None
+    graphml_files = [f for f in os.listdir(buffer_dir) if f.endswith(".graphml")]
+    if not graphml_files:
+        return None
+    graphml_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=True)
+    return os.path.join(buffer_dir, graphml_files[0])
+
+def get_latest_manifest_file(buffer_dir: str) -> str | None:
+    if not os.path.isdir(buffer_dir):
+        return None
+    manifest_files = [f for f in os.listdir(buffer_dir) if f.endswith(".manifest.json")]
+    if not manifest_files:
+        return None
+    manifest_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=True)
+    return os.path.join(buffer_dir, manifest_files[0])
+
+def _buffer_directory_has_files(buffer_dir: str) -> bool:
+    if not os.path.isdir(buffer_dir):
+        return False
+    return any(
+        f.endswith(".csv") or f.endswith(".json") or f.endswith(".graphml") or f.endswith(".manifest.json")
+        for f in os.listdir(buffer_dir)
+    )
 
 def _delete_file_if_exists(file_path: str):
     if not file_path:
@@ -46,8 +82,8 @@ def _delete_file_if_exists(file_path: str):
     return deleted
 
 
-def load_latest_buffer(buffer_dir: str) -> pd.DataFrame:
-    last_buffer_file = _get_last_buffer_file(buffer_dir)
+def load_first_buffer(buffer_dir: str):
+    last_buffer_file = _get_first_buffer_file(buffer_dir)
     if last_buffer_file and os.path.basename(last_buffer_file).startswith("eos_"):
         print(f"[normalization] Latest buffer file '{last_buffer_file}' is an EOS marker; skipping load.", file=sys.stderr, flush=True)
         _delete_file_if_exists(last_buffer_file)
@@ -59,7 +95,12 @@ def load_latest_buffer(buffer_dir: str) -> pd.DataFrame:
             _delete_file_if_exists(last_buffer_file)
             return pd.DataFrame()
         try:
-            df = pd.read_csv(last_buffer_file)
+            if last_buffer_file.endswith(".json"):
+                with open(last_buffer_file, "r", encoding="utf-8") as json_file:
+                    data = json.load(json_file)
+                value = data.get("value", {}) if isinstance(data, dict) else {}
+            elif last_buffer_file.endswith(".csv"):
+                value = pd.read_csv(last_buffer_file)
         except EmptyDataError:
             print(f"[WARNING] Unreadable buffer file detected; deleting: {last_buffer_file}", file=sys.stderr, flush=True)
             _delete_file_if_exists(last_buffer_file)
@@ -69,30 +110,76 @@ def load_latest_buffer(buffer_dir: str) -> pd.DataFrame:
             _delete_file_if_exists(last_buffer_file)
             return pd.DataFrame()
         print(f"[INFO] Read buffer file: {last_buffer_file}", file=sys.stderr, flush=True)
+        print(f"[INFO] Buffer content preview: {str(value)[:500]}...", file=sys.stderr, flush=True)
         _delete_file_if_exists(last_buffer_file)
-        return df
+        return value
     return pd.DataFrame()
 
-def _write_buffer(data_buffer: list[dict], output_dir: str):
-    if not output_dir or not data_buffer:
+def _write_buffer(data_buffer, output_dir: str, extension: str = "json"):
+    if not output_dir or data_buffer is None:
         return
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    # If data buffer is a list of objects, write a single JSON file instead of CSV
-    if all(not isinstance(record, dict) for record in data_buffer):
-        output_path = os.path.join(output_dir, f"{time_ns()}.json")
-        temp_path = f"{output_path}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as json_file:
-            json.dump(data_buffer, json_file, default=str)
-        os.replace(temp_path, output_path)
-        print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as JSON.", flush=True)
+
+    write_functions = {
+        "json": _write_json_buffer,
+        "csv": _write_csv_buffer,
+        "graphml": _write_graph_buffer,
+    }
+    write_function = write_functions.get(extension)
+    if not write_function:
+        print(f"[ERROR] Unsupported buffer extension '{extension}'; supported extensions are: {list(write_functions.keys())}", file=sys.stderr, flush=True)
         return
+    
+    try:
+        write_function(data_buffer, output_dir)
+    except Exception as e:
+        print(f"[ERROR] Failed to write buffer to {output_dir} with extension '{extension}': {e}", file=sys.stderr, flush=True)
+
+def _write_graph_buffer(graph, output_dir: str):
+    print(f"[DEBUG] graph type : {type(graph.get_graph())}", flush=True)
+    os.makedirs(output_dir, exist_ok=True)
+    config = load_config()
+    graph_path = os.path.join(output_dir, f"{time_ns()}.graphml")
+    manifest_path = os.path.join(output_dir, f"{time_ns()}.manifest.json")
+
+    if type(graph).__name__ == "DynGraphIgraph":
+        graph = graph.get_graph()
+
+    graph_save = _clean_graph_copy(graph)
+    graph_save.write_graphml(graph_path)
+    manifest = {
+        "graph_class": type(graph).__name__,
+        "graph_config": _graph_config(config),
+        "meta_path": config.get("meta_path", []),
+    }
+    with open(manifest_path, "w", encoding="utf-8") as file_handle:
+        json.dump(manifest, file_handle, ensure_ascii=False, indent=2)
+    print(f"[INFO] Wrote graph buffer to {graph_path} with manifest {manifest_path}.", flush=True)
+
+def _write_csv_buffer(data_buffer, output_dir: str):
+    os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(data_buffer)
     output_path = os.path.join(output_dir, f"{time_ns()}.csv")
     temp_path = f"{output_path}.tmp"
     df.to_csv(temp_path, index=False)
     os.replace(temp_path, output_path)
     print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as CSV.", flush=True)
+
+def _write_json_buffer(data_buffer, output_dir: str):
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{time_ns()}.json")
+    temp_path = f"{output_path}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as json_file:
+            json.dump(data_buffer, json_file, default=str)
+        os.replace(temp_path, output_path)
+    except Exception as e:
+        print(f"[ERROR] Failed to write JSON buffer to {output_path}: {e}", file=sys.stderr, flush=True)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return
+    print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as JSON.", file=sys.stderr , flush=True)
 
 def _write_eos(output_dir: str, reason: str = "normalization_completed"):
     if not output_dir:
@@ -116,3 +203,27 @@ def _clear_buffer_directory(buffer_dir: str):
                 print(f"[INFO] Deleted old buffer file: {file_path}", flush=True)
         except Exception as e:
             print(f"[WARNING] Failed to delete buffer file {file_path}: {e}", flush=True)
+
+def _clean_graph_copy(graph):
+    graph_copy = graph.copy()
+    allowed_types = (str, int, float, bool)
+    for v in graph_copy.vs:
+        for attr in list(v.attributes()):
+            if not isinstance(v[attr], allowed_types):
+                del v[attr]
+    for e in graph_copy.es:
+        for attr in list(e.attributes()):
+            if not isinstance(e[attr], allowed_types):
+                del e[attr]
+    return graph_copy
+
+def _graph_config(config: dict) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    graph_cfg = config.get("graph_construction")
+    if isinstance(graph_cfg, dict):
+        return graph_cfg
+    legacy_cfg = config.get("graph")
+    if isinstance(legacy_cfg, dict):
+        return legacy_cfg
+    return {}

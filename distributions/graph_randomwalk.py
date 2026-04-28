@@ -1,18 +1,21 @@
 import argparse
 import json
+from logging import config
 import os
 import sys
+import time
 
 import pandas as pd
 from ruamel.yaml import YAML
 
-from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from models.representation_graph import RepresentationGraph
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
+from utils.buffers import load_first_buffer, _write_buffer, _wait_for_buffer, _write_eos, _clear_buffer_directory, get_latest_graphml_file, get_latest_manifest_file, _buffer_directory_has_files
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
+BUFFER_PATH = "/app/data/buffers/"
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -251,15 +254,25 @@ def _bootstrap_dyn_roots_if_empty(graph, config):
         print(f"[bootstrap] dyn_roots is unsupported type: {type(dyn_roots)}", file=sys.stderr)
 
 
-def ensure_representation_graph(config: dict):
+def ensure_representation_graph(config: dict, inference: bool = False):
     current = get("representation_graph")
-    if current is not None and hasattr(current, "build_relation"):
+    if current is not None and hasattr(current, "build_relation") and not inference:
         print("[ensure] graph already cached", file=sys.stderr)
         return current
 
-    state_cfg = _state_config(config)
-    graph_path = _graph_artifact_path(state_cfg, config)
-    manifest_path = _graph_manifest_path(state_cfg, config)
+    if(inference): 
+        if not _buffer_directory_has_files(BUFFER_PATH + "graph"):
+            graph = dyn_graph_generation(config)
+            STATE_CACHE["representation_graph"] = graph
+            _persist_state_cache()
+            return graph
+        graph_path = get_latest_graphml_file(BUFFER_PATH + "graph")
+        manifest_path = get_latest_manifest_file(BUFFER_PATH + "graph")
+    else:
+        state_cfg = _state_config(config)
+        graph_path = _graph_artifact_path(state_cfg, config)
+        manifest_path = _graph_manifest_path(state_cfg, config)
+    
     print(f"[ensure] graph_path={graph_path}, manifest_path={manifest_path}", file=sys.stderr)
     print(f"[ensure] manifest exists={_file_has_content(manifest_path)}, graph exists={_file_has_content(graph_path)}", file=sys.stderr)
 
@@ -319,8 +332,8 @@ def update(key, value):
         _write_text(graph_path, graph)
 
 
-def graph_construction(config, processed_data):
-    graph = ensure_representation_graph(config)
+def graph_construction(config, processed_data, inference=False):
+    graph = ensure_representation_graph(config, inference=inference)
 
     if not isinstance(processed_data, pd.DataFrame):
         raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
@@ -351,8 +364,6 @@ def random_walk(config):
     print(f"[random_walk] has_get_graph={has_get_graph}, has_dyn_roots={has_dyn_roots}", file=sys.stderr)
     
     if has_get_graph and has_dyn_roots:
-        dyn_roots = graph.dyn_roots
-        print(f"[random_walk] dyn_roots before walk generation: type={type(dyn_roots)}, value={dyn_roots}", file=sys.stderr)
         walks = dynrandom_walks_generation(config, graph)
         print(f"[random_walk] walks_count={len(walks)}", file=sys.stderr)
         print(f"[random_walk] first_walk={walks[0] if walks else []}", file=sys.stderr)
@@ -360,22 +371,12 @@ def random_walk(config):
     return []
 
 
-def run_argo_once(mode: str, function: str, processed_data: str, output_path: str = "-"):
+def run_argo_batch(mode: str, function: str, processed_data: str, output_path: str = "-"):
     config = load_config()
     config["mode"] = mode
     config["function"] = function
     processed_data_value = load_processed_data(processed_data)
     print(f"Processed data loaded: type={type(processed_data_value)}, value_preview={str(processed_data_value)[:100]}", file=sys.stderr)
-
-    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, function):
-        print(f"[INFO] Running Kafka chain for function '{function}' in mode '{mode}'...", file=sys.stderr)
-        returned = run_kafka_stage(config, function, lambda payload, message, kafka_config: graph_construction(kafka_config, payload) if function == "graph_construction" else random_walk(kafka_config))
-        payload = json.dumps(serialize_for_json(returned))
-        if output_path and output_path != "-":
-            with open(output_path, "w", encoding="utf-8") as file_handle:
-                file_handle.write(payload)
-        else:
-            print(payload)
 
     function_map = {
         "graph_construction": lambda: graph_construction(config, processed_data_value),
@@ -393,6 +394,52 @@ def run_argo_once(mode: str, function: str, processed_data: str, output_path: st
     else:
         print(payload)
 
+def run_argo_incremental(function: str, output_path: str = "-"):
+    print(f"[INFO] Running buffer chain for function '{function}' ...", file=sys.stderr)
+    config = load_config()
+    config["function"] = function
+
+    _clear_buffer_directory(BUFFER_PATH + "graph")
+    
+    if function == "graph_construction":
+        load_buffer_path = BUFFER_PATH + "processed_data"
+        output_buffer_path = BUFFER_PATH + "graph"
+    else:
+        load_buffer_path = BUFFER_PATH + "graph"
+
+    first_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    if first_ready is None:
+        print("[INFO] No incoming raw buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
+        _write_eos(BUFFER_PATH + "graph", reason=f"graph_timeout_no_initial_buffer")
+        return
+
+    processed_data = load_first_buffer(load_buffer_path)
+    while processed_data is not None:
+        if processed_data.empty:
+            print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
+            next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            processed_data = load_first_buffer(load_buffer_path) if next_ready is not None else None
+            continue
+        print(f"[DEBUG] Processed data type={type(processed_data)}", file=sys.stderr, flush=True)
+
+        function_map = {
+            "graph_construction": lambda: graph_construction(config, processed_data, inference=True),
+            "random_walk": lambda: random_walk(config),
+        }
+        
+        output = function_map[function]()
+        graph = get("representation_graph")
+        _write_buffer(graph, output_buffer_path, extension="graphml")
+        processed_data = load_first_buffer(load_buffer_path)
+
+    _write_eos(output_buffer_path, reason=f"graph_{function}_completed")
+    payload = json.dumps(serialize_for_json({}))
+    if output_path and output_path != "-":
+        with open(output_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(payload)
+    else:
+        print(payload)
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Graph construction/random walk distribution for Argo")
@@ -401,4 +448,7 @@ if __name__ == "__main__":
     parser.add_argument("--function", default="")
     parser.add_argument("--output", default="-")
     args = parser.parse_args()
-    run_argo_once(mode=args.mode, function=args.function, processed_data=args.processed_data, output_path=args.output)
+    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
+        run_argo_incremental(function=args.function, output_path=args.output)
+    else:        
+        run_argo_batch(mode=args.mode, function=args.function, processed_data=args.processed_data, output_path=args.output)

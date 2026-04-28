@@ -4,6 +4,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 from confluent_kafka import Producer as KafkaProducer
 from ruamel.yaml import YAML
@@ -66,7 +67,8 @@ def _handle_sigint(signum, frame):
         ACTIVE_CONSUMER = None
     _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
     ACTIVE_JAVA_PROC = None
-    raise SystemExit(130)
+    # Exit with code 0 to indicate graceful shutdown
+    sys.exit(0)
 
 
 def _resolve_simulator_jar(java_path: str) -> str:
@@ -82,6 +84,9 @@ def _resolve_simulator_jar(java_path: str) -> str:
         )
     return jar_candidates[0]
 
+def _daemon():
+    while True:
+        time.sleep(1)
 
 def start_producer(config):
     global ACTIVE_JAVA_PROC
@@ -119,7 +124,7 @@ def start_producer(config):
         signal.signal(signal.SIGINT, previous_sigint_handler)
         _stop_process_group(java_proc, interrupt_first=True)
         ACTIVE_JAVA_PROC = None
-
+        _daemon()
 # =========================
 # Main
 # =========================
