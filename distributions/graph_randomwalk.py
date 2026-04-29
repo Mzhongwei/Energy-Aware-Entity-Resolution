@@ -11,7 +11,7 @@ from ruamel.yaml import YAML
 from models.representation_graph import RepresentationGraph
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
-from utils.buffers import load_first_buffer, _write_buffer, _wait_for_buffer, _write_eos, _clear_buffer_directory, get_latest_graphml_file, get_latest_manifest_file, _buffer_directory_has_files
+from utils.buffers import load_earliest_buffer, _write_buffer, _wait_for_buffer, _write_eos, _clear_buffer_directory, get_latest_graphml_file, _delete_earliest_buffer_file, get_manifest_file, _buffer_directory_has_files
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
@@ -188,6 +188,50 @@ def _file_has_content(path: str) -> bool:
     return os.path.exists(path) and os.path.getsize(path) > 0
 
 
+def _resolve_graph_paths(config: dict):
+    state_cfg = _state_config(config)
+    return _graph_artifact_path(state_cfg, config), _graph_manifest_path(state_cfg, config)
+
+
+def _merge_config_from_manifest(config: dict, manifest_path: str, label: str):
+    merged_config = config
+    if not _file_has_content(manifest_path):
+        return merged_config
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as file_handle:
+            manifest = json.load(file_handle)
+        graph_cfg = manifest.get("graph_config")
+        manifest_meta_path = manifest.get("meta_path", config.get("meta_path", []))
+        print(f"{label} loaded manifest with graph_config={bool(graph_cfg)}, meta_path={manifest_meta_path}", file=sys.stderr)
+        if isinstance(graph_cfg, dict):
+            merged_config = dict(config)
+            merged_config["graph_construction"] = graph_cfg
+            merged_config["meta_path"] = manifest_meta_path
+    except Exception as e:
+        print(f"{label} failed to load manifest: {e}", file=sys.stderr)
+        merged_config = config
+
+    return merged_config
+
+
+def _load_representation_graph(config: dict, graph_path: str, manifest_path: str, label: str):
+    print(f"{label} graph_path={graph_path}, manifest_path={manifest_path}", file=sys.stderr)
+    print(f"{label} manifest exists={_file_has_content(manifest_path)}, graph exists={_file_has_content(graph_path)}", file=sys.stderr)
+
+    merged_config = _merge_config_from_manifest(config, manifest_path, label)
+
+    if _file_has_content(graph_path):
+        print(f"{label} loading graph from {graph_path}", file=sys.stderr)
+        graph = dyn_graph_generation(merged_config)
+        graph.load_graph(graph_path)
+        print(f"{label} graph loaded, vcount={graph.get_graph().vcount() if hasattr(graph, 'get_graph') else '?'}", file=sys.stderr)
+        return graph
+
+    print(f"{label} creating fresh graph (no existing file)", file=sys.stderr)
+    return dyn_graph_generation(config)
+
+
 def get(key):
     return STATE_CACHE.get(key)
 
@@ -253,53 +297,29 @@ def _bootstrap_dyn_roots_if_empty(graph, config):
     else:
         print(f"[bootstrap] dyn_roots is unsupported type: {type(dyn_roots)}", file=sys.stderr)
 
-
-def ensure_representation_graph(config: dict, inference: bool = False):
+def ensure_representation_graph(config: dict, force_reload: bool):
     current = get("representation_graph")
-    if current is not None and hasattr(current, "build_relation") and not inference:
+    if current is not None and hasattr(current, "build_relation") and not force_reload:
         print("[ensure] graph already cached", file=sys.stderr)
         return current
 
-    if(inference): 
-        if not _buffer_directory_has_files(BUFFER_PATH + "graph"):
-            graph = dyn_graph_generation(config)
-            STATE_CACHE["representation_graph"] = graph
-            _persist_state_cache()
-            return graph
-        graph_path = get_latest_graphml_file(BUFFER_PATH + "graph")
-        manifest_path = get_latest_manifest_file(BUFFER_PATH + "graph")
-    else:
-        state_cfg = _state_config(config)
-        graph_path = _graph_artifact_path(state_cfg, config)
-        manifest_path = _graph_manifest_path(state_cfg, config)
-    
-    print(f"[ensure] graph_path={graph_path}, manifest_path={manifest_path}", file=sys.stderr)
-    print(f"[ensure] manifest exists={_file_has_content(manifest_path)}, graph exists={_file_has_content(graph_path)}", file=sys.stderr)
-
-    merged_config = config
-    if _file_has_content(manifest_path):
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as file_handle:
-                manifest = json.load(file_handle)
-            graph_cfg = manifest.get("graph_config")
-            manifest_meta_path = manifest.get("meta_path", config.get("meta_path", []))
-            print(f"[ensure] loaded manifest with graph_config={bool(graph_cfg)}, meta_path={manifest_meta_path}", file=sys.stderr)
-            if isinstance(graph_cfg, dict):
-                merged_config = dict(config)
-                merged_config["graph_construction"] = graph_cfg
-                merged_config["meta_path"] = manifest_meta_path
-        except Exception as e:
-            print(f"[ensure] failed to load manifest: {e}", file=sys.stderr)
-            merged_config = config
-
-    if _file_has_content(graph_path):
-        print(f"[ensure] loading graph from {graph_path}", file=sys.stderr)
-        graph = dyn_graph_generation(merged_config)
-        graph.load_graph(graph_path)
-        print(f"[ensure] graph loaded, vcount={graph.get_graph().vcount() if hasattr(graph, 'get_graph') else '?'}", file=sys.stderr)
-    else:
-        print(f"[ensure] creating fresh graph (no existing file)", file=sys.stderr)
+    graph_path, manifest_path = _resolve_graph_paths(config)
+    if graph_path is None:
         graph = dyn_graph_generation(config)
+        STATE_CACHE["representation_graph"] = graph
+        _persist_state_cache()
+        return graph
+
+    graph = _load_representation_graph(config, graph_path, manifest_path, "[ensure]")
+
+    STATE_CACHE["representation_graph"] = graph
+    _persist_state_cache()
+    return graph
+
+
+def load_graph_from_path(config: dict, graph_path: str):
+    manifest_path = get_manifest_file(graph_path)
+    graph = _load_representation_graph(config, graph_path, manifest_path, "[ensure:path]")
 
     STATE_CACHE["representation_graph"] = graph
     _persist_state_cache()
@@ -319,22 +339,39 @@ def update(key, value):
 
     graph = STATE_CACHE.get("representation_graph")
     if isinstance(graph, RepresentationGraph):
+        temp_graph_path = f"{graph_path}.tmp"
+        temp_manifest_path = f"{_graph_manifest_path(state_cfg, config)}.tmp"
+        manifest_path = _graph_manifest_path(state_cfg, config)
         graph_save = _clean_graph_copy(graph.graph)
-        graph_save.write_graphml(graph_path)
-        manifest = {
-            "graph_class": type(graph).__name__,
-            "graph_config": _graph_config(config),
-            "meta_path": config.get("meta_path", []),
-        }
-        with open(_graph_manifest_path(state_cfg, config), "w", encoding="utf-8") as file_handle:
-            json.dump(manifest, file_handle, ensure_ascii=False, indent=2)
+        try:
+            graph_save.write_graphml(temp_graph_path)
+            manifest = {
+                "graph_class": type(graph).__name__,
+                "graph_config": _graph_config(config),
+                "meta_path": config.get("meta_path", []),
+            }
+            with open(temp_manifest_path, "w", encoding="utf-8") as file_handle:
+                json.dump(manifest, file_handle, ensure_ascii=False, indent=2)
+
+            os.replace(temp_graph_path, graph_path)
+            os.replace(temp_manifest_path, manifest_path)
+        except Exception:
+            for temp_path in (temp_graph_path, temp_manifest_path):
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            raise
     else:
         _write_text(graph_path, graph)
 
+def incremental_graph_construction(config, processed_data):
+    graph = ensure_representation_graph(config, force_reload=True)
+    return graph_construction(graph, processed_data)
 
-def graph_construction(config, processed_data, inference=False):
-    graph = ensure_representation_graph(config, inference=inference)
+def batch_graph_construction(config, processed_data):
+    graph = ensure_representation_graph(config)
+    return graph_construction(graph, processed_data)
 
+def graph_construction(graph, processed_data):
     if not isinstance(processed_data, pd.DataFrame):
         raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
     if not hasattr(graph, "build_relation"):
@@ -353,9 +390,15 @@ def graph_construction(config, processed_data, inference=False):
 
     return {"status": "graph_built"}
 
+def incremental_random_walk(config, graph_path):
+    graph = load_graph_from_path(config, graph_path)
+    return random_walk(graph, config)
 
-def random_walk(config):
+def batch_random_walk(config):
     graph = ensure_representation_graph(config)
+    return random_walk(graph, config)
+
+def random_walk(graph, config):
     _bootstrap_dyn_roots_if_empty(graph, config)
     print("[random_walk]")
     
@@ -379,8 +422,8 @@ def run_argo_batch(mode: str, function: str, processed_data: str, output_path: s
     print(f"Processed data loaded: type={type(processed_data_value)}, value_preview={str(processed_data_value)[:100]}", file=sys.stderr)
 
     function_map = {
-        "graph_construction": lambda: graph_construction(config, processed_data_value),
-        "random_walk": lambda: random_walk(config),
+        "graph_construction": lambda: batch_graph_construction(config, processed_data_value),
+        "random_walk": lambda: batch_random_walk(config),
     }
 
     if function not in function_map:
@@ -398,14 +441,17 @@ def run_argo_incremental(function: str, output_path: str = "-"):
     print(f"[INFO] Running buffer chain for function '{function}' ...", file=sys.stderr)
     config = load_config()
     config["function"] = function
-
-    _clear_buffer_directory(BUFFER_PATH + "graph")
     
     if function == "graph_construction":
         load_buffer_path = BUFFER_PATH + "processed_data"
         output_buffer_path = BUFFER_PATH + "graph"
+        extension = "graphml"
     else:
         load_buffer_path = BUFFER_PATH + "graph"
+        output_buffer_path = BUFFER_PATH + "sequences"
+        extension = "json"
+
+    _clear_buffer_directory(output_buffer_path)
 
     first_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=120)
     if first_ready is None:
@@ -413,26 +459,30 @@ def run_argo_incremental(function: str, output_path: str = "-"):
         _write_eos(BUFFER_PATH + "graph", reason=f"graph_timeout_no_initial_buffer")
         return
 
-    processed_data = load_first_buffer(load_buffer_path)
-    while processed_data is not None:
-        if processed_data.empty:
+    data = load_earliest_buffer(load_buffer_path)
+    while data is not None:
+        if data.empty if isinstance(data, pd.DataFrame) else False:
             print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
             next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
-            processed_data = load_first_buffer(load_buffer_path) if next_ready is not None else None
+            data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
-        print(f"[DEBUG] Processed data type={type(processed_data)}", file=sys.stderr, flush=True)
 
         function_map = {
-            "graph_construction": lambda: graph_construction(config, processed_data, inference=True),
-            "random_walk": lambda: random_walk(config),
+            "graph_construction": lambda: incremental_graph_construction(config, data),
+            "random_walk": lambda: incremental_random_walk(config, data),
         }
         
         output = function_map[function]()
-        graph = get("representation_graph")
-        _write_buffer(graph, output_buffer_path, extension="graphml")
-        processed_data = load_first_buffer(load_buffer_path)
 
-    _write_eos(output_buffer_path, reason=f"graph_{function}_completed")
+        if function == "graph_construction":
+            output = get("representation_graph").graph
+
+        _write_buffer(output, output_buffer_path, extension=extension)
+        _delete_earliest_buffer_file(load_buffer_path)
+        next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+        data = load_earliest_buffer(load_buffer_path)
+
+    _write_eos(output_buffer_path, reason=f"{function}_completed")
     payload = json.dumps(serialize_for_json({}))
     if output_path and output_path != "-":
         with open(output_path, "w", encoding="utf-8") as file_handle:

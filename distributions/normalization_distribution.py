@@ -8,7 +8,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
-from utils.buffers import _clear_buffer_directory, load_first_buffer, _write_buffer, _wait_for_buffer, _write_eos
+from utils.buffers import _clear_buffer_directory, load_earliest_buffer, _write_buffer, _wait_for_buffer, _write_eos, _delete_earliest_buffer_file
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
@@ -178,18 +178,19 @@ def run_argo_incremental():
         print("[INFO] No incoming raw buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
         _write_eos(BUFFER_PATH + "processed_data", reason=f"normalization_timeout_no_initial_buffer")
         return
-    raw_data = load_first_buffer(load_buffer_path)
+    raw_data = load_earliest_buffer(load_buffer_path)
     while raw_data is not None:
         if raw_data.empty:
             print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
             next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
-            raw_data = load_first_buffer(load_buffer_path) if next_ready is not None else None
+            raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
         returned = normalization(config=config, raw_data=raw_data, is_training=False)
         if returned is not None:
             _write_buffer(returned, BUFFER_PATH + "processed_data", extension="csv")
+        _delete_earliest_buffer_file(load_buffer_path)
         next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
-        raw_data = load_first_buffer(load_buffer_path) if next_ready is not None else None
+        raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
     _write_eos(BUFFER_PATH + "processed_data", reason=f"normalization_completed")
     return
 

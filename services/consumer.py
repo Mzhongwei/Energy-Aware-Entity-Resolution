@@ -223,6 +223,7 @@ def start_consumer(config):
 
     data_buffer = []
     last_valid_msg = None
+    _clear_buffer_directory(BUFFER_DIR)
     has_received_messages = False
     started_at = time.time()
     try:
