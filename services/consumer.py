@@ -11,7 +11,7 @@ from confluent_kafka import Consumer, KafkaException, KafkaError, Producer as Ka
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from utils.write_log import write_log
-from utils.buffers import _clear_buffer_directory, _write_buffer, _write_eos
+from utils.buffers import clear_buffer_directory, write_buffer, write_eos
 
 
 ACTIVE_JAVA_PROC = None
@@ -200,6 +200,16 @@ def _commit_processed_offsets(consumer: Consumer, msg, reason: str):
         print(f"[WARNING] Failed to commit Kafka offsets after {reason}: {exc}", flush=True)
 
 
+def _flush_buffer_if_any(consumer: Consumer, data_buffer: list, last_valid_msg, reason: str):
+    if not data_buffer:
+        return []
+
+    write_buffer(data_buffer, BUFFER_DIR, extension="csv")
+    _commit_processed_offsets(consumer, last_valid_msg, reason)
+    write_eos(BUFFER_DIR, reason=reason)
+    return []
+
+
 def start_consumer(config):
     global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
     data_store = {
@@ -223,9 +233,10 @@ def start_consumer(config):
 
     data_buffer = []
     last_valid_msg = None
-    _clear_buffer_directory(BUFFER_DIR)
+    clear_buffer_directory(BUFFER_DIR)
     has_received_messages = False
     started_at = time.time()
+    window_index = 0
     try:
         signal.signal(signal.SIGINT, _handle_sigint)
         while True:
@@ -248,15 +259,38 @@ def start_consumer(config):
                     print("[INFO] No new messages for a while. Exiting consumer loop.", flush=True)
                     if data_buffer:
                         data_store['raw_data'] = pd.DataFrame(data_buffer)
-                        _write_buffer(data_buffer, BUFFER_DIR, extension="csv")
-                        _commit_processed_offsets(consumer, last_valid_msg, "buffer flush on idle")
-                        data_buffer = []
-                        _write_eos(BUFFER_DIR, reason="source_consumer_idle_timeout")
+                        data_buffer = _flush_buffer_if_any(
+                            consumer,
+                            data_buffer,
+                            last_valid_msg,
+                            "buffer flush on idle",
+                        )
                     break
                 continue
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
-                    # end of partition
+                    empty_poll_count += 1
+                    print(f'# partition eof count: {empty_poll_count}', flush=True)
+                    if empty_poll_count >= max_empty_polls:
+                        elapsed = time.time() - started_at
+                        if not has_received_messages and elapsed < max(startup_grace_seconds, 0.0):
+                            print(
+                                "[INFO] Still waiting for first source message "
+                                f"({elapsed:.1f}s < {startup_grace_seconds:.1f}s). Continuing...",
+                                flush=True,
+                            )
+                            empty_poll_count = 0
+                            continue
+                        print("[INFO] No new messages for a while. Exiting consumer loop.", flush=True)
+                        if data_buffer:
+                            data_store['raw_data'] = pd.DataFrame(data_buffer)
+                            data_buffer = _flush_buffer_if_any(
+                                consumer,
+                                data_buffer,
+                                last_valid_msg,
+                                "buffer flush on partition eof",
+                            )
+                        break
                     continue
                 else:
                     raise KafkaException(msg.error())
@@ -292,11 +326,12 @@ def start_consumer(config):
                     flush=True,
                 )
                 continue
+            window_index += 1
             data_buffer.append(metadata)
             last_valid_msg = msg
             if len(data_buffer) >= config["kafka"]["window_count"]:
                 data_store['raw_data'] = pd.DataFrame(data_buffer)
-                _write_buffer(data_buffer, BUFFER_DIR, extension="csv")
+                write_buffer(data_buffer, BUFFER_DIR, window_index, extension="csv")
                 _commit_processed_offsets(consumer, last_valid_msg, "window flush")
                 data_buffer = []
     finally:

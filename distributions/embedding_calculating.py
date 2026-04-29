@@ -9,18 +9,17 @@ import time
 import pandas as pd
 from ruamel.yaml import YAML
 
-from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from models.embedding_model import EmbeddingModel
 from pipeline.embedding_training import train_embeddings
 from pipeline.calculating_similarity import score_candidate_pairs
 
-from utils.buffers import _clear_buffer_directory, _get_earliest_buffer_file, _delete_earliest_buffer_file, _write_buffer, _wait_for_buffer, _write_eos
+from utils.buffers import load_earliest_buffer, get_earliest_window_index, delete_earliest_buffer_file, write_buffer, wait_for_buffer, write_eos
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
 STATE_CACHE_PATH = f"/app/data/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/data/state_cache.json"
 STATE_MANIFEST_PATH = "/app/data/state_manifest.json"
-
+BUFFER_PATH = "/app/data/buffers/"
 
 def _log(message: str):
     print(message, file=sys.stderr)
@@ -126,10 +125,6 @@ def _register_manifest_artifact(config: dict, logical_name: str, artifact_path: 
         "updated_at": _now_iso(),
     }
     _persist_state_manifest(manifest)
-    _log(
-        f"[manifest] version={version_name} run_id={WORKFLOW_NAME} "
-        f"window_id={version_entry['window'].get('id', '')} artifact={logical_name} path={artifact_path}"
-    )
 
 
 def _manifest_artifact_path(config: dict, logical_name: str) -> str:
@@ -307,15 +302,19 @@ def update(key, value):
     _register_manifest_artifact(config, "embedding_model", emb_path)
 
 
-def ensure_embedding_model(config: dict):
+def ensure_embedding_model(config: dict, force_reload: bool = False):
     current = get("embedding_model")
-    if _looks_like_embedding_model(current):
+    if _looks_like_embedding_model(current) and not force_reload:
         _log("[state] embedding_model already in memory cache")
         return current
 
     state_cfg = _state_config(config)
     emb_path = _manifest_artifact_path(config, "embedding_model") or _embedding_artifact_path(state_cfg, config)
     _log(f"[state] embedding path={emb_path} exists={_file_has_content(emb_path)}")
+    return load_embedding_model(config, emb_path)
+
+
+def load_embedding_model(config: dict, emb_path: str):
     if _file_has_content(emb_path):
         try:
             model = EmbeddingModel.load(emb_path)
@@ -327,8 +326,8 @@ def ensure_embedding_model(config: dict):
         except Exception:
             _log("[state] failed to load embedding_model from disk")
             pass
-    _log("[state] embedding_model not found in cache or disk")
-    return current
+    _log("[state] embedding_model at specified path is missing or empty")
+    return get("embedding_model")
 
 
 def _normalize_candidate_pairs(candidate_pairs):
@@ -358,19 +357,30 @@ def _normalize_candidate_pairs(candidate_pairs):
     return normalized
 
 
-def embedding_training(config, sequences):
-    _log("[embedding_training] start")
-    _log(f"[embedding_training] sequences type={type(sequences).__name__} size={_safe_len(sequences)}")
+def batch_embedding_training(config, sequences):
     model = ensure_embedding_model(config)
+    return embedding_training(config, sequences, model)
+
+def incremental_embedding_training(config, sequences):
+    model = ensure_embedding_model(config, True)
+    return embedding_training(config, sequences, model)
+
+def embedding_training(config, sequences, model):
     model = train_embeddings(config, model, sequences)
     update("embedding_model", model)
     vocab_size = _safe_len(getattr(model, "wv", {}).key_to_index) if hasattr(model, "wv") else "n/a"
     _log(f"[embedding_training] done vocab_size={vocab_size} model_type={type(model).__name__}")
     return {"status": "embedding_trained"}
 
+def batch_calculating_similarity(config, candidate_pairs):
+    embedding_model = ensure_embedding_model(config)
+    return calculating_similarity(config, candidate_pairs, embedding_model)
 
-def calculating_similarity(config, candidate_pairs):
-    _log("[calculating_similarity] start")
+def incremental_calculating_similarity(config, candidate_pairs, path):
+    embedding_model = load_embedding_model(config, path)
+    return calculating_similarity(config, candidate_pairs, embedding_model)
+
+def calculating_similarity(config, candidate_pairs, embedding_model):
     embedding_model = ensure_embedding_model(config)
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized or loaded before calculating_similarity.")
@@ -393,43 +403,9 @@ def calculating_similarity(config, candidate_pairs):
         "count": len(candidate_pairs_score),
     }
 
-
-def run_argo_once(
-    mode: str,
-    function: str,
-    sequences: str = "",
-    candidate_pairs: str = "",
-    output_path: str = "-",
-):
-    config = load_config()
-    config["mode"] = mode
-    config["function"] = function
-    _log(f"[run] function={function} mode={mode} output_path={output_path}")
-
-    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, function):
-        print(f"[INFO] Running Kafka chain for {function} in mode '{mode}'...")
-        returned = run_kafka_stage(config, function, lambda payload, message, kafka_config: embedding_training(kafka_config, payload) if function == "embedding_training" else calculating_similarity(kafka_config, payload))
-        payload = json.dumps(serialize_for_json(returned))
-        if output_path and output_path != "-":
-            with open(output_path, "w", encoding="utf-8") as file_handle:
-                file_handle.write(payload)
-        else:
-            print(payload)
-
-
-    if function == "embedding_training":
-        if not isinstance(sequences, str) or not sequences.strip():
-            raise ValueError("embedding_training requires --sequences input.")
-        sequences_value = load_input_payload(sequences)
-        output = embedding_training(config, sequences_value)
-    elif function == "calculating_similarity":
-        if not isinstance(candidate_pairs, str) or not candidate_pairs.strip():
-            raise ValueError("calculating_similarity requires --candidate_pairs input.")
-        candidate_pairs_value = load_input_payload(candidate_pairs)
-        output = calculating_similarity(config, candidate_pairs_value)
-    else:
-        raise ValueError(f"Unsupported function: {function}")
-
+def _exit(output_path=None, output=None, output_buffer_path=None):
+    if output_buffer_path:
+        write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
     payload = json.dumps(serialize_for_json(output))
     if output_path and output_path != "-":
         with open(output_path, "w", encoding="utf-8") as file_handle:
@@ -437,6 +413,84 @@ def run_argo_once(
     else:
         print(payload)
 
+def run_argo_batch(mode: str,function: str,sequences: str = "",candidate_pairs: str = "",output_path: str = "-"):
+    config = load_config()
+    config["mode"] = mode
+    config["function"] = function
+    if function == "embedding_training":
+        if not isinstance(sequences, str) or not sequences.strip():
+            raise ValueError("embedding_training requires --sequences input.")
+        sequences_value = load_input_payload(sequences)
+        output = batch_embedding_training(config, sequences_value)
+    elif function == "calculating_similarity":
+        if not isinstance(candidate_pairs, str) or not candidate_pairs.strip():
+            raise ValueError("calculating_similarity requires --candidate_pairs input.")
+        candidate_pairs_value = load_input_payload(candidate_pairs)
+        output = batch_calculating_similarity(config, candidate_pairs_value)
+    else:
+        raise ValueError(f"Unsupported function: {function}")
+
+    _exit(output_path=output_path, output=output)
+    return
+
+def run_argo_incremental(function: str, output_path: str = "-"):
+    config = load_config()
+    config["function"] = function
+
+    print(f"[INFO] Running Buffer chain for {function}...")
+
+    if function == "embedding_training":
+        load_buffer_path = BUFFER_PATH + "sequences"
+        output_buffer_path = BUFFER_PATH + "embedding"
+        extension = "emb"
+    elif function == "calculating_similarity":
+        load_buffer_path = BUFFER_PATH + "embedding"
+        load_cand_buffer_path = BUFFER_PATH + "candidate_pairs"
+        output_buffer_path = BUFFER_PATH + "matching_pairs"
+        extension = "json"
+    else:
+        raise ValueError(f"Unsupported function: {function}")
+
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
+
+    if first_ready is None:
+        print("[INFO] No incoming buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
+        _exit(output_path, output_buffer_path)
+        return
+
+    data = load_earliest_buffer(load_buffer_path)
+    while data is not None:
+        if function == "embedding_training":
+            output = incremental_embedding_training(config, data)
+
+            window_index = get_earliest_window_index(load_buffer_path)
+            model = get("embedding_model")
+            print(f"[DEBUG] model type : {type(model)}")
+
+            write_buffer(model, output_buffer_path, window_index, extension=extension)
+            delete_earliest_buffer_file(load_buffer_path)
+            wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            data = load_earliest_buffer(load_buffer_path)
+        
+        elif function == "calculating_similarity":
+            candidate_pairs_data = None
+            while candidate_pairs_data is None:
+                candidate_pairs_data = load_earliest_buffer(load_cand_buffer_path)
+                if candidate_pairs_data is None:
+                    time.sleep(1)
+
+            output = incremental_calculating_similarity(config, candidate_pairs_data, data)
+
+            window_index = get_earliest_window_index(load_buffer_path)
+
+            write_buffer(output, output_buffer_path, window_index, extension=extension)
+            delete_earliest_buffer_file(load_buffer_path)
+            delete_earliest_buffer_file(load_cand_buffer_path)
+            wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            data = load_earliest_buffer(load_buffer_path)
+
+    _exit(output_path, output_buffer_path)
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Embedding training/similarity distribution for Argo")
@@ -446,10 +500,7 @@ if __name__ == "__main__":
     parser.add_argument("--function", default="")
     parser.add_argument("--output", default="-")
     args = parser.parse_args()
-    run_argo_once(
-        mode=args.mode,
-        function=args.function,
-        sequences=args.sequences,
-        candidate_pairs=args.candidate_pairs,
-        output_path=args.output,
-    )
+    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
+        run_argo_incremental(function=args.function, output_path=args.output)
+    else:
+        run_argo_batch(mode=args.mode,function=args.function,sequences=args.sequences,candidate_pairs=args.candidate_pairs,output_path=args.output)

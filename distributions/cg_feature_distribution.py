@@ -7,11 +7,11 @@ import pandas as pd
 from pandas import DataFrame
 from ruamel.yaml import YAML
 
-from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from pipeline.cg_feature_extraction import compute_features
+from utils.buffers import delete_earliest_buffer_file, get_earliest_window_index, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-
+BUFFER_PATH = "/app/data/buffers/"
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -55,7 +55,6 @@ def _parse_json_payload(content: str):
     if not stripped:
         return None
     
-    # Argo may prepend logs before the JSON payload, so parse the last valid JSON line first.
     for line in reversed([ln.strip() for ln in stripped.splitlines() if ln.strip()]):
         try:
             return deserialize_from_json(json.loads(line))
@@ -92,6 +91,15 @@ def _coerce_processed_data_to_df(processed_data) -> DataFrame:
 
     return pd.DataFrame()
 
+def _exit(output_path=None, output=None, output_buffer_path=None):
+    if output_buffer_path:
+        write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
+    payload = json.dumps(serialize_for_json(output))
+    if output_path and output_path != "-":
+        with open(output_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(payload)
+    else:
+        print(payload)
 
 def cg_feature_extraction(config, processed_data):
     print("[cg_feature_extraction]", file=sys.stderr)
@@ -132,27 +140,44 @@ def load_processed_data(processed_data_value: str) -> dict | DataFrame:
         return parsed
     return processed_data_value
 
-def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
+def run_argo_batch(mode: str, processed_data_value: str, output_path: str = "-"):
     config = load_config()
     config["mode"] = mode
 
-    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, "cg_feature_extraction"):
-        print(f"[INFO] Running Kafka chain for CG feature extraction in mode '{mode}'...")
-        returned = run_kafka_stage(config, "cg_feature_extraction", lambda payload, message, kafka_config: cg_feature_extraction(kafka_config, payload))
-        if returned is not None:
-            print(json.dumps(serialize_for_json(returned)))
-        else:
-            print(json.dumps(serialize_for_json({})))
-        return
-
     output = cg_feature_extraction(config, load_processed_data(processed_data_value))
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    _exit(output_path=output_path, output=output)
+    return
 
+def run_argo_incremental(output_path: str = "-"):
+    config = load_config()
+
+    load_buffer_path = BUFFER_PATH + "processed_data_feature"
+    output_buffer_path = BUFFER_PATH + "cg_feature"
+
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    if first_ready is None:
+        print("[INFO] No incoming buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
+        _exit(output_path, output_buffer_path)
+        return
+    
+    raw_data = load_earliest_buffer(load_buffer_path)
+    while raw_data is not None:
+        if raw_data.empty:
+            next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
+            continue
+
+        output = cg_feature_extraction(config, raw_data)
+        if output is not None:
+            window_index = get_earliest_window_index(load_buffer_path)
+            write_buffer(output, output_buffer_path, window_index, extension="csv")
+
+        delete_earliest_buffer_file(load_buffer_path)
+        next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
+        raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
+    
+    _exit(output_path, output_buffer_path)
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CG feature distribution for Argo")
@@ -160,4 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--processed_data", default="")
     parser.add_argument("--output", default="-")
     args = parser.parse_args()
-    run_argo_once(mode=args.mode, processed_data_value=args.processed_data, output_path=args.output)
+    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
+        run_argo_incremental(output_path=args.output)
+    else:
+        run_argo_batch(mode=args.mode, processed_data_value=args.processed_data, output_path=args.output)

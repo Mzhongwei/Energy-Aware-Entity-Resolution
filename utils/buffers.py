@@ -16,7 +16,7 @@ def load_config(config_path: str = CONFIG_PATH):
         loaded = yaml.load(file_handle) or {}
     return loaded if isinstance(loaded, dict) else {}
 
-def _wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
+def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
     start_time = time()
     while time() - start_time < timeout_seconds:
         last_buffer_file = _get_earliest_buffer_file(buffer_dir)
@@ -88,14 +88,12 @@ def _delete_file_if_exists(file_path: str):
     if not file_path:
         return False
     if not os.path.isfile(file_path):
-        print(f"[INFO] File already absent: {file_path}", file=sys.stderr, flush=True)
         return True
     if file_path.endswith(".graphml"):
         manifest_path = f"{os.path.splitext(file_path)[0]}.manifest.json"
         if os.path.isfile(manifest_path):
             try:
                 os.remove(manifest_path)
-                print(f"[INFO] Deleted associated manifest file: {manifest_path}", file=sys.stderr, flush=True)
             except Exception as e:
                 print(f"[WARNING] Failed to delete manifest file '{manifest_path}': {e}", file=sys.stderr, flush=True)
     try:
@@ -110,17 +108,15 @@ def _delete_file_if_exists(file_path: str):
         print(f"[ERROR] Delete attempted but file still exists: {file_path}", file=sys.stderr, flush=True)
     return deleted
 
-def _delete_earliest_buffer_file(buffer_dir: str):
+def delete_earliest_buffer_file(buffer_dir: str):
     earliest_buffer_file = _get_earliest_buffer_file(buffer_dir)
     if earliest_buffer_file:
         return _delete_file_if_exists(earliest_buffer_file)
-    print(f"[INFO] No buffer file found to delete in directory: {buffer_dir}", file=sys.stderr, flush=True)
     return True
 
 def load_earliest_buffer(buffer_dir: str):
     earliest_buffer_file = _get_earliest_buffer_file(buffer_dir)
     if earliest_buffer_file and os.path.basename(earliest_buffer_file).startswith("eos_"):
-        print(f"[normalization] Earliest buffer file '{earliest_buffer_file}' is an EOS marker; skipping load.", file=sys.stderr, flush=True)
         return None
     if earliest_buffer_file and os.path.isfile(earliest_buffer_file):
         file_size = os.path.getsize(earliest_buffer_file)
@@ -136,6 +132,8 @@ def load_earliest_buffer(buffer_dir: str):
                 value = pd.read_csv(earliest_buffer_file)
             elif earliest_buffer_file.endswith(".graphml"):
                 value = earliest_buffer_file
+            elif earliest_buffer_file.endswith(".emb"):
+                value = earliest_buffer_file
         except EmptyDataError:
             print(f"[WARNING] Unreadable buffer file detected; deleting: {earliest_buffer_file}", file=sys.stderr, flush=True)
             return pd.DataFrame()
@@ -143,11 +141,18 @@ def load_earliest_buffer(buffer_dir: str):
             print(f"[WARNING] Failed to read buffer file '{earliest_buffer_file}': {exc}; deleting file.", file=sys.stderr, flush=True)
             return pd.DataFrame()
         print(f"[INFO] Read buffer file: {earliest_buffer_file}", file=sys.stderr, flush=True)
-        print(f"[INFO] Buffer content preview: {str(value)[:500]}...", file=sys.stderr, flush=True)
         return value
     return pd.DataFrame()
 
-def _write_buffer(data_buffer, output_dir: str, extension: str = "json"):
+def get_earliest_index_buffer_file(buffer_dir: str) -> str | None:
+    earliest_buffer_file = _get_earliest_buffer_file(buffer_dir)
+    if earliest_buffer_file and os.path.basename(earliest_buffer_file).startswith("eos_"):
+        return None
+    if earliest_buffer_file and os.path.isfile(earliest_buffer_file):
+        return earliest_buffer_file
+    return None
+
+def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "json"):
     if not output_dir or data_buffer is None:
         return
     if not os.path.exists(output_dir):
@@ -157,6 +162,8 @@ def _write_buffer(data_buffer, output_dir: str, extension: str = "json"):
         "json": _write_json_buffer,
         "csv": _write_csv_buffer,
         "graphml": _write_graph_buffer,
+        "emb": _write_embedding_model_buffer,
+        "index": _write_cg_index_buffer,
     }
     write_function = write_functions.get(extension)
     if not write_function:
@@ -164,14 +171,13 @@ def _write_buffer(data_buffer, output_dir: str, extension: str = "json"):
         return
     
     try:
-        write_function(data_buffer, output_dir)
+        write_function(data_buffer, output_dir, prefix)
     except Exception as e:
         print(f"[ERROR] Failed to write buffer to {output_dir} with extension '{extension}': {e}", file=sys.stderr, flush=True)
 
-def _write_graph_buffer(graph, output_dir: str):
-    os.makedirs(output_dir, exist_ok=True)
+def _write_graph_buffer(graph, output_dir: str, prefix: str):
     config = load_config()
-    graph_name = time_ns()
+    graph_name = f"{prefix}_{time_ns()}"
     graph_path = os.path.join(output_dir, f"{graph_name}.graphml")
     manifest_path = os.path.join(output_dir, f"{graph_name}.manifest.json")
     temp_graph_path = f"{graph_path}.tmp"
@@ -197,22 +203,28 @@ def _write_graph_buffer(graph, output_dir: str):
                 os.remove(temp_path)
         raise exc
 
-def _write_csv_buffer(data_buffer, output_dir: str):
+def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
+    os.makedirs(output_dir, exist_ok=True)
+    index_dir = os.path.join(output_dir, f"{prefix}_{time_ns()}")
+    cg_index.persist(index_dir)
+    print(f"[INFO] Persisted CGIndex buffer to {index_dir}.", flush=True)
+
+def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(data_buffer)
-    output_path = os.path.join(output_dir, f"{time_ns()}.csv")
+    output_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.csv")
     temp_path = f"{output_path}.tmp"
     df.to_csv(temp_path, index=False)
     os.replace(temp_path, output_path)
     print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as CSV.", flush=True)
 
-def _write_json_buffer(data_buffer, output_dir: str):
+def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{time_ns()}.json")
+    output_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.json")
     temp_path = f"{output_path}.tmp"
     try:
         with open(temp_path, "w", encoding="utf-8") as json_file:
-            json.dump(data_buffer, json_file, default=str)
+            json.dump({"value": data_buffer}, json_file, default=str)
         os.replace(temp_path, output_path)
     except Exception as e:
         print(f"[ERROR] Failed to write JSON buffer to {output_path}: {e}", file=sys.stderr, flush=True)
@@ -221,7 +233,23 @@ def _write_json_buffer(data_buffer, output_dir: str):
         return
     print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as JSON.", file=sys.stderr , flush=True)
 
-def _write_eos(output_dir: str, reason: str = "normalization_completed"):
+def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
+    emb_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.emb")
+    model.save(emb_path)
+
+def get_earliest_window_index(buffer_dir: str) -> int:
+    earliest_file = _get_earliest_buffer_file(buffer_dir)
+    if not earliest_file:
+        return 0
+    filename = os.path.basename(earliest_file)
+    prefix = filename.split("_")[0]
+    try:
+        return int(prefix)
+    except ValueError:
+        print(f"[WARNING] Failed to parse window index from filename '{filename}'; defaulting to 0.", file=sys.stderr, flush=True)
+        return 0
+
+def write_eos(output_dir: str, reason: str = "stream_completed"):
     if not output_dir:
         return
     os.makedirs(output_dir, exist_ok=True)
@@ -231,16 +259,14 @@ def _write_eos(output_dir: str, reason: str = "normalization_completed"):
         json.dump(eos_payload, eos_file)
     print(f"[INFO] Wrote EOS marker: {output_path} reason={reason}", file=sys.stderr, flush=True)
 
-def _clear_buffer_directory(buffer_dir: str):
+def clear_buffer_directory(buffer_dir: str):
     if not buffer_dir or not os.path.exists(buffer_dir):
-        print(f"[INFO] Buffer directory '{buffer_dir}' does not exist; skipping clear.", flush=True)
         return
     for filename in os.listdir(buffer_dir):
         file_path = os.path.join(buffer_dir, filename)
         try:
             if os.path.isfile(file_path):
                 os.remove(file_path)
-                print(f"[INFO] Deleted old buffer file: {file_path}", flush=True)
         except Exception as e:
             print(f"[WARNING] Failed to delete buffer file {file_path}: {e}", flush=True)
 

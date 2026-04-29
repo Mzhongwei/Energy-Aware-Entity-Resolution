@@ -8,7 +8,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
-from utils.buffers import _clear_buffer_directory, load_earliest_buffer, _write_buffer, _wait_for_buffer, _write_eos, _delete_earliest_buffer_file
+from utils.buffers import load_earliest_buffer, write_buffer, get_earliest_window_index, wait_for_buffer, write_eos, delete_earliest_buffer_file
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
@@ -58,15 +58,6 @@ def _maybe_reset_rid_counter(config: dict) -> str:
     if reset_counter:
         with open(counter_path, "w", encoding="utf-8") as file_handle:
             file_handle.write("0")
-        print(
-            f"[normalization] reset_counter_on_start enabled; counter reset to 0 path={counter_path} version={version_name}",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"[normalization] reset_counter_on_start disabled; keeping existing counter path={counter_path} version={version_name}",
-            file=sys.stderr,
-        )
 
     return counter_path
 
@@ -114,21 +105,12 @@ def serialize_for_json(obj):
     return obj
 
 def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = False):
-    print("[normalization]", file=sys.stderr)
     if 'embedding' in config['mode']:
         # in incremental mode, we index records and normalize
 
         raw_data_path = config.get("data_source_A")
         raw_df = _resolve_embedding_raw_df(config, raw_data)
         _maybe_reset_rid_counter(config)
-        print(
-            "[normalization] embedding_input_rows={rows} source_A={source_a} source_B={source_b}".format(
-                rows=len(raw_df),
-                source_a=config.get("data_source_A"),
-                source_b=config.get("data_source_B"),
-            ),
-            file=sys.stderr,
-        )
         processed_data = index_normalization(config, raw_df, raw_data_path, is_training)
     else:
         if "bert" in config.get("mode", ""):
@@ -146,7 +128,6 @@ def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = 
             if isinstance(df, pd.DataFrame) and not df.empty:
                 raw_data[key] = sequence_generating_m1(df)
         processed_data = raw_data
-    print("[normalization] completed, processed_data: {processed_data}".format(processed_data=processed_data), file=sys.stderr)
     return processed_data
 
 
@@ -155,6 +136,15 @@ def load_raw_data(raw_data_value: str) -> dict | DataFrame:
         return {"data": pd.read_csv(raw_data_value)}
     return {"data": pd.DataFrame([{"value": raw_data_value}])}
 
+def _exit(output_path=None, output=None, output_buffer_path=None):
+    if output_buffer_path:
+        write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
+    payload = json.dumps(serialize_for_json(output))
+    if output_path and output_path != "-":
+        with open(output_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(payload)
+    else:
+        print(payload)
 
 def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_source_b: str = "",):
     config = load_config()
@@ -165,33 +155,34 @@ def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_
         config["data_source_B"] = data_source_b.strip()
     is_training = "training" in mode
     output = normalization(config=config, raw_data=load_raw_data(raw_data_value), is_training=is_training)
-    print(json.dumps(serialize_for_json(output)))
+    _exit(output=output)
 
 def run_argo_incremental():
     config = load_config()
 
-    print(f"[INFO] Running buffer chain for normalization", file=sys.stderr)
-    _clear_buffer_directory(BUFFER_PATH + "processed_data")
     load_buffer_path = BUFFER_PATH + "raw_data"
-    first_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
     if first_ready is None:
-        print("[INFO] No incoming raw buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)
-        _write_eos(BUFFER_PATH + "processed_data", reason=f"normalization_timeout_no_initial_buffer")
+        _exit(output_buffer_path=BUFFER_PATH + "processed_data")
+        _exit(output_buffer_path=BUFFER_PATH + "processed_data_feature")
         return
     raw_data = load_earliest_buffer(load_buffer_path)
     while raw_data is not None:
         if raw_data.empty:
-            print(f"[INFO] Loaded empty buffer; waiting for next buffer...", file=sys.stderr)
-            next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
             raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
         returned = normalization(config=config, raw_data=raw_data, is_training=False)
+        window_index = get_earliest_window_index(BUFFER_PATH + "raw_data")
         if returned is not None:
-            _write_buffer(returned, BUFFER_PATH + "processed_data", extension="csv")
-        _delete_earliest_buffer_file(load_buffer_path)
-        next_ready = _wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            write_buffer(returned, BUFFER_PATH + "processed_data", window_index, extension="csv")
+            write_buffer(returned, BUFFER_PATH + "processed_data_feature", window_index, extension="csv")
+
+        delete_earliest_buffer_file(load_buffer_path)
+        next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
         raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
-    _write_eos(BUFFER_PATH + "processed_data", reason=f"normalization_completed")
+    _exit(output_buffer_path=BUFFER_PATH + "processed_data")
+    _exit(output_buffer_path=BUFFER_PATH + "processed_data_feature")
     return
 
 if __name__ == "__main__":

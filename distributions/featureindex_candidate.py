@@ -6,14 +6,15 @@ import sys
 import pandas as pd
 from ruamel.yaml import YAML
 
-from kafka_chain import kafka_chain_enabled, run_kafka_stage
 from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.feature_index_construction import create_cg_index
 from pipeline.candidate_enumeration import enumerate_candidates
 from models.cg_index import CGIndex
+from utils.buffers import delete_earliest_buffer_file, get_earliest_window_index, get_earliest_index_buffer_file, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
+BUFFER_PATH = "/app/data/buffers/"
 
 
 def load_config(config_path: str = CONFIG_PATH):
@@ -122,18 +123,18 @@ def _write_text(path: str, value):
         else:
             file_handle.write(json.dumps(serialize_for_json(value)))
 
-
-def _write_json(path: str, value):
-    cache_dir = os.path.dirname(path)
-    if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file_handle:
-        json.dump(serialize_for_json(value), file_handle)
-
-
 def get(key):
     return STATE_CACHE.get(key)
 
+def _exit(output_path=None, output=None, output_buffer_path=None):
+    if output_buffer_path:
+        write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
+    payload = json.dumps(serialize_for_json(output))
+    if output_path and output_path != "-":
+        with open(output_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(payload)
+    else:
+        print(payload)
 
 def _cg_index_save_dir(config: dict):
     state_config = {}
@@ -147,12 +148,16 @@ def _cg_index_save_dir(config: dict):
     return os.path.join(index_dir, index_name)
 
 
-def ensure_cg_feature_index(config: dict):
+def ensure_cg_feature_index(config: dict, force_rebuild: bool = False):
     current = get("cg_feature_index")
-    if current is not None and hasattr(current, "build"):
+    if current is not None and hasattr(current, "build") and not force_rebuild:
         return current
 
     save_dir = _cg_index_save_dir(config)
+    return build_cg_feature(save_dir, config)
+    
+
+def build_cg_feature(save_dir: str, config: dict):
     manifest_path = os.path.join(save_dir, "manifest.json")
     if os.path.exists(manifest_path):
         index = CGIndex.from_disk(config, save_dir)
@@ -184,8 +189,15 @@ def update(key, value):
         _write_text(os.path.join(save_dir, "index.json"), index)
     
 
-def feature_index_construction(cg_feature):
-    print("[feature_index_construction]")
+def batch_feature_index_construction(config, cg_feature):
+    ensure_cg_feature_index(config)
+    return feature_index_construction(config, cg_feature)
+
+def incremental_feature_index_construction(config, cg_feature):
+    ensure_cg_feature_index(config, True)
+    return feature_index_construction(config, cg_feature)
+
+def feature_index_construction(config, cg_feature):
     if not isinstance(cg_feature, list):
         raise ValueError("cg_feature must be a feature list.")
 
@@ -197,10 +209,18 @@ def feature_index_construction(cg_feature):
 
     build_cg_index(cg_feature, index)
     update("cg_feature_index", index)
-    print("Built index :", index)
     return None
 
-def candidate_enumeration(cg_feature):
+def batch_candidate_enumeration(config, cg_feature):
+    ensure_cg_feature_index(config)
+    return candidate_enumeration(config, cg_feature)
+
+def incremental_candidate_enumeration(config, cg_feature, path):
+    build_cg_feature(path, config)
+    return candidate_enumeration(config, cg_feature)
+
+def candidate_enumeration(config, cg_feature):
+    ensure_cg_feature_index(config)
     print("[candidate_enumeration]")
     index = get("cg_feature_index")
     if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
@@ -211,21 +231,11 @@ def candidate_enumeration(cg_feature):
         print("error")
     return None
 
-def run_argo_once(mode: str, function: str, cg_feature: str, output_path: str = "-"):
+def run_argo_batch(mode: str, function: str, cg_feature: str, output_path: str = "-"):
     config = load_config()
     config["mode"] = mode
     config["function"] = function
     cg_feature_value = load_cg_feature(cg_feature)
-
-    if "inference" in mode and "training" not in mode and kafka_chain_enabled(config, function or "candidate_enumeration"):
-        print(f"[INFO] Running Kafka chain for function '{function}' in mode '{mode}'...")
-        returned = run_kafka_stage(config, function or "candidate_enumeration", lambda payload, message, kafka_config: feature_index_construction(payload) if function == "feature_index_construction" else candidate_enumeration(payload))
-        payload = json.dumps(serialize_for_json(returned))
-        if output_path and output_path != "-":
-            with open(output_path, "w", encoding="utf-8") as file_handle:
-                file_handle.write(payload)
-        else:
-            print(payload)
     
     function_map = {
         "feature_index_construction": feature_index_construction,
@@ -234,18 +244,64 @@ def run_argo_once(mode: str, function: str, cg_feature: str, output_path: str = 
     
     if function not in function_map:
         raise ValueError(f"Unsupported function: {function}")
-
-    if function in {"feature_index_construction", "candidate_enumeration"}:
-        ensure_cg_feature_index(config)
     
-    output = function_map[function](cg_feature_value)
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    output = function_map[function](config, cg_feature_value)
+    _exit(output=output, output_path=output_path)
+    return
 
+def run_argo_incremental(function: str, output_path: str = "-"):
+    config = load_config()
+    config["function"] = function
+
+
+    load_buffer_path = BUFFER_PATH + "cg_feature"
+
+    if function == "feature_index_construction":
+        output_buffer_path = BUFFER_PATH + "cg_feature_index"
+        extension = "index"
+    else:
+        output_buffer_path = BUFFER_PATH + "candidate_pairs"
+        extension = "json"
+    
+    buffer_function = {
+        "feature_index_construction": lambda: load_earliest_buffer(load_buffer_path),
+        "candidate_enumeration": lambda: get_earliest_index_buffer_file(load_buffer_path),
+    }
+
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    if first_ready is None:
+        _exit(output_path=output_path,output_buffer_path=output_buffer_path)
+        return
+    
+    data = buffer_function[function]()
+    while data is not None:
+        if data.empty:
+            next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            data = buffer_function[function]() if next_ready is not None else None
+            continue
+
+        function_map = {
+            "feature_index_construction": incremental_feature_index_construction,
+            "candidate_enumeration": incremental_candidate_enumeration,
+        }
+        
+        if function not in function_map:
+            raise ValueError(f"Unsupported function: {function}")
+        
+        if function == "feature_index_construction":
+            output = function_map[function](config, data)
+            output = get("cg_feature_index")
+        else:
+            path = get_earliest_index_buffer_file(BUFFER_PATH + "cg_feature_index")
+            output = function_map[function](config, data, path)
+        window_index = get_earliest_window_index(load_buffer_path)
+        write_buffer(output, output_buffer_path, window_index, extension=extension)
+
+        delete_earliest_buffer_file(load_buffer_path)
+        next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
+        data = buffer_function[function]() if next_ready is not None else None
+    _exit(output_path=output_path, output_buffer_path=output_buffer_path)
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CG feature distribution for Argo")
@@ -254,4 +310,7 @@ if __name__ == "__main__":
     parser.add_argument("--function", default="")
     parser.add_argument("--output", default="-")
     args = parser.parse_args()
-    run_argo_once(mode=args.mode, function=args.function, cg_feature=args.cg_feature, output_path=args.output)
+    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
+        run_argo_incremental(function=args.function, output_path=args.output)
+    else:
+        run_argo_batch(mode=args.mode, function=args.function, cg_feature=args.cg_feature, output_path=args.output)
