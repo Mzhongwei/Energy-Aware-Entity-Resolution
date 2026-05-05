@@ -10,7 +10,7 @@ from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.feature_index_construction import create_cg_index
 from pipeline.candidate_enumeration import enumerate_candidates
 from models.cg_index import CGIndex
-from utils.buffers import delete_earliest_buffer_file, get_earliest_window_index, get_earliest_index_buffer_file, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
+from utils.buffers import delete_earliest_buffer_file, delete_earliest_buffer_directory, get_earliest_window_index, get_cg_index_buffer_file, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
@@ -220,7 +220,6 @@ def incremental_candidate_enumeration(config, cg_feature, path):
     return candidate_enumeration(config, cg_feature)
 
 def candidate_enumeration(config, cg_feature):
-    ensure_cg_feature_index(config)
     print("[candidate_enumeration]")
     index = get("cg_feature_index")
     if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
@@ -238,8 +237,8 @@ def run_argo_batch(mode: str, function: str, cg_feature: str, output_path: str =
     cg_feature_value = load_cg_feature(cg_feature)
     
     function_map = {
-        "feature_index_construction": feature_index_construction,
-        "candidate_enumeration": candidate_enumeration,
+        "feature_index_construction": batch_feature_index_construction,
+        "candidate_enumeration": batch_candidate_enumeration,
     }
     
     if function not in function_map:
@@ -253,31 +252,26 @@ def run_argo_incremental(function: str, output_path: str = "-"):
     config = load_config()
     config["function"] = function
 
-
-    load_buffer_path = BUFFER_PATH + "cg_feature"
-
     if function == "feature_index_construction":
+        load_buffer_path = BUFFER_PATH + "cg_feature_construction"
         output_buffer_path = BUFFER_PATH + "cg_feature_index"
         extension = "index"
     else:
+        load_buffer_path = BUFFER_PATH + "cg_feature_candidate"
         output_buffer_path = BUFFER_PATH + "candidate_pairs"
         extension = "json"
-    
-    buffer_function = {
-        "feature_index_construction": lambda: load_earliest_buffer(load_buffer_path),
-        "candidate_enumeration": lambda: get_earliest_index_buffer_file(load_buffer_path),
-    }
 
     first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
     if first_ready is None:
         _exit(output_path=output_path,output_buffer_path=output_buffer_path)
         return
     
-    data = buffer_function[function]()
+    data = load_earliest_buffer(load_buffer_path)
     while data is not None:
-        if data.empty:
+        # if data is empty list
+        if not data:
             next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
-            data = buffer_function[function]() if next_ready is not None else None
+            data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
 
         function_map = {
@@ -288,18 +282,23 @@ def run_argo_incremental(function: str, output_path: str = "-"):
         if function not in function_map:
             raise ValueError(f"Unsupported function: {function}")
         
+        window_index = get_earliest_window_index(load_buffer_path)
         if function == "feature_index_construction":
             output = function_map[function](config, data)
             output = get("cg_feature_index")
         else:
-            path = get_earliest_index_buffer_file(BUFFER_PATH + "cg_feature_index")
+            path_ready = wait_for_buffer(BUFFER_PATH + "cg_feature_index", timeout_seconds=30)
+            path = get_cg_index_buffer_file(BUFFER_PATH + "cg_feature_index", window_index) if path_ready else None
+            if not path:
+                continue
             output = function_map[function](config, data, path)
-        window_index = get_earliest_window_index(load_buffer_path)
+            delete_earliest_buffer_directory(BUFFER_PATH + "cg_feature_index")
+
         write_buffer(output, output_buffer_path, window_index, extension=extension)
 
         delete_earliest_buffer_file(load_buffer_path)
         next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
-        data = buffer_function[function]() if next_ready is not None else None
+        data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
     _exit(output_path=output_path, output_buffer_path=output_buffer_path)
     return
 

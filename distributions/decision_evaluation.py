@@ -13,12 +13,13 @@ from models.embedding_model import EmbeddingModel
 from models.similarity_graph import SimilarityGraph
 from pipeline.decision_making import decide_matches
 from pipeline.evaluation import compare_ground_truth
+from utils.buffers import _delete_file_if_exists, load_earliest_buffer, wait_for_buffer, write_buffer, write_eos, delete_earliest_buffer_file, get_earliest_window_index, get_embedding_buffer_file
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
 STATE_CACHE_PATH = f"/app/data/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/data/state_cache.json"
 STATE_MANIFEST_PATH = "/app/data/state_manifest.json"
-
+BUFFER_PATH = "/app/data/buffers/"
 
 def _log(message: str):
     print(message, file=sys.stderr)
@@ -124,10 +125,6 @@ def _register_manifest_artifact(config: dict, logical_name: str, artifact_path: 
         "updated_at": _now_iso(),
     }
     _persist_state_manifest(manifest)
-    _log(
-        f"[manifest] version={version_name} run_id={WORKFLOW_NAME} "
-        f"window_id={version_entry['window'].get('id', '')} artifact={logical_name} path={artifact_path}"
-    )
 
 
 def _manifest_artifact_path(config: dict, logical_name: str) -> str:
@@ -344,20 +341,23 @@ def ensure_embedding_model(config: dict):
     state_cfg = _state_config(config)
     emb_path = _manifest_artifact_path(config, "embedding_model") or _embedding_artifact_path(state_cfg, config)
     _log(f"[state] embedding path={emb_path} exists={_file_has_content(emb_path)}")
-    if _file_has_content(emb_path):
+    return load_embedding_model(config, emb_path)
+    
+
+def load_embedding_model(config: dict, embedding_path: str):
+    if _file_has_content(embedding_path):
         try:
-            model = EmbeddingModel.load(emb_path)
+            model = EmbeddingModel.load(embedding_path)
             STATE_CACHE["embedding_model"] = model
             _persist_state_cache()
             _log("[state] embedding_model loaded from disk")
-            _register_manifest_artifact(config, "embedding_model", emb_path)
+            _register_manifest_artifact(config, "embedding_model", embedding_path)
             return model
         except Exception:
             _log("[state] failed to load embedding_model from disk")
             pass
     _log("[state] embedding_model not found in cache or disk")
-    return current
-
+    return None
 
 def _normalize_matching_pairs(matching_pairs):
     if isinstance(matching_pairs, dict):
@@ -390,10 +390,25 @@ def _normalize_matching_pairs(matching_pairs):
         raise ValueError("Each matching_pairs item must contain exactly 3 elements.")
     return normalized
 
+def _exit(output_path=None, output=None, output_buffer_path=None):
+    if output_buffer_path:
+        write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
+    payload = json.dumps(serialize_for_json(output))
+    if output_path and output_path != "-":
+        with open(output_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(payload)
+    else:
+        print(payload)
 
-def decision_making(config, matching_pairs):
-    _log("[decision_making] start")
+def decision_making_incremental(config, matching_pairs, embedding_path):
+    model = load_embedding_model(config, embedding_path)
+    return decision_making(config, matching_pairs, model)
+
+def decision_making_batch(config, matching_pairs):
     model = ensure_embedding_model(config)
+    return decision_making(config, matching_pairs, model)
+
+def decision_making(config, matching_pairs, model):
     if model is None:
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
 
@@ -438,7 +453,7 @@ def run_argo_once(mode: str,function: str,matching_pairs: str = "", output_path:
         if not isinstance(matching_pairs, str) or not matching_pairs.strip():
             raise ValueError("decision_making requires --matching_pairs input.")
         matching_pairs_value = load_input_payload(matching_pairs)
-        output = decision_making(config, matching_pairs_value)
+        output = decision_making_batch(config, matching_pairs_value)
     elif selected_function == "evaluation":
         output = evaluation(config)
     else:
@@ -451,6 +466,40 @@ def run_argo_once(mode: str,function: str,matching_pairs: str = "", output_path:
     else:
         print(payload)
 
+def run_argo_incremental(output_path: str = "-",):
+    config = load_config()
+
+    output_buffer_path = BUFFER_PATH + "predicted_matching"
+    load_buffer_path = BUFFER_PATH + "matching_pairs"
+    load_emb_buffer_path = BUFFER_PATH + "embedding_decision"
+
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    if first_ready is None:
+        _exit(output_path=output_path, output_buffer_path=output_buffer_path)
+        return
+
+    matching_pairs_value = load_earliest_buffer(load_buffer_path)
+    while matching_pairs_value is not None:
+        if (isinstance(matching_pairs_value, pd.DataFrame) and matching_pairs_value.empty) or (isinstance(matching_pairs_value, list) and not matching_pairs_value):
+            next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
+            matching_pairs_value = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
+            continue
+
+        window_index = get_earliest_window_index(load_buffer_path)
+        embedding_path = get_embedding_buffer_file(load_emb_buffer_path, window_index)
+
+        output = decision_making_incremental(config, matching_pairs_value, embedding_path)
+
+        if output is not None:
+            write_buffer(output, output_buffer_path, window_index, extension="json")
+
+        delete_earliest_buffer_file(load_buffer_path)
+        _delete_file_if_exists(embedding_path)
+        next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
+        matching_pairs_value = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
+
+    _exit(output_path=output_path, output_buffer_path=output_buffer_path)
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Decision making/evaluation distribution for Argo")
@@ -459,9 +508,7 @@ if __name__ == "__main__":
     parser.add_argument("--function", default="")
     parser.add_argument("--output", default="-")
     args = parser.parse_args()
-    run_argo_once(
-        mode=args.mode,
-        function=args.function,
-        matching_pairs=args.matching_pairs,
-        output_path=args.output,
-    )
+    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode and args.function == "decision_making":
+        run_argo_incremental(output_path=args.output)
+    else:
+        run_argo_once(mode=args.mode,function=args.function,matching_pairs=args.matching_pairs,output_path=args.output)

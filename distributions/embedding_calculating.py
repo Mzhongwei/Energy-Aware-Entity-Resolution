@@ -13,7 +13,7 @@ from models.embedding_model import EmbeddingModel
 from pipeline.embedding_training import train_embeddings
 from pipeline.calculating_similarity import score_candidate_pairs
 
-from utils.buffers import load_earliest_buffer, get_earliest_window_index, delete_earliest_buffer_file, write_buffer, wait_for_buffer, write_eos
+from utils.buffers import _delete_file_if_exists, clear_buffer_directory, load_earliest_buffer, get_earliest_window_index, get_embedding_buffer_file, delete_earliest_buffer_file, wait_for_embedding_buffer, write_buffer, wait_for_buffer, write_eos
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
@@ -381,7 +381,6 @@ def incremental_calculating_similarity(config, candidate_pairs, path):
     return calculating_similarity(config, candidate_pairs, embedding_model)
 
 def calculating_similarity(config, candidate_pairs, embedding_model):
-    embedding_model = ensure_embedding_model(config)
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized or loaded before calculating_similarity.")
     candidate_pairs = _normalize_candidate_pairs(candidate_pairs)
@@ -444,8 +443,8 @@ def run_argo_incremental(function: str, output_path: str = "-"):
         output_buffer_path = BUFFER_PATH + "embedding"
         extension = "emb"
     elif function == "calculating_similarity":
-        load_buffer_path = BUFFER_PATH + "embedding"
-        load_cand_buffer_path = BUFFER_PATH + "candidate_pairs"
+        load_buffer_path = BUFFER_PATH + "candidate_pairs"
+        load_emb_buffer_path = BUFFER_PATH + "embedding_calculating"
         output_buffer_path = BUFFER_PATH + "matching_pairs"
         extension = "json"
     else:
@@ -467,25 +466,29 @@ def run_argo_incremental(function: str, output_path: str = "-"):
             model = get("embedding_model")
             print(f"[DEBUG] model type : {type(model)}")
 
-            write_buffer(model, output_buffer_path, window_index, extension=extension)
+            write_buffer(model, output_buffer_path + "_calculating", window_index, extension=extension)
+            write_buffer(model, output_buffer_path + "_decision", window_index, extension=extension)
             delete_earliest_buffer_file(load_buffer_path)
             wait_for_buffer(load_buffer_path, timeout_seconds=30)
             data = load_earliest_buffer(load_buffer_path)
         
         elif function == "calculating_similarity":
-            candidate_pairs_data = None
-            while candidate_pairs_data is None:
-                candidate_pairs_data = load_earliest_buffer(load_cand_buffer_path)
-                if candidate_pairs_data is None:
-                    time.sleep(1)
-
-            output = incremental_calculating_similarity(config, candidate_pairs_data, data)
-
+            embedding_ready = wait_for_buffer(load_emb_buffer_path, timeout_seconds=30)
+            if embedding_ready is None:
+                print("[INFO] No embedding model buffer received within timeout; writing EOS and exiting.", file=sys.stderr)
+                _exit(output_path, output_buffer_path)
+                return
+            
             window_index = get_earliest_window_index(load_buffer_path)
+            wait_for_embedding_buffer(load_emb_buffer_path, window_index, timeout_seconds=30)
+            embedding_path = get_embedding_buffer_file(load_emb_buffer_path, window_index)
+
+            output = incremental_calculating_similarity(config, data, embedding_path)
+
 
             write_buffer(output, output_buffer_path, window_index, extension=extension)
+            _delete_file_if_exists(embedding_path)
             delete_earliest_buffer_file(load_buffer_path)
-            delete_earliest_buffer_file(load_cand_buffer_path)
             wait_for_buffer(load_buffer_path, timeout_seconds=30)
             data = load_earliest_buffer(load_buffer_path)
 

@@ -200,11 +200,11 @@ def _commit_processed_offsets(consumer: Consumer, msg, reason: str):
         print(f"[WARNING] Failed to commit Kafka offsets after {reason}: {exc}", flush=True)
 
 
-def _flush_buffer_if_any(consumer: Consumer, data_buffer: list, last_valid_msg, reason: str):
+def _flush_buffer_if_any(consumer: Consumer, data_buffer: list, window_index: int, last_valid_msg, reason: str):
     if not data_buffer:
         return []
 
-    write_buffer(data_buffer, BUFFER_DIR, extension="csv")
+    write_buffer(data_buffer, BUFFER_DIR, window_index, extension="csv")
     _commit_processed_offsets(consumer, last_valid_msg, reason)
     write_eos(BUFFER_DIR, reason=reason)
     return []
@@ -262,6 +262,7 @@ def start_consumer(config):
                         data_buffer = _flush_buffer_if_any(
                             consumer,
                             data_buffer,
+                            window_index,
                             last_valid_msg,
                             "buffer flush on idle",
                         )
@@ -287,6 +288,7 @@ def start_consumer(config):
                             data_buffer = _flush_buffer_if_any(
                                 consumer,
                                 data_buffer,
+                                window_index,
                                 last_valid_msg,
                                 "buffer flush on partition eof",
                             )

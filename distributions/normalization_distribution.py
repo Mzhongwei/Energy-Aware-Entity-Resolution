@@ -48,14 +48,14 @@ def _counter_path_for_version(version_name: str) -> str:
     return os.path.join(save_dir, f"{version_name}.txt")
 
 
-def _maybe_reset_rid_counter(config: dict) -> str:
+def _maybe_reset_rid_counter(config: dict, force = False) -> str:
     norm_cfg = config.get("normalization", {}) if isinstance(config, dict) else {}
     norm_cfg = norm_cfg if isinstance(norm_cfg, dict) else {}
     reset_counter = _as_bool(norm_cfg.get("reset_counter_on_start", False), default=False)
     version_name = str(config.get("version_name", "test"))
     counter_path = _counter_path_for_version(version_name)
 
-    if reset_counter:
+    if reset_counter or force:
         with open(counter_path, "w", encoding="utf-8") as file_handle:
             file_handle.write("0")
 
@@ -166,6 +166,7 @@ def run_argo_incremental():
         _exit(output_buffer_path=BUFFER_PATH + "processed_data")
         _exit(output_buffer_path=BUFFER_PATH + "processed_data_feature")
         return
+    _maybe_reset_rid_counter(config, force=True)
     raw_data = load_earliest_buffer(load_buffer_path)
     while raw_data is not None:
         if raw_data.empty:
@@ -192,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_source_A", default="")
     parser.add_argument("--data_source_B", default="")
     args = parser.parse_args()
-    if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
+    if "inc" in args.mode:
         run_argo_incremental()
     else:
         run_argo_batch(

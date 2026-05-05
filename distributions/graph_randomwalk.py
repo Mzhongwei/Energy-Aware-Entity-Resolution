@@ -287,7 +287,7 @@ def _bootstrap_dyn_roots_if_empty(graph, config):
     else:
         print(f"[bootstrap] dyn_roots is unsupported type: {type(dyn_roots)}", file=sys.stderr)
 
-def ensure_representation_graph(config: dict, force_reload: bool):
+def ensure_representation_graph(config: dict, force_reload: bool=False):
     current = get("representation_graph")
     if current is not None and hasattr(current, "build_relation") and not force_reload:
         print("[INFO] graph already cached", file=sys.stderr)
@@ -307,12 +307,13 @@ def ensure_representation_graph(config: dict, force_reload: bool):
     return graph
 
 
-def load_graph_from_path(config: dict, graph_path: str):
+def load_graph_from_path(config: dict, graph_path: str, persist_cache: bool = False):
     manifest_path = get_manifest_file(graph_path)
     graph = _load_representation_graph(config, graph_path, manifest_path)
 
     STATE_CACHE["representation_graph"] = graph
-    _persist_state_cache()
+    if persist_cache:
+        _persist_state_cache()
     return graph
 
 

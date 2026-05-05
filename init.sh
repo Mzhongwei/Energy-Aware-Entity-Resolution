@@ -2,7 +2,7 @@
 set -eu
 
 BUFFER_PATH="/app/data/buffers/"
-BUFFERS_DIRS="raw_data processed_data processed_data_feature candidate_pairs matching_pairs cg_feature_index graph sequences embedding cg_feature"
+BUFFERS_DIRS="raw_data processed_data processed_data_feature candidate_pairs matching_pairs cg_feature_index graph sequences embedding_calculating embedding_decision cg_feature_construction cg_feature_candidate"
 
 # Create buffer directories if they don't exist and clear them if they do
 for dir in $BUFFERS_DIRS; do

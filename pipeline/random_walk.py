@@ -41,9 +41,9 @@ class RamdomRow:
         self.walk = []
         row_id = i_graph.vs[row_id_index]["name"]
         sampler = graph.get_sampler(row_id_index)
-        app_debug.info(f"neighbors of {row_id}: {i_graph.neighbors(row_id_index, mode='OUT') }")
+        # app_debug.info(f"neighbors of {row_id}: {i_graph.neighbors(row_id_index, mode='OUT') }")
         while len(self.walk) < sentence_len:
-            app_debug.info(f"{row_id}, {row_id_index}")
+            # app_debug.info(f"{row_id}, {row_id_index}")
             node_index = sampler.sample()
             if node_index is None:
                 raise ValueError("No neighbors")
@@ -61,7 +61,7 @@ class RamdomRow:
 
 
 class RandomWalk:
-    def __init__(self, graph, starting_node_index, sentence_len, backtrack):
+    def __init__(self, graph, starting_node_index, sentence_len, backtrack, update_stats=True):
         i_graph = graph.get_graph()
         self.walk = []
 
@@ -107,11 +107,12 @@ class RandomWalk:
                 continue
 
             self.walk.append(current_node_name)
-            previous_node["appearing_frequency"] = previous_node["appearing_frequency"] + 1
-            if current_node_name in previous_node["test_neighbors_freq"]:
-                previous_node["test_neighbors_freq"][current_node_name] = previous_node["test_neighbors_freq"][current_node_name] + 1
-            else:
-                previous_node["test_neighbors_freq"][current_node_name] = 1
+            if update_stats:
+                previous_node["appearing_frequency"] = previous_node["appearing_frequency"] + 1
+                if current_node_name in previous_node["test_neighbors_freq"]:
+                    previous_node["test_neighbors_freq"][current_node_name] = previous_node["test_neighbors_freq"][current_node_name] + 1
+                else:
+                    previous_node["test_neighbors_freq"][current_node_name] = 1
             sentence_step += 1
 
     def get_walk(self):
@@ -156,7 +157,7 @@ class RandomWalk_MetaPath:
         return self.walk[::-1]
 
 
-def start_walk_multiscale(roots_index, graph, walks_number, walk_length, write_walks, walk_rules):
+def start_walk_multiscale(roots_index, graph, walks_number, walk_length, write_walks, walk_rules, update_stats=False):
     sentences = []
     if roots_index == 0 or roots_index is None:
         return
@@ -170,7 +171,7 @@ def start_walk_multiscale(roots_index, graph, walks_number, walk_length, write_w
             for _r in range(wn):
                 try:
                     if isinstance(walk_rules, bool):
-                        w = RandomWalk(graph, root, wl[wl_i], walk_rules)
+                        w = RandomWalk(graph, root, wl[wl_i], walk_rules, update_stats=update_stats)
                     else:
                         w = RandomWalk_MetaPath(graph, root, wl[wl_i], walk_rules)
                 except Exception as e:
@@ -194,7 +195,7 @@ def start_walk_multiscale(roots_index, graph, walks_number, walk_length, write_w
     return sentences
 
 
-def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_rules, row):
+def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_rules, row, update_stats=False):
     sentences = []
     if roots_index == 0 or roots_index is None:
         return
@@ -213,18 +214,18 @@ def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_
                     w = RamdomRow(graph, root, walk_length)
                     if w.get_walk() != []:
                         walks.append(w.get_walk())
-                        app_debug.info(f"walks of token {w.get_walk()}")
+                        # app_debug.info(f"walks of token {w.get_walk()}")
             else:
                 for _r in range(walks_number_basic):
-                    w = RandomWalk(graph, root, walk_length, walk_rules)
+                    w = RandomWalk(graph, root, walk_length, walk_rules, update_stats=update_stats)
                     if w.get_walk() != []:
                         walks.append(w.get_walk())
-                        app_debug.info(f"walks of token {w.get_walk()}")
+                        # app_debug.info(f"walks of token {w.get_walk()}")
         else:
             for _r in range(walks_number):
                 try:
                     if isinstance(walk_rules, bool):
-                        w = RandomWalk(graph, root, walk_length, walk_rules)
+                        w = RandomWalk(graph, root, walk_length, walk_rules, update_stats=update_stats)
                     else:
                         w = RandomWalk_MetaPath(graph, root, walk_length, walk_rules)
                 except Exception as e:
@@ -254,6 +255,7 @@ def dynrandom_walks_generation(configuration, graph):
     walk_nums = int(walk_cfg.get("walks_number", 0))
     walk_length = int(walk_cfg.get("walk_length", 60))
     backtrack = walk_cfg.get("backtrack", False)
+    update_stats = bool(walk_cfg.get("rw_stat", False))
     meta_path = _graph_meta_path(configuration)
     write_walks = walk_cfg.get("write_walks", True)
 
@@ -261,18 +263,18 @@ def dynrandom_walks_generation(configuration, graph):
     if walk_nums > 0:
         if not meta_path:
             roots_index = graph.dyn_roots
-            sentences = start_walk(roots_index, graph, walk_nums, walk_length, write_walks, backtrack, row=False)
+            sentences = start_walk(roots_index, graph, walk_nums, walk_length, write_walks, backtrack, row=False, update_stats=update_stats)
             graph.dyn_roots.clear()
         else:
             if isinstance(meta_path, list):
                 if isinstance(meta_path[0], list):
                     for path in meta_path:
                         roots_index = graph.dyn_roots[path[0]]
-                        sentences += start_walk(roots_index, graph, walk_nums, walk_length, write_walks, path, row=False)
+                        sentences += start_walk(roots_index, graph, walk_nums, walk_length, write_walks, path, row=False, update_stats=update_stats)
                         graph.dyn_roots[path[0]].clear()
                 else:
                     roots_index = graph.dyn_roots[meta_path[0]]
-                    sentences = start_walk(roots_index, graph, walk_nums, walk_length, write_walks, meta_path, row=False)
+                    sentences = start_walk(roots_index, graph, walk_nums, walk_length, write_walks, meta_path, row=False, update_stats=update_stats)
                     graph.dyn_roots[meta_path[0]].clear()
     return sentences
 

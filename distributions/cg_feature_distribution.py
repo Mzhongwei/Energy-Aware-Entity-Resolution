@@ -93,7 +93,8 @@ def _coerce_processed_data_to_df(processed_data) -> DataFrame:
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
     if output_buffer_path:
-        write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
+        write_eos(output_buffer_path + "_construction", reason=f"timeout_no_initial_buffer")
+        write_eos(output_buffer_path + "_candidate", reason=f"timeout_no_initial_buffer")
     payload = json.dumps(serialize_for_json(output))
     if output_path and output_path != "-":
         with open(output_path, "w", encoding="utf-8") as file_handle:
@@ -170,7 +171,8 @@ def run_argo_incremental(output_path: str = "-"):
         output = cg_feature_extraction(config, raw_data)
         if output is not None:
             window_index = get_earliest_window_index(load_buffer_path)
-            write_buffer(output, output_buffer_path, window_index, extension="csv")
+            write_buffer(output, output_buffer_path + "_construction", window_index, extension="json")
+            write_buffer(output, output_buffer_path + "_candidate", window_index, extension="json")
 
         delete_earliest_buffer_file(load_buffer_path)
         next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)

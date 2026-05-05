@@ -1,5 +1,5 @@
 mode: "embedding-inference-evaluation"
-version_name: "testkafka7"
+version_name: "testte"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"

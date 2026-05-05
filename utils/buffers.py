@@ -75,14 +75,28 @@ def get_manifest_file(graph: str) -> str | None:
     print(f"[WARNING] Manifest file '{manifest_path}' not found for graph '{graph}'.", file=sys.stderr, flush=True)
     return None
 
-def _buffer_directory_has_files(buffer_dir: str) -> bool:
-    if not os.path.isdir(buffer_dir):
+def _delete_directory_if_exists(dir_path: str):
+    if not dir_path:
         return False
-    return any(
-        f.endswith(".csv") or f.endswith(".json") or f.endswith(".graphml") or f.endswith(".manifest.json")
-        for f in os.listdir(buffer_dir)
-    )
+    if not os.path.isdir(dir_path):
+        return True
+    try:
+        for filename in os.listdir(dir_path):
+            file_path = os.path.join(dir_path, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        os.rmdir(dir_path)
+        print(f"[INFO] Deleted directory: {dir_path}", file=sys.stderr, flush=True)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to delete directory '{dir_path}': {e}", file=sys.stderr, flush=True)
+        return False
 
+def delete_earliest_buffer_directory(buffer_dir: str):
+    earliest_dir = _get_earliest_buffer_directory(buffer_dir)
+    if earliest_dir:
+        return _delete_directory_if_exists(earliest_dir)
+    return True
 
 def _delete_file_if_exists(file_path: str):
     if not file_path:
@@ -144,13 +158,41 @@ def load_earliest_buffer(buffer_dir: str):
         return value
     return pd.DataFrame()
 
-def get_earliest_index_buffer_file(buffer_dir: str) -> str | None:
-    earliest_buffer_file = _get_earliest_buffer_file(buffer_dir)
-    if earliest_buffer_file and os.path.basename(earliest_buffer_file).startswith("eos_"):
+def get_cg_index_buffer_file(buffer_dir: str, window_index: int) -> str | None:
+    if not os.path.isdir(buffer_dir):
+        print(f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve CG index buffer file.", file=sys.stderr, flush=True)
         return None
-    if earliest_buffer_file and os.path.isfile(earliest_buffer_file):
-        return earliest_buffer_file
+    index_dirs = [
+        d for d in os.listdir(buffer_dir)
+        if os.path.isdir(os.path.join(buffer_dir, d)) and d.startswith(f"{window_index}_")
+    ]
+    if not index_dirs:
+        print(f"[WARNING] No CG index buffer directories found in '{buffer_dir}' for window index {window_index}.", file=sys.stderr, flush=True)
+        return None
+    index_dirs.sort(key=lambda d: os.path.getmtime(os.path.join(buffer_dir, d)), reverse=False)
+    return os.path.join(buffer_dir, index_dirs[0])
+
+def wait_for_embedding_buffer(buffer_dir: str, window_index: int, timeout_seconds: int = 60) -> str | None:
+    start_time = time()
+    while time() - start_time < timeout_seconds:
+        emb_file = get_embedding_buffer_file(buffer_dir, window_index)
+        if emb_file:
+            return emb_file
     return None
+
+def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
+    if not os.path.isdir(buffer_dir):
+        print(f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve embedding buffer file.", file=sys.stderr, flush=True)
+        return None
+    emb_files = [
+        f for f in os.listdir(buffer_dir)
+        if os.path.isfile(os.path.join(buffer_dir, f)) and f.startswith(f"{window_index}_") and f.endswith(".emb")
+    ]
+    if not emb_files:
+        print(f"[WARNING] No embedding buffer files found in '{buffer_dir}' for window index {window_index}.", file=sys.stderr, flush=True)
+        return None
+    emb_files.sort(key=lambda f: os.path.getmtime(os.path.join(buffer_dir, f)), reverse=False)
+    return os.path.join(buffer_dir, emb_files[0])
 
 def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "json"):
     if not output_dir or data_buffer is None:
@@ -206,8 +248,9 @@ def _write_graph_buffer(graph, output_dir: str, prefix: str):
 def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
     index_dir = os.path.join(output_dir, f"{prefix}_{time_ns()}")
-    cg_index.persist(index_dir)
-    print(f"[INFO] Persisted CGIndex buffer to {index_dir}.", flush=True)
+    cg_index.index_dir = index_dir
+    cg_index.persist()
+    print(f"[INFO] Wrote CGIndex buffer to {index_dir}", flush=True)
 
 def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
@@ -237,12 +280,26 @@ def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
     emb_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.emb")
     model.save(emb_path)
 
+def _get_earliest_buffer_directory(buffer_dir: str) -> str | None:
+    if not os.path.isdir(buffer_dir):
+        return None
+    subdirs = [d for d in os.listdir(buffer_dir) if os.path.isdir(os.path.join(buffer_dir, d))]
+    if not subdirs:
+        return None
+    subdirs.sort(key=lambda d: os.path.getmtime(os.path.join(buffer_dir, d)), reverse=False)
+    return os.path.join(buffer_dir, subdirs[0])
+
 def get_earliest_window_index(buffer_dir: str) -> int:
     earliest_file = _get_earliest_buffer_file(buffer_dir)
     if not earliest_file:
-        return 0
-    filename = os.path.basename(earliest_file)
-    prefix = filename.split("_")[0]
+        ealiest_dir = _get_earliest_buffer_directory(buffer_dir)
+        if not ealiest_dir:
+            return 0
+        dir_name = os.path.basename(ealiest_dir)
+        prefix = dir_name.split("_")[0]
+    else:
+        filename = os.path.basename(earliest_file)
+        prefix = filename.split("_")[0]
     try:
         return int(prefix)
     except ValueError:

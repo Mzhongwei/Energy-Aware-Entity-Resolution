@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple, Iterable, Optional, Set
 import math
 import numpy as np
 import pandas as pd
+import ast
 from tqdm import tqdm
 
 from models.representation_graph import RepresentationGraph
@@ -246,7 +247,22 @@ class DynGraphIgraph(RepresentationGraph):
             tokens = [str(el) for el in cell_value if el not in ("", None)]
             return tokens, False
         if column_name == "rid":
+            # Handle cases where rid may be a stringified list (e.g. "['B_1']")
+            # or an actual list/tuple. Aim to return a list of canonical string ids.
+            if isinstance(cell_value, (list, tuple)):
+                tokens = [str(el) for el in cell_value if el not in ("", None)]
+                return tokens, False
+            if isinstance(cell_value, str):
+                try:
+                    parsed = ast.literal_eval(cell_value)
+                except (ValueError, SyntaxError):
+                    parsed = cell_value
+                if isinstance(parsed, (list, tuple)):
+                    tokens = [str(el) for el in parsed if el not in ("", None)]
+                    return tokens, False
+            # Fallback: return the string representation
             return [str(cell_value)], False
+
         return convert_token_value(cell_value)
 
     # ------------------------
