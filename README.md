@@ -85,4 +85,4 @@ bash k8s/scripts/erctl.sh configmaps embedding
 ## Notes
 
 - This folder is the source of truth for the containerized pipeline logic.
-- The repository root README documents the Kubernetes and Argo workflow around it.
+- The root README that documents the Kubernetes and Argo workflow is in a the following repository: [k8s-python-llm](https://github.com/kevin-oulai/k8s-python-llm).
