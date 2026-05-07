@@ -9,6 +9,7 @@ from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
 from utils.buffers import load_earliest_buffer, write_buffer, get_earliest_window_index, wait_for_buffer, write_eos, delete_earliest_buffer_file
+from utils.codecarbon import ccdecorator
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
@@ -104,8 +105,9 @@ def serialize_for_json(obj):
         return [serialize_for_json(item) for item in obj]
     return obj
 
+@ccdecorator
 def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = False):
-    if 'embedding' in config['mode']:
+    if 'embedding' in config.get('mode', ''):
         # in incremental mode, we index records and normalize
 
         raw_data_path = config.get("data_source_A")
@@ -114,7 +116,7 @@ def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = 
         processed_data = index_normalization(config, raw_df, raw_data_path, is_training)
     else:
         if "bert" in config.get("mode", ""):
-            if "training" in config["mode"]:
+            if "training" in config.get("mode", ""):
                 raw_data = {
                     "train": safe_read_csv(config.get("trainset_path")),
                     "eval": safe_read_csv(config.get("evalset_path")),

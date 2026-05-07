@@ -14,6 +14,7 @@ from pipeline.embedding_training import train_embeddings
 from pipeline.calculating_similarity import score_candidate_pairs
 
 from utils.buffers import _delete_file_if_exists, clear_buffer_directory, load_earliest_buffer, get_earliest_window_index, get_embedding_buffer_file, delete_earliest_buffer_file, wait_for_embedding_buffer, write_buffer, wait_for_buffer, write_eos
+from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
@@ -365,6 +366,7 @@ def incremental_embedding_training(config, sequences):
     model = ensure_embedding_model(config, True)
     return embedding_training(config, sequences, model)
 
+@ccdecorator
 def embedding_training(config, sequences, model):
     model = train_embeddings(config, model, sequences)
     update("embedding_model", model)
@@ -380,6 +382,7 @@ def incremental_calculating_similarity(config, candidate_pairs, path):
     embedding_model = load_embedding_model(config, path)
     return calculating_similarity(config, candidate_pairs, embedding_model)
 
+@ccdecorator
 def calculating_similarity(config, candidate_pairs, embedding_model):
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized or loaded before calculating_similarity.")

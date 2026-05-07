@@ -14,6 +14,7 @@ from models.similarity_graph import SimilarityGraph
 from pipeline.decision_making import decide_matches
 from pipeline.evaluation import compare_ground_truth
 from utils.buffers import _delete_file_if_exists, load_earliest_buffer, wait_for_buffer, write_buffer, write_eos, delete_earliest_buffer_file, get_earliest_window_index, get_embedding_buffer_file
+from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
@@ -408,6 +409,7 @@ def decision_making_batch(config, matching_pairs):
     model = ensure_embedding_model(config)
     return decision_making(config, matching_pairs, model)
 
+@ccdecorator
 def decision_making(config, matching_pairs, model):
     if model is None:
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
@@ -430,7 +432,7 @@ def decision_making(config, matching_pairs, model):
     _log(f"[decision_making] final_pairs={final_pairs[:5]}{'...' if len(final_pairs) > 5 else ''}")
     return {"status": "decision_completed", "pair_count": len(final_pairs)}
 
-
+@ccdecorator
 def evaluation(config):
     _log("[evaluation] start")
     output_format = config.get("similarity", {}).get("output_format", "graphml")

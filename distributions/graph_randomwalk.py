@@ -1,9 +1,7 @@
 import argparse
 import json
-from logging import config
 import os
 import sys
-import time
 
 import pandas as pd
 from ruamel.yaml import YAML
@@ -12,6 +10,7 @@ from models.representation_graph import RepresentationGraph
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
 from utils.buffers import get_earliest_window_index, load_earliest_buffer, write_buffer, wait_for_buffer, write_eos, delete_earliest_buffer_file, get_manifest_file
+from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
@@ -362,6 +361,7 @@ def batch_graph_construction(config, processed_data):
     graph = ensure_representation_graph(config)
     return graph_construction(graph, processed_data)
 
+@ccdecorator
 def graph_construction(graph, processed_data):
     if not isinstance(processed_data, pd.DataFrame):
         raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
@@ -385,6 +385,7 @@ def batch_random_walk(config):
     graph = ensure_representation_graph(config)
     return random_walk(graph, config)
 
+@ccdecorator
 def random_walk(graph, config):
     _bootstrap_dyn_roots_if_empty(graph, config)
     

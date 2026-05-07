@@ -8,6 +8,8 @@ from ruamel.yaml import YAML
 from pipeline.bert_evaluation import evaluate_from_saved_model
 from pipeline.bert_inference import process_inference
 from pipeline.bert_training import train_model
+from utils.codecarbon import ccdecorator
+
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-bert.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
@@ -163,20 +165,20 @@ def update(key, value):
 
 STATE_CACHE.update(_load_state_cache())
 
-
+@ccdecorator
 def bert_training(config, processed_data):
     trainer, tokenizer = train_model(config, processed_data)
     save_dir = update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
     return {"status": "trained", "save_dir": save_dir}
 
-
+@ccdecorator
 def bert_inference(config, processed_data):
     predicted_pairs = process_inference(processed_data, save_dir=_bert_save_dir(config))
     update("predicted_matching", predicted_pairs)
     print("[bert_inference] completed, predicted_pairs count: {count}".format(count=len(predicted_pairs)))
     return predicted_pairs
 
-
+@ccdecorator
 def bert_evaluation(config, processed_data):
     evaluation_results = evaluate_from_saved_model(processed_data, config)
     update("evaluation_result", evaluation_results)

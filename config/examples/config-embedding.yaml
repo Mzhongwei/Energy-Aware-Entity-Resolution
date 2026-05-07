@@ -1,4 +1,4 @@
-mode: "embedding-inference-evaluation"
+mode: "embedding-training-evaluation"
 version_name: "testte"
 
 # incremental mode

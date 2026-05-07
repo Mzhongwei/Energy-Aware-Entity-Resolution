@@ -11,6 +11,7 @@ from pipeline.feature_index_construction import create_cg_index
 from pipeline.candidate_enumeration import enumerate_candidates
 from models.cg_index import CGIndex
 from utils.buffers import delete_earliest_buffer_file, delete_earliest_buffer_directory, get_earliest_window_index, get_cg_index_buffer_file, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
+from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
@@ -197,6 +198,7 @@ def incremental_feature_index_construction(config, cg_feature):
     ensure_cg_feature_index(config, True)
     return feature_index_construction(config, cg_feature)
 
+@ccdecorator
 def feature_index_construction(config, cg_feature):
     if not isinstance(cg_feature, list):
         raise ValueError("cg_feature must be a feature list.")
@@ -219,6 +221,7 @@ def incremental_candidate_enumeration(config, cg_feature, path):
     build_cg_feature(path, config)
     return candidate_enumeration(config, cg_feature)
 
+@ccdecorator
 def candidate_enumeration(config, cg_feature):
     print("[candidate_enumeration]")
     index = get("cg_feature_index")

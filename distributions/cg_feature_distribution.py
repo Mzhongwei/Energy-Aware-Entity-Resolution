@@ -9,6 +9,7 @@ from ruamel.yaml import YAML
 
 from pipeline.cg_feature_extraction import compute_features
 from utils.buffers import delete_earliest_buffer_file, get_earliest_window_index, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
+from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 BUFFER_PATH = "/app/data/buffers/"
@@ -102,6 +103,7 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     else:
         print(payload)
 
+@ccdecorator
 def cg_feature_extraction(config, processed_data):
     print("[cg_feature_extraction]", file=sys.stderr)
     processed_df = _coerce_processed_data_to_df(processed_data)
