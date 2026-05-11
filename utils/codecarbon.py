@@ -101,6 +101,40 @@ def _safe_float(value) -> float:
         return 0.0
 
 
+def _sum_metric(existing_value, new_value) -> str:
+    return f"{_safe_float(existing_value) + _safe_float(new_value):.12f}"
+
+
+def _merge_summary_rows(existing_row: dict, new_record: dict) -> dict:
+    merged = dict(existing_row)
+    merged["scope"] = new_record.get("scope", existing_row.get("scope", "pod"))
+    merged["workflow_name"] = new_record.get("workflow_name", existing_row.get("workflow_name", ""))
+    merged["pod_name"] = new_record.get("pod_name", existing_row.get("pod_name", ""))
+    merged["function_name"] = new_record.get("function_name", existing_row.get("function_name", ""))
+
+    for field in [
+        "emissions_kg_co2eq",
+        "energy_consumed_kwh",
+        "cpu_energy_kwh",
+        "gpu_energy_kwh",
+        "ram_energy_kwh",
+        "cpu_power_watts",
+        "gpu_power_watts",
+        "ram_power_watts",
+    ]:
+        merged[field] = _sum_metric(existing_row.get(field, ""), new_record.get(field, ""))
+
+    existing_started = str(existing_row.get("started_at", "")).strip()
+    new_started = str(new_record.get("started_at", "")).strip()
+    merged["started_at"] = existing_started or new_started
+
+    existing_finished = str(existing_row.get("finished_at", "")).strip()
+    new_finished = str(new_record.get("finished_at", "")).strip()
+    merged["finished_at"] = new_finished or existing_finished
+
+    return merged
+
+
 def _write_emission_summary(record: dict) -> None:
     report_path = _report_path()
     directory = os.path.dirname(report_path)
@@ -117,16 +151,19 @@ def _write_emission_summary(record: dict) -> None:
                 reader = csv.DictReader(existing_file)
                 rows = [row for row in reader if row.get("scope") == "pod"]
 
-        rows = [
-            row
-            for row in rows
-            if not (
+        matched = False
+        for index, row in enumerate(rows):
+            if (
                 row.get("workflow_name") == record["workflow_name"]
                 and row.get("pod_name") == record["pod_name"]
                 and row.get("function_name") == record["function_name"]
-            )
-        ]
-        rows.append(record)
+            ):
+                rows[index] = _merge_summary_rows(row, record)
+                matched = True
+                break
+
+        if not matched:
+            rows.append(record)
 
         # Aggregate metrics across pods for each numeric column
         total_emissions = sum(_safe_float(row.get("emissions_kg_co2eq", 0.0)) for row in rows)

@@ -1,5 +1,5 @@
 mode: "embedding-training-evaluation"
-version_name: "testte"
+version_name: "testtestt"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"
