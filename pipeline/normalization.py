@@ -72,7 +72,7 @@ def _resolve_id_config(config, is_training=False):
 
     return {
         "counter_path": os.path.join(IDS_DIR, f"{version_name}_B.txt"),
-        "prefix": "B_",
+        "prefix": "idx__",
     }
 
 
