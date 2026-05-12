@@ -397,6 +397,23 @@ def calculating_similarity(config, candidate_pairs, embedding_model):
     sim_cfg = config.get("similarity", {})
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
     _log(f"[calculating_similarity] batch_threshold={batch_threshold}")
+    # Diagnostic introspection: help surface missing embedding ids / vocab issues
+    try:
+        base_kv = getattr(embedding_model, "wv", getattr(embedding_model, "model", None))
+        vocab_size = len(base_kv.key_to_index) if base_kv and hasattr(base_kv, "key_to_index") else 0
+        _log(f"[diagnostic] embedding vocab_size={vocab_size}")
+        sample_keys = list(base_kv.key_to_index)[:10] if vocab_size else []
+        _log(f"[diagnostic] embedding sample_keys={sample_keys}")
+        sample_ids = []
+        for item in candidate_pairs[:5]:
+            sample_ids.append(item[0])
+            if isinstance(item[1], (list, tuple)):
+                sample_ids.extend(item[1][:3])
+        missing = [i for i in set(sample_ids) if not (base_kv and hasattr(base_kv, "key_to_index") and i in base_kv.key_to_index)]
+        if missing:
+            _log(f"[diagnostic] missing_ids_sample={missing[:20]}")
+    except Exception as e:
+        _log(f"[diagnostic] failed to introspect embedding model: {e}")
     candidate_pairs_score = score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
     preview = candidate_pairs_score[:3] if isinstance(candidate_pairs_score, list) else candidate_pairs_score
     _log(f"[calculating_similarity] score_count={_safe_len(candidate_pairs_score)} preview={preview}")
@@ -453,7 +470,7 @@ def run_argo_incremental(function: str, output_path: str = "-"):
     else:
         raise ValueError(f"Unsupported function: {function}")
 
-    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=500)
 
     if first_ready is None:
         print("[INFO] No incoming buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)

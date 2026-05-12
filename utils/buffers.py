@@ -22,6 +22,7 @@ def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
         last_buffer_file = _get_earliest_buffer_file(buffer_dir)
         if last_buffer_file:
             return last_buffer_file
+        time.sleep(1)
     return None
 
 def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
@@ -103,7 +104,7 @@ def _delete_file_if_exists(file_path: str):
         return False
     if not os.path.isfile(file_path):
         return True
-    if file_path.endswith(".graphml"):
+    if file_path.endswith(".graphml") or file_path.endswith(".emb"):
         manifest_path = f"{os.path.splitext(file_path)[0]}.manifest.json"
         if os.path.isfile(manifest_path):
             try:
@@ -178,6 +179,7 @@ def wait_for_embedding_buffer(buffer_dir: str, window_index: int, timeout_second
         emb_file = get_embedding_buffer_file(buffer_dir, window_index)
         if emb_file:
             return emb_file
+        time.sleep(1)
     return None
 
 def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
@@ -189,7 +191,6 @@ def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
         if os.path.isfile(os.path.join(buffer_dir, f)) and f.startswith(f"{window_index}_") and f.endswith(".emb")
     ]
     if not emb_files:
-        print(f"[WARNING] No embedding buffer files found in '{buffer_dir}' for window index {window_index}.", file=sys.stderr, flush=True)
         return None
     emb_files.sort(key=lambda f: os.path.getmtime(os.path.join(buffer_dir, f)), reverse=False)
     return os.path.join(buffer_dir, emb_files[0])
@@ -278,7 +279,23 @@ def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
 
 def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
     emb_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.emb")
-    model.save(emb_path)
+    temp_emb_path = f"{emb_path}.tmp"
+    temp_meta_path = f"{temp_emb_path}.meta.json"
+    final_meta_path = f"{emb_path}.meta.json"
+
+    try:
+        model.save(temp_emb_path)
+        os.replace(temp_emb_path, emb_path)
+        if os.path.exists(temp_meta_path):
+            os.replace(temp_meta_path, final_meta_path)
+    except Exception:
+        for path in (temp_emb_path, temp_meta_path):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        raise
 
 def _get_earliest_buffer_directory(buffer_dir: str) -> str | None:
     if not os.path.isdir(buffer_dir):

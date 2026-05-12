@@ -1,5 +1,5 @@
-mode: "embedding-training-evaluation"
-version_name: "testtestt"
+mode: "embedding-training-inference-evaluation"
+version_name: "try7"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"
@@ -62,9 +62,9 @@ graph_construction:
 
 
 random_walk:
-  write_walks: true
-  walk_length: 60                # step size
-  walks_number: 20               # number of sentences per root
+  write_walks: false
+  walk_length: 30                # step size
+  walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
   rw_stat: false                 # statistical result of random walk
 

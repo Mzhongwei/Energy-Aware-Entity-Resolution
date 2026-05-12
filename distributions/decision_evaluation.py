@@ -475,7 +475,7 @@ def run_argo_incremental(output_path: str = "-",):
     load_buffer_path = BUFFER_PATH + "matching_pairs"
     load_emb_buffer_path = BUFFER_PATH + "embedding_decision"
 
-    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=600)
     if first_ready is None:
         _exit(output_path=output_path, output_buffer_path=output_buffer_path)
         return
