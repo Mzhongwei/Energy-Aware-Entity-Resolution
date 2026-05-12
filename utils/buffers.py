@@ -1,5 +1,5 @@
 import json
-from time import time, time_ns
+from time import time, time_ns, sleep
 import os
 import sys
 import pandas as pd
@@ -22,7 +22,7 @@ def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
         last_buffer_file = _get_earliest_buffer_file(buffer_dir)
         if last_buffer_file:
             return last_buffer_file
-        time.sleep(1)
+        sleep(1)
     return None
 
 def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
@@ -179,7 +179,7 @@ def wait_for_embedding_buffer(buffer_dir: str, window_index: int, timeout_second
         emb_file = get_embedding_buffer_file(buffer_dir, window_index)
         if emb_file:
             return emb_file
-        time.sleep(1)
+        sleep(1)
     return None
 
 def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
