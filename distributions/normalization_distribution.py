@@ -182,7 +182,11 @@ def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_
     if isinstance(data_source_b, str) and data_source_b.strip():
         config["data_source_B"] = data_source_b.strip()
     is_training = "training" in mode
-    output = normalization(config=config, raw_data=load_raw_data(raw_data_value), is_training=is_training)
+    if "embedding" in mode and isinstance(data_source_a, str) and data_source_a.strip():
+        raw_input_value = data_source_a.strip()
+    else:
+        raw_input_value = raw_data_value
+    output = normalization(config=config, raw_data=load_raw_data(raw_input_value), is_training=is_training)
     _exit(output=output)
 
 def run_argo_incremental():

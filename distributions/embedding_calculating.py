@@ -11,7 +11,7 @@ from ruamel.yaml import YAML
 
 from models.embedding_model import EmbeddingModel
 from pipeline.embedding_training import train_embeddings
-from pipeline.calculating_similarity import score_candidate_pairs
+from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
 
 from utils.buffers import _delete_file_if_exists, clear_buffer_directory, load_earliest_buffer, get_earliest_window_index, get_embedding_buffer_file, delete_earliest_buffer_file, wait_for_embedding_buffer, write_buffer, wait_for_buffer, write_eos
 from utils.codecarbon import ccdecorator
@@ -479,7 +479,7 @@ def calculating_similarity(config, candidate_pairs, embedding_model):
             _log(f"[diagnostic] missing_ids_sample={missing[:20]}")
     except Exception as e:
         _log(f"[diagnostic] failed to introspect embedding model: {e}")
-    candidate_pairs_score = score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
+    candidate_pairs_score = score_mutual_top1_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
     preview = candidate_pairs_score[:3] if isinstance(candidate_pairs_score, list) else candidate_pairs_score
     _log(f"[calculating_similarity] score_count={_safe_len(candidate_pairs_score)} preview={preview}")
     return {

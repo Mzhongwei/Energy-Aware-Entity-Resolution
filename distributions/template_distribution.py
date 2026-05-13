@@ -15,7 +15,7 @@ from pipeline import (
     compute_features,
 )
 from pipeline.candidate_enumeration import enumerate_candidates
-from pipeline.calculating_similarity import score_candidate_pairs
+from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
 from pipeline.decision_making import decide_matches
 from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.graph_construction import dyn_graph_generation
@@ -172,7 +172,7 @@ def calculating_similarity(config, candidate_pairs, state_manager: StateManager 
         raise ValueError("embedding_model must be initialized before calculating_similarity.")
     sim_cfg = config.get("similarity", {})
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
-    return score_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
+    return score_mutual_top1_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
 
 
 def decision_making(config, matching_pairs, state_manager: StateManager = None):
