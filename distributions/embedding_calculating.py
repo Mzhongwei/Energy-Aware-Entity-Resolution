@@ -33,6 +33,34 @@ def _safe_len(value):
         return "n/a"
 
 
+def _sample_pairs(candidate_pairs, limit: int = 3):
+    if not isinstance(candidate_pairs, list) or not candidate_pairs:
+        return []
+    preview = []
+    for item in candidate_pairs[:limit]:
+        if isinstance(item, (list, tuple)):
+            preview.append([str(part) for part in item[:2]])
+        else:
+            preview.append([str(item)])
+    return preview
+
+
+def _sample_ids_from_pairs(candidate_pairs, limit: int = 5):
+    if not isinstance(candidate_pairs, list) or not candidate_pairs:
+        return []
+    ids = []
+    for item in candidate_pairs[:limit]:
+        if not isinstance(item, (list, tuple)) or not item:
+            continue
+        ids.append(str(item[0]))
+        right_side = item[1]
+        if isinstance(right_side, (list, tuple)):
+            ids.extend(str(value) for value in right_side[:3])
+        elif right_side is not None:
+            ids.append(str(right_side))
+    return ids[: limit * 4]
+
+
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
         return {}
@@ -316,6 +344,7 @@ def ensure_embedding_model(config: dict, force_reload: bool = False):
 
 
 def load_embedding_model(config: dict, emb_path: str):
+    _log(f"[state] attempting to load embedding_model path={emb_path} exists={_file_has_content(emb_path)}")
     if _file_has_content(emb_path):
         try:
             model = EmbeddingModel.load(emb_path)
@@ -366,7 +395,7 @@ def incremental_embedding_training(config, sequences):
     model = ensure_embedding_model(config, True)
     return embedding_training(config, sequences, model)
 
-@ccdecorator
+# @ccdecorator
 def embedding_training(config, sequences, model):
     model = train_embeddings(config, model, sequences)
     update("embedding_model", model)
@@ -379,15 +408,28 @@ def batch_calculating_similarity(config, candidate_pairs):
     return calculating_similarity(config, candidate_pairs, embedding_model)
 
 def incremental_calculating_similarity(config, candidate_pairs, path):
+    _log(
+        f"[incremental_calculating_similarity] embedding_path={path} "
+        f"candidate_pairs_type={type(candidate_pairs).__name__}"
+    )
     embedding_model = load_embedding_model(config, path)
+    try:
+        normalized_preview = _normalize_candidate_pairs(candidate_pairs)
+        _log(
+            f"[incremental_calculating_similarity] candidate_pairs_count={len(normalized_preview)} "
+            f"sample_pairs={_sample_pairs(normalized_preview)} sample_ids={_sample_ids_from_pairs(normalized_preview)}"
+        )
+    except Exception as exc:
+        _log(f"[incremental_calculating_similarity] failed to preview candidate_pairs: {exc}")
     return calculating_similarity(config, candidate_pairs, embedding_model)
 
-@ccdecorator
+# @ccdecorator
 def calculating_similarity(config, candidate_pairs, embedding_model):
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized or loaded before calculating_similarity.")
     candidate_pairs = _normalize_candidate_pairs(candidate_pairs)
     _log(f"[calculating_similarity] candidate_pairs={len(candidate_pairs)}")
+    _log(f"[calculating_similarity] candidate_pairs_sample={_sample_pairs(candidate_pairs)}")
     if not candidate_pairs:
         _log("[calculating_similarity] candidate_pairs is empty; skipping scoring and returning empty result")
         return {
@@ -404,11 +446,8 @@ def calculating_similarity(config, candidate_pairs, embedding_model):
         _log(f"[diagnostic] embedding vocab_size={vocab_size}")
         sample_keys = list(base_kv.key_to_index)[:10] if vocab_size else []
         _log(f"[diagnostic] embedding sample_keys={sample_keys}")
-        sample_ids = []
-        for item in candidate_pairs[:5]:
-            sample_ids.append(item[0])
-            if isinstance(item[1], (list, tuple)):
-                sample_ids.extend(item[1][:3])
+        sample_ids = _sample_ids_from_pairs(candidate_pairs)
+        _log(f"[diagnostic] candidate sample_ids={sample_ids}")
         missing = [i for i in set(sample_ids) if not (base_kv and hasattr(base_kv, "key_to_index") and i in base_kv.key_to_index)]
         if missing:
             _log(f"[diagnostic] missing_ids_sample={missing[:20]}")
@@ -502,8 +541,16 @@ def run_argo_incremental(function: str, output_path: str = "-"):
             window_index = get_earliest_window_index(load_buffer_path)
             wait_for_embedding_buffer(load_emb_buffer_path, window_index, timeout_seconds=30)
             embedding_path = get_embedding_buffer_file(load_emb_buffer_path, window_index)
+            _log(
+                f"[incremental_calculating_similarity] window={window_index} "
+                f"candidate_buffer={load_buffer_path} embedding_path={embedding_path}"
+            )
 
             output = incremental_calculating_similarity(config, data, embedding_path)
+
+            _log(
+                f"[incremental_calculating_similarity] window={window_index} output_count={_safe_len(output.get('matching_pairs') if isinstance(output, dict) else output)}"
+            )
 
 
             write_buffer(output, output_buffer_path, window_index, extension=extension)

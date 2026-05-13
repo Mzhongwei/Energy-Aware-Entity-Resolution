@@ -16,6 +16,10 @@ from pipeline.normalization import index_normalization, sequence_generating_m1
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 BUFFER_PATH = "/app/data/buffers/"
 
+
+def _log(message: str):
+    print(message, file=sys.stderr)
+
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
         return {}
@@ -105,15 +109,37 @@ def serialize_for_json(obj):
         return [serialize_for_json(item) for item in obj]
     return obj
 
-@ccdecorator
+
+def _sample_records(df: pd.DataFrame, limit: int = 3):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    columns = [col for col in ("rid",) if col in df.columns]
+    if not columns:
+        columns = list(df.columns[: min(len(df.columns), 5)])
+    return df.loc[:, columns].head(limit).to_dict(orient="records")
+
+# @ccdecorator
 def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = False):
+    _log(
+        f"[normalization_distribution] mode={config.get('mode')} is_training={is_training} "
+        f"raw_type={type(raw_data).__name__}"
+    )
     if 'embedding' in config.get('mode', ''):
         # in incremental mode, we index records and normalize
 
         raw_data_path = config.get("data_source_A")
         raw_df = _resolve_embedding_raw_df(config, raw_data)
+        _log(
+            f"[normalization_distribution] resolved_raw rows={len(raw_df)} cols={list(raw_df.columns)[:12]} "
+            f"sample={_sample_records(raw_df)}"
+        )
         _maybe_reset_rid_counter(config)
         processed_data = index_normalization(config, raw_df, raw_data_path, is_training)
+        if isinstance(processed_data, pd.DataFrame):
+            _log(
+                f"[normalization_distribution] processed rows={len(processed_data)} cols={list(processed_data.columns)[:12]} "
+                f"sample={_sample_records(processed_data)}"
+            )
     else:
         if "bert" in config.get("mode", ""):
             if "training" in config.get("mode", ""):
@@ -163,6 +189,7 @@ def run_argo_incremental():
     config = load_config()
 
     load_buffer_path = BUFFER_PATH + "raw_data"
+    print(f"[normalization_distribution] waiting for raw buffer at {load_buffer_path}", file=sys.stderr)
     first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=120)
     if first_ready is None:
         _exit(output_buffer_path=BUFFER_PATH + "processed_data")
@@ -172,12 +199,24 @@ def run_argo_incremental():
     raw_data = load_earliest_buffer(load_buffer_path)
     while raw_data is not None:
         if raw_data.empty:
+            print(f"[normalization_distribution] empty raw buffer at {load_buffer_path}; waiting for next window", file=sys.stderr)
             next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
             raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
+        print(
+            f"[normalization_distribution] window_index={get_earliest_window_index(load_buffer_path)} "
+            f"raw_type={type(raw_data).__name__} rows={len(raw_data)}",
+            file=sys.stderr,
+        )
         returned = normalization(config=config, raw_data=raw_data, is_training=False)
         window_index = get_earliest_window_index(BUFFER_PATH + "raw_data")
         if returned is not None:
+            if isinstance(returned, pd.DataFrame):
+                print(
+                    f"[normalization_distribution] writing window={window_index} rows={len(returned)} "
+                    f"sample={_sample_records(returned)}",
+                    file=sys.stderr,
+                )
             write_buffer(returned, BUFFER_PATH + "processed_data", window_index, extension="csv")
             write_buffer(returned, BUFFER_PATH + "processed_data_feature", window_index, extension="csv")
 

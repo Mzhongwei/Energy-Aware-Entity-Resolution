@@ -103,7 +103,7 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     else:
         print(payload)
 
-@ccdecorator
+# @ccdecorator
 def cg_feature_extraction(config, processed_data):
     print("[cg_feature_extraction]", file=sys.stderr)
     processed_df = _coerce_processed_data_to_df(processed_data)

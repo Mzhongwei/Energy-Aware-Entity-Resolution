@@ -198,7 +198,7 @@ def incremental_feature_index_construction(config, cg_feature):
     ensure_cg_feature_index(config, True)
     return feature_index_construction(config, cg_feature)
 
-@ccdecorator
+# @ccdecorator
 def feature_index_construction(config, cg_feature):
     if not isinstance(cg_feature, list):
         raise ValueError("cg_feature must be a feature list.")
@@ -221,7 +221,7 @@ def incremental_candidate_enumeration(config, cg_feature, path):
     build_cg_feature(path, config)
     return candidate_enumeration(config, cg_feature)
 
-@ccdecorator
+# @ccdecorator
 def candidate_enumeration(config, cg_feature):
     print("[candidate_enumeration]")
     index = get("cg_feature_index")

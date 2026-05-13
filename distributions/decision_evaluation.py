@@ -33,6 +33,18 @@ def _safe_len(value):
         return "n/a"
 
 
+def _sample_pairs(pairs, limit: int = 5):
+    if not isinstance(pairs, list) or not pairs:
+        return []
+    preview = []
+    for item in pairs[:limit]:
+        if isinstance(item, (list, tuple)):
+            preview.append([str(part) for part in item[:3]])
+        else:
+            preview.append([str(item)])
+    return preview
+
+
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
         return {}
@@ -346,6 +358,7 @@ def ensure_embedding_model(config: dict):
     
 
 def load_embedding_model(config: dict, embedding_path: str):
+    _log(f"[state] attempting to load embedding_model path={embedding_path} exists={_file_has_content(embedding_path)}")
     if _file_has_content(embedding_path):
         try:
             model = EmbeddingModel.load(embedding_path)
@@ -409,12 +422,16 @@ def decision_making_batch(config, matching_pairs):
     model = ensure_embedding_model(config)
     return decision_making(config, matching_pairs, model)
 
-@ccdecorator
+# @ccdecorator
 def decision_making(config, matching_pairs, model):
     if model is None:
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
 
     matching_pairs = _normalize_matching_pairs(matching_pairs)
+    _log(
+        f"[decision_making] matching_pairs_count={len(matching_pairs)} "
+        f"sample={_sample_pairs(matching_pairs)}"
+    )
     # Do not reuse previous_pairs across workflow runs: the shared PVC cache is persistent.
     previous_pairs = None
 
@@ -426,17 +443,30 @@ def decision_making(config, matching_pairs, model):
         model=model,
         output_format=output_format,
     )
+    _log(
+        f"[decision_making] final_pairs_count={len(final_pairs)} "
+        f"sample={_sample_pairs(final_pairs)}"
+    )
+    if isinstance(predicted_graph, SimilarityGraph):
+        graph = predicted_graph.graph
+        _log(
+            f"[decision_making] predicted_graph vertices={len(graph.vs)} edges={len(graph.es)}"
+        )
     update("predicted_matching_pairs", final_pairs)
     update("predicted_matching", predicted_graph)
     _log(f"[decision_making] done pair_count={len(final_pairs)}")
     _log(f"[decision_making] final_pairs={final_pairs[:5]}{'...' if len(final_pairs) > 5 else ''}")
     return {"status": "decision_completed", "pair_count": len(final_pairs)}
 
-@ccdecorator
+# @ccdecorator
 def evaluation(config):
     _log("[evaluation] start")
     output_format = config.get("similarity", {}).get("output_format", "graphml")
     config["output_format"] = output_format
+    _log(
+        f"[evaluation] ground_truth={config.get('ground_truth') or config.get('match_file')} "
+        f"similarity_file={_get_similarity_file(config)} output_format={output_format}"
+    )
     result = compare_ground_truth(config)
     update("result", result)
     _log("[evaluation] done")

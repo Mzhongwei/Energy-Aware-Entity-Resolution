@@ -361,7 +361,7 @@ def batch_graph_construction(config, processed_data):
     graph = ensure_representation_graph(config)
     return graph_construction(graph, processed_data)
 
-@ccdecorator
+# @ccdecorator
 def graph_construction(graph, processed_data):
     if not isinstance(processed_data, pd.DataFrame):
         raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
@@ -374,6 +374,7 @@ def graph_construction(graph, processed_data):
 
     sample_vertices = [v["name"] for v in g.vs[:5] if "name" in v.attributes()]
     print(f"[graph] sample_vertices={sample_vertices}", file=sys.stderr)
+    print(f"[graph] written ids example: {g.vs[0]['id'] if len(g.vs) > 0 and 'id' in g.vs[0].attributes() else 'N/A'}", file=sys.stderr)
 
     return {"status": "graph_built"}
 
@@ -385,7 +386,7 @@ def batch_random_walk(config):
     graph = ensure_representation_graph(config)
     return random_walk(graph, config)
 
-@ccdecorator
+# @ccdecorator
 def random_walk(graph, config):
     _bootstrap_dyn_roots_if_empty(graph, config)
     
