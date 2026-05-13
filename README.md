@@ -95,6 +95,7 @@ Execution mode is read from `config["mode"]` in [main_distribution.py](/home/zho
   Runs:
   `normalization -> bert_evaluation`
 
+> These tasks can also be combined, like "bert-training-b_evaluation" or "embedding-training-inference-evaluation"
 
 ## 4. Data Flow
 
