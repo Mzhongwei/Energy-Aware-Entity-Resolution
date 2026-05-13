@@ -2,9 +2,9 @@ mode: "embedding-training-inference-evaluation"
 version_name: "test4"
 
 # incremental mode
-data_source_A: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/tableA.csv"
-data_source_B: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/tableB.csv"
-ground_truth: "/home/zhongwei/Data_integration/data/exp_datasets/5_1-dirty_dblp_scholar/matches.csv"
+data_source_A: "Data_example/fordors_zagats-tableA.csv"
+data_source_B: "Data_example/fordors_zagats-tableB.csv"
+ground_truth: "Data_example/fordors_zagats-matches.txt"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
