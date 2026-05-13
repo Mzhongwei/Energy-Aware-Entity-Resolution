@@ -250,6 +250,14 @@ def load_input_payload(input_value: str):
         if os.path.isfile(argfile_path):
             input_value = argfile_path
 
+    looks_like_path = isinstance(input_value, str) and (
+        os.path.sep in input_value or input_value.endswith((".json", ".csv", ".emb", ".graphml"))
+    )
+    if looks_like_path and not os.path.isfile(input_value):
+        deadline = time.time() + 30
+        while time.time() < deadline and not os.path.isfile(input_value):
+            time.sleep(0.5)
+
     if os.path.isfile(input_value) and input_value.lower().endswith(".csv"):
         loaded = pd.read_csv(input_value)
         _log(f"[load_input_payload] source={input_value} type=DataFrame rows={len(loaded)} cols={len(loaded.columns)}")
@@ -260,15 +268,33 @@ def load_input_payload(input_value: str):
             content = file_handle.read()
         parsed = _unwrap_string_payload(content)
         if parsed is not None:
+            if isinstance(parsed, dict):
+                if "value" in parsed:
+                    parsed = parsed["value"]
+                elif "data" in parsed:
+                    parsed = parsed["data"]
             _log(f"[load_input_payload] source={input_value} type={type(parsed).__name__} size={_safe_len(parsed)}")
             return parsed
         _log(f"[load_input_payload] source={input_value} type=str size={len(content)}")
         return content
 
     parsed = _unwrap_string_payload(input_value)
-    if parsed is not None:
+    # If _unwrap_string_payload returned a non-string object or a different
+    # value than the original input, treat it as a parsed payload. However,
+    # if it returned the same string unchanged (e.g. a file path), do not
+    # consider that a successful parse so that file-path logic can handle it
+    # (and raise FileNotFoundError when appropriate).
+    if parsed is not None and not (isinstance(parsed, str) and parsed == input_value):
+        if isinstance(parsed, dict):
+            if "value" in parsed:
+                parsed = parsed["value"]
+            elif "data" in parsed:
+                parsed = parsed["data"]
         _log(f"[load_input_payload] source=inline type={type(parsed).__name__} size={_safe_len(parsed)}")
         return parsed
+
+    if looks_like_path:
+        raise FileNotFoundError(f"Expected input artifact at {original_input!r} was not available")
     _log(f"[load_input_payload] source=inline type=str size={len(original_input)}")
     return input_value
 
@@ -509,7 +535,7 @@ def run_argo_incremental(function: str, output_path: str = "-"):
     else:
         raise ValueError(f"Unsupported function: {function}")
 
-    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=500)
+    first_ready = wait_for_buffer(load_buffer_path, timeout_seconds=600)
 
     if first_ready is None:
         print("[INFO] No incoming buffer within startup timeout; writing EOS and exiting.", file=sys.stderr)

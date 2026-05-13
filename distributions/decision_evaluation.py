@@ -45,6 +45,30 @@ def _sample_pairs(pairs, limit: int = 5):
     return preview
 
 
+def _side_prefix(rid: str) -> str:
+    rid = str(rid)
+    if "_" not in rid:
+        return ""
+    return rid.split("_", 1)[0]
+
+
+def _is_same_side_pair(left_id: str, right_id: str) -> bool:
+    left_side = _side_prefix(left_id)
+    right_side = _side_prefix(right_id)
+    return left_side in {"A", "B"} and left_side == right_side
+
+
+def _filter_cross_side_pairs(pairs):
+    filtered_pairs = []
+    dropped_same_side = 0
+    for indexed_id, query_id, score in pairs:
+        if _is_same_side_pair(indexed_id, query_id):
+            dropped_same_side += 1
+            continue
+        filtered_pairs.append((indexed_id, query_id, score))
+    return filtered_pairs, dropped_same_side
+
+
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
         return {}
@@ -364,13 +388,13 @@ def load_embedding_model(config: dict, embedding_path: str):
             model = EmbeddingModel.load(embedding_path)
             STATE_CACHE["embedding_model"] = model
             _persist_state_cache()
-            _log("[state] embedding_model loaded from disk")
+            _log(f"[state] embedding_model loaded from disk, path : {embedding_path}")
             _register_manifest_artifact(config, "embedding_model", embedding_path)
             return model
         except Exception:
-            _log("[state] failed to load embedding_model from disk")
+            _log(f"[state] failed to load embedding_model from disk, path : {embedding_path}")
             pass
-    _log("[state] embedding_model not found in cache or disk")
+    _log(f"[state] embedding_model not found in cache or disk, path : {embedding_path}")
     return None
 
 def _normalize_matching_pairs(matching_pairs):
@@ -416,24 +440,23 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
 
 def decision_making_incremental(config, matching_pairs, embedding_path):
     model = load_embedding_model(config, embedding_path)
-    return decision_making(config, matching_pairs, model)
+    return decision_making(config, matching_pairs, model, previous_pairs=get("mutualtop_pairs"))
 
 def decision_making_batch(config, matching_pairs):
     model = ensure_embedding_model(config)
-    return decision_making(config, matching_pairs, model)
+    return decision_making(config, matching_pairs, model, previous_pairs=None)
 
 # @ccdecorator
-def decision_making(config, matching_pairs, model):
+def decision_making(config, matching_pairs, model, previous_pairs=None):
     if model is None:
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
 
     matching_pairs = _normalize_matching_pairs(matching_pairs)
+    matching_pairs, dropped_same_side = _filter_cross_side_pairs(matching_pairs)
     _log(
         f"[decision_making] matching_pairs_count={len(matching_pairs)} "
-        f"sample={_sample_pairs(matching_pairs)}"
+        f"dropped_same_side={dropped_same_side} sample={_sample_pairs(matching_pairs)}"
     )
-    # Do not reuse previous_pairs across workflow runs: the shared PVC cache is persistent.
-    previous_pairs = None
 
     output_format = config.get("similarity", {}).get("output_format", "graphml")
     config["output_format"] = output_format
@@ -452,6 +475,7 @@ def decision_making(config, matching_pairs, model):
         _log(
             f"[decision_making] predicted_graph vertices={len(graph.vs)} edges={len(graph.es)}"
         )
+    update("mutualtop_pairs", final_pairs)
     update("predicted_matching_pairs", final_pairs)
     update("predicted_matching", predicted_graph)
     _log(f"[decision_making] done pair_count={len(final_pairs)}")
@@ -465,7 +489,6 @@ def evaluation(config):
     config["output_format"] = output_format
     _log(
         f"[evaluation] ground_truth={config.get('ground_truth') or config.get('match_file')} "
-        f"similarity_file={_get_similarity_file(config)} output_format={output_format}"
     )
     result = compare_ground_truth(config)
     update("result", result)
