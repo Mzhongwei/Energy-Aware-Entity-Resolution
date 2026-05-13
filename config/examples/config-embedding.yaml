@@ -1,5 +1,5 @@
 mode: "embedding-training-inference-evaluation"
-version_name: "venus"
+version_name: "jupiter"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"
