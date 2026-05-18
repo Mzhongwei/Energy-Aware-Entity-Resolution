@@ -54,7 +54,11 @@ def _config_section(config: dict, primary_key: str, legacy_key: str | None = Non
     return {}
 
 
-def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_seconds: float = 10.0) -> None:
+def _ensure_kafka_topic_ready(
+    config: dict,
+    timeout: float = 10.0,
+    ready_wait_seconds: float = 10.0,
+) -> None:
     kafka_config = config["kafka"]
     bootstrap_servers = f'{kafka_config["bootstrap_servers"]}:{kafka_config["port"]}'
     topic_name = kafka_config["topicid"]
@@ -62,6 +66,17 @@ def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_se
     replication_factor = int(kafka_config.get("replication_factor", 1))
 
     admin_client = AdminClient({"bootstrap.servers": bootstrap_servers})
+
+    def topic_is_ready() -> bool:
+        metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
+        topic_metadata = metadata.topics.get(topic_name)
+
+        return (
+            topic_metadata is not None
+            and topic_metadata.error is None
+            and bool(topic_metadata.partitions)
+        )
+
     metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
     topic_metadata = metadata.topics.get(topic_name)
 
@@ -75,29 +90,54 @@ def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_se
 
     if topic_missing:
         futures = admin_client.create_topics(
-            [NewTopic(topic_name, num_partitions=num_partitions, replication_factor=replication_factor)]
+            [
+                NewTopic(
+                    topic_name,
+                    num_partitions=num_partitions,
+                    replication_factor=replication_factor,
+                )
+            ]
         )
+
         try:
             futures[topic_name].result(timeout=timeout)
             print(
                 f"[kafka] Created topic '{topic_name}' "
                 f"with {num_partitions} partitions and replication factor {replication_factor}."
             )
+
+        except KafkaException as exc:
+            error = exc.args[0] if exc.args else None
+
+            if isinstance(error, KafkaError) and error.code() == KafkaError.TOPIC_ALREADY_EXISTS:
+                print(f"[kafka] Topic '{topic_name}' already exists. Continuing.")
+            else:
+                raise
+
         except Exception as exc:
-            raise KafkaException(
-                KafkaError(
-                    KafkaError.UNKNOWN_TOPIC_OR_PART,
-                    f"Failed to create Kafka topic '{topic_name}': {exc}"
-                )
-            ) from exc
+            # confluent-kafka 有时会把 KafkaError 包在普通 Exception 文本里
+            if "TOPIC_ALREADY_EXISTS" in str(exc) or "already exists" in str(exc):
+                print(f"[kafka] Topic '{topic_name}' already exists. Continuing.")
+            else:
+                raise KafkaException(
+                    KafkaError(
+                        KafkaError.UNKNOWN_TOPIC_OR_PART,
+                        f"Failed to create Kafka topic '{topic_name}': {exc}",
+                    )
+                ) from exc
 
     deadline = time.time() + ready_wait_seconds
     last_error = None
+
     while time.time() < deadline:
         metadata = admin_client.list_topics(topic=topic_name, timeout=timeout)
         topic_metadata = metadata.topics.get(topic_name)
 
-        if topic_metadata is not None and topic_metadata.error is None and topic_metadata.partitions:
+        if (
+            topic_metadata is not None
+            and topic_metadata.error is None
+            and topic_metadata.partitions
+        ):
             return
 
         if topic_metadata is not None and topic_metadata.error is not None:
@@ -105,16 +145,18 @@ def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_se
         else:
             last_error = KafkaError(
                 KafkaError.UNKNOWN_TOPIC_OR_PART,
-                f"Kafka topic '{topic_name}' is still unavailable on broker {bootstrap_servers}."
+                f"Kafka topic '{topic_name}' is still unavailable on broker {bootstrap_servers}.",
             )
+
         time.sleep(1)
 
     if last_error is not None:
         raise KafkaException(last_error)
+
     raise KafkaException(
         KafkaError(
             KafkaError.UNKNOWN_TOPIC_OR_PART,
-            f"Kafka topic '{topic_name}' did not become ready within {ready_wait_seconds} seconds."
+            f"Kafka topic '{topic_name}' did not become ready within {ready_wait_seconds} seconds.",
         )
     )
 
