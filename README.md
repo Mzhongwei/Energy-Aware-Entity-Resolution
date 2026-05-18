@@ -1,4 +1,4 @@
-# Energy-Aware ER Project
+# ER Conceptual Modeling Project
 ## Experiment results 
 Performance–energy comparison across methods for different datasets, where performance is depicted by line plots and and energy consumption (in Joules) is shown as gray bars on a natural logarithmic scale. Find more exact value in `stat/exp_results`.
 <img src="stat/image/grid.png">
@@ -7,7 +7,7 @@ Performance–energy comparison across methods for different datasets, where per
 
 ### 1. Overview
 
-This project implements an entity resolution pipeline that supports two execution families:
+We implement an entity resolution pipeline that supports two execution families:
 
 - `embedding-*`: graph-based incremental or batch-style entity resolution with random walk embeddings, candidate generation, similarity calculation, and decision making.
 - `bert-*`: sequence-pair classification with BERT-style training, inference, and evaluation.
