@@ -1,5 +1,5 @@
 mode: "embedding-training-inference-evaluation"
-version_name: "snippet"
+version_name: "lms"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"
@@ -9,7 +9,7 @@ simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
   groupid: "er_group"
-  bootstrap_servers: "kafka-server.argo.svc.cluster.local"
+  bootstrap_servers: "192.168.1.107"
   port: 9092
   partitions: 3
   replication_factor: 1
