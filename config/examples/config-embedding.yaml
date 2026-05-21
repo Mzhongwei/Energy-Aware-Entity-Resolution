@@ -1,5 +1,5 @@
 mode: "embedding-training-inference-evaluation"
-version_name: "jupiter"
+version_name: "snippet"
 
 # incremental mode
 data_source_A: "Data_example/fodors_zagats-tableA.csv"
