@@ -1,5 +1,5 @@
-mode: "bert-inference"
-version_name: "test"
+mode: "bert-training-inference-b_evaluation"
+version_name: "spa"
 
 # bert mode, source data
 trainset_path: "Data_example/bert/train.csv"
