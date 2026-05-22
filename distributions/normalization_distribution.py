@@ -237,6 +237,7 @@ if __name__ == "__main__":
     parser.add_argument("--raw_data", default="")
     parser.add_argument("--data_source_A", default="")
     parser.add_argument("--data_source_B", default="")
+    parser.add_argument("--function", default="")
     args = parser.parse_args()
     if "inc" in args.mode:
         run_argo_incremental()

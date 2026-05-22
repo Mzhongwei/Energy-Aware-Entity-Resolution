@@ -252,5 +252,6 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="training")
     parser.add_argument("--processed_data", default="")
     parser.add_argument("--output", default="-")
+    parser.add_argument("--function", default="")
     args = parser.parse_args()
     run_argo_once(mode=args.mode, processed_data_value=args.processed_data, output_path=args.output)

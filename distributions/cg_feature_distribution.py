@@ -188,6 +188,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="default")
     parser.add_argument("--processed_data", default="")
     parser.add_argument("--output", default="-")
+    parser.add_argument("--function", default="")
     args = parser.parse_args()
     if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
         run_argo_incremental(output_path=args.output)
