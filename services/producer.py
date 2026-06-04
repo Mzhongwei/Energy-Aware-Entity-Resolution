@@ -84,9 +84,6 @@ def _resolve_simulator_jar(java_path: str) -> str:
         )
     return jar_candidates[0]
 
-def _daemon():
-    while True:
-        time.sleep(1)
 
 def start_producer(config):
     global ACTIVE_JAVA_PROC
@@ -124,7 +121,8 @@ def start_producer(config):
         signal.signal(signal.SIGINT, previous_sigint_handler)
         _stop_process_group(java_proc, interrupt_first=True)
         ACTIVE_JAVA_PROC = None
-        _daemon()
+
+        
 # =========================
 # Main
 # =========================

@@ -185,10 +185,6 @@ def _handle_sigint(signum, frame):
     _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
     ACTIVE_JAVA_PROC = None
 
-def _daemon():
-    while True:
-        time.sleep(1)
-
 
 def _commit_processed_offsets(consumer: Consumer, msg, reason: str):
     if consumer is None or msg is None:
@@ -350,7 +346,6 @@ def start_consumer(config):
             except Exception:
                 pass
         ACTIVE_JAVA_PROC = None
-        _daemon()
 
 def parse_args():
     parser = argparse.ArgumentParser()
