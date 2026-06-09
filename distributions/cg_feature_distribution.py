@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import sys
 
 import pandas as pd
@@ -13,6 +14,17 @@ from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 BUFFER_PATH = "/app/data/buffers/"
+
+
+stop_requested = False
+
+def handle_sigterm(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -166,6 +178,8 @@ def run_argo_incremental(output_path: str = "-"):
     raw_data = load_earliest_buffer(load_buffer_path)
     while raw_data is not None:
         if raw_data.empty:
+            if stop_requested:
+                sys.exit(0)
             next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
             raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
@@ -177,6 +191,8 @@ def run_argo_incremental(output_path: str = "-"):
             write_buffer(output, output_buffer_path + "_candidate", window_index, extension="json")
 
         delete_earliest_buffer_file(load_buffer_path)
+        if stop_requested:
+            sys.exit(0)
         next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
         raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
     

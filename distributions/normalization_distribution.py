@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import sys
 from time import time
 
@@ -16,6 +17,14 @@ from pipeline.normalization import index_normalization, sequence_generating_m1
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 BUFFER_PATH = "/app/data/buffers/"
 
+stop_requested = False
+
+def handle_sigterm(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 def _log(message: str):
     print(message, file=sys.stderr)
@@ -203,7 +212,8 @@ def run_argo_incremental():
     raw_data = load_earliest_buffer(load_buffer_path)
     while raw_data is not None:
         if raw_data.empty:
-            print(f"[normalization_distribution] empty raw buffer at {load_buffer_path}; waiting for next window", file=sys.stderr)
+            if stop_requested:
+                sys.exit(0)
             next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
             raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
@@ -225,6 +235,8 @@ def run_argo_incremental():
             write_buffer(returned, BUFFER_PATH + "processed_data_feature", window_index, extension="csv")
 
         delete_earliest_buffer_file(load_buffer_path)
+        if stop_requested:
+            sys.exit(0)
         next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
         raw_data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
     _exit(output_buffer_path=BUFFER_PATH + "processed_data")

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import sys
 
 import pandas as pd
@@ -17,6 +18,14 @@ CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-em
 STATE_CACHE_PATH = "/app/data/state_cache.json"
 BUFFER_PATH = "/app/data/buffers/"
 
+stop_requested = False
+
+def handle_sigterm(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -273,6 +282,8 @@ def run_argo_incremental(function: str, output_path: str = "-"):
     while data is not None:
         # if data is empty list
         if not data:
+            if stop_requested:
+                sys.exit(0)
             next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
             data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
@@ -300,6 +311,8 @@ def run_argo_incremental(function: str, output_path: str = "-"):
         write_buffer(output, output_buffer_path, window_index, extension=extension)
 
         delete_earliest_buffer_file(load_buffer_path)
+        if stop_requested:
+            sys.exit(0)
         next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
         data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
     _exit(output_path=output_path, output_buffer_path=output_buffer_path)

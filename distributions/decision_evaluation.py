@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+import signal
 
 import pandas as pd
 from ruamel.yaml import YAML
@@ -21,6 +22,15 @@ WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
 STATE_CACHE_PATH = f"/app/data/{WORKFLOW_NAME}/state_cache.json" if WORKFLOW_NAME else "/app/data/state_cache.json"
 STATE_MANIFEST_PATH = "/app/data/state_manifest.json"
 BUFFER_PATH = "/app/data/buffers/"
+
+stop_requested = False
+
+def handle_sigterm(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 def _log(message: str):
     print(message, file=sys.stderr)
@@ -536,6 +546,8 @@ def run_argo_incremental(output_path: str = "-",):
     matching_pairs_value = load_earliest_buffer(load_buffer_path)
     while matching_pairs_value is not None:
         if (isinstance(matching_pairs_value, pd.DataFrame) and matching_pairs_value.empty) or (isinstance(matching_pairs_value, list) and not matching_pairs_value):
+            if stop_requested:
+                sys.exit(0)
             next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
             matching_pairs_value = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
@@ -550,6 +562,9 @@ def run_argo_incremental(output_path: str = "-",):
 
         delete_earliest_buffer_file(load_buffer_path)
         _delete_file_if_exists(embedding_path)
+        if stop_requested:
+            sys.exit(0)
+            return
         next_ready = wait_for_buffer(load_buffer_path, timeout_seconds=30)
         matching_pairs_value = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
 

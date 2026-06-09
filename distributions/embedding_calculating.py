@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+import signal
 
 import pandas as pd
 from ruamel.yaml import YAML
@@ -25,6 +26,14 @@ BUFFER_PATH = "/app/data/buffers/"
 def _log(message: str):
     print(message, file=sys.stderr)
 
+stop_requested = False
+
+def handle_sigterm(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 def _safe_len(value):
     try:
@@ -554,6 +563,8 @@ def run_argo_incremental(function: str, output_path: str = "-"):
             write_buffer(model, output_buffer_path + "_calculating", window_index, extension=extension)
             write_buffer(model, output_buffer_path + "_decision", window_index, extension=extension)
             delete_earliest_buffer_file(load_buffer_path)
+            if stop_requested:
+                sys.exit(0)
             wait_for_buffer(load_buffer_path, timeout_seconds=30)
             data = load_earliest_buffer(load_buffer_path)
         
@@ -582,6 +593,8 @@ def run_argo_incremental(function: str, output_path: str = "-"):
             write_buffer(output, output_buffer_path, window_index, extension=extension)
             _delete_file_if_exists(embedding_path)
             delete_earliest_buffer_file(load_buffer_path)
+            if stop_requested:
+                sys.exit(0)
             wait_for_buffer(load_buffer_path, timeout_seconds=30)
             data = load_earliest_buffer(load_buffer_path)
 
