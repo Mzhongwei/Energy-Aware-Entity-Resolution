@@ -490,6 +490,7 @@ def decision_making(config, matching_pairs, model, previous_pairs=None):
     update("predicted_matching", predicted_graph)
     _log(f"[decision_making] done pair_count={len(final_pairs)}")
     _log(f"[decision_making] final_pairs={final_pairs[:5]}{'...' if len(final_pairs) > 5 else ''}")
+    _log(f"[decision_making] full result : {final_pairs}")
     return {"status": "decision_completed", "pair_count": len(final_pairs)}
 
 # @ccdecorator
