@@ -2,9 +2,9 @@ mode: "bert-training-inference-b_evaluation"
 version_name: "spa"
 
 # bert mode, source data
-trainset_path: "Data_example/bert/train.csv"
-testset_path: "Data_example/bert/test.csv"
-evalset_path: "Data_example/bert/valid.csv"
+trainset_path: "/srv/shared/data/exp_datasets/4-1_dirty_dblp_acm/train.csv"
+testset_path: "/srv/shared/data/exp_datasets/4-1_dirty_dblp_acm/test.csv"
+evalset_path: "/srv/shared/data/exp_datasets/4-1_dirty_dblp_acm/valid.csv"
 
 # incremental mode
 # meta_path: list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
