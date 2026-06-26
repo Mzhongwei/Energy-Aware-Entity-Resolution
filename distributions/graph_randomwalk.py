@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import signal
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 from ruamel.yaml import YAML
@@ -10,21 +11,46 @@ from ruamel.yaml import YAML
 from models.representation_graph import RepresentationGraph
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
-from utils.buffers import get_earliest_window_index, load_earliest_buffer, write_buffer, wait_for_buffer, write_eos, delete_earliest_buffer_file, get_manifest_file
+from utils.buffers import (
+    get_earliest_window_index,
+    load_earliest_buffer,
+    write_buffer,
+    wait_for_buffer,
+    write_eos,
+    delete_earliest_buffer_file,
+    get_manifest_file,
+)
 from utils.codecarbon import ccdecorator
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
 BUFFER_PATH = "/app/data/buffers/"
+GRAPH_SNAPSHOT_DIR = os.environ.get(
+    "EAER_GRAPH_SNAPSHOT_DIR",
+    os.path.join(BUFFER_PATH, "graph_snapshots"),
+)
+
+# Safer default for incremental mode: do not rebuild dyn_roots from the full graph.
+# Rebuilding all roots can make random_walk run on the whole graph for every window.
+ALLOW_FULL_ROOT_BOOTSTRAP = os.environ.get(
+    "EAER_ALLOW_FULL_ROOT_BOOTSTRAP",
+    "false",
+).lower() in {"1", "true", "yes", "y"}
 
 stop_requested = False
+
+def _log(message: str):
+    print(message, file=sys.stderr)
+
 
 def handle_sigterm(signum, frame):
     global stop_requested
     stop_requested = True
 
+
 signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
+
 
 def load_config(config_path: str = CONFIG_PATH):
     if not os.path.exists(config_path):
@@ -38,6 +64,8 @@ def load_config(config_path: str = CONFIG_PATH):
 def serialize_for_json(obj):
     if isinstance(obj, pd.DataFrame):
         return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
+    if isinstance(obj, set):
+        return sorted(obj)
     if isinstance(obj, dict):
         return {k: serialize_for_json(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -240,6 +268,216 @@ def get(key):
     return STATE_CACHE.get(key)
 
 
+def _as_igraph(graph):
+    if hasattr(graph, "get_graph"):
+        return graph.get_graph()
+    if hasattr(graph, "graph"):
+        return graph.graph
+    return graph
+
+
+def _root_count(dyn_roots) -> int:
+    if isinstance(dyn_roots, set):
+        return len(dyn_roots)
+    if isinstance(dyn_roots, dict):
+        return sum(len(v) for v in dyn_roots.values() if hasattr(v, "__len__"))
+    return 0
+
+
+def _extract_root_names(graph, roots):
+    """Store both indices and names so roots can be restored after GraphML reload."""
+    i_graph = _as_igraph(graph)
+    indices = []
+    names = []
+
+    for root in roots or []:
+        try:
+            idx = int(root)
+        except (TypeError, ValueError):
+            continue
+        indices.append(idx)
+        try:
+            vertex = i_graph.vs[idx]
+            if "name" in vertex.attributes():
+                names.append(str(vertex["name"]))
+        except Exception:
+            pass
+
+    return {
+        "indices": sorted(set(indices)),
+        "names": sorted(set(names)),
+    }
+
+
+def _serialize_dyn_roots(graph) -> dict:
+    dyn_roots = getattr(graph, "dyn_roots", None)
+
+    if isinstance(dyn_roots, set):
+        return {
+            "kind": "set",
+            "total": len(dyn_roots),
+            "roots": _extract_root_names(graph, dyn_roots),
+        }
+
+    if isinstance(dyn_roots, dict):
+        items = {}
+        total = 0
+        for key, roots in dyn_roots.items():
+            root_set = set(roots or [])
+            total += len(root_set)
+            items[str(key)] = _extract_root_names(graph, root_set)
+        return {
+            "kind": "dict",
+            "total": total,
+            "items": items,
+        }
+
+    return {
+        "kind": "unknown",
+        "total": 0,
+        "type": type(dyn_roots).__name__,
+    }
+
+
+def _restore_root_set(graph, root_payload: dict) -> set:
+    i_graph = _as_igraph(graph)
+    name_to_index = {}
+    try:
+        for vertex in i_graph.vs:
+            if "name" in vertex.attributes():
+                name_to_index[str(vertex["name"])] = int(vertex.index)
+    except Exception:
+        pass
+
+    restored = set()
+
+    for name in root_payload.get("names", []) or []:
+        if str(name) in name_to_index:
+            restored.add(name_to_index[str(name)])
+
+    # Fallback to stored indices only when a name could not be resolved.
+    vertex_count = len(i_graph.vs) if hasattr(i_graph, "vs") else 0
+    for idx in root_payload.get("indices", []) or []:
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < vertex_count:
+            restored.add(idx)
+
+    return restored
+
+
+def _restore_dyn_roots(graph, dyn_roots_payload: Optional[dict]) -> bool:
+    if not isinstance(dyn_roots_payload, dict):
+        return False
+
+    kind = dyn_roots_payload.get("kind")
+    if kind == "set":
+        graph.dyn_roots = _restore_root_set(graph, dyn_roots_payload.get("roots", {}))
+        _log(f"[roots] restored set dyn_roots={len(graph.dyn_roots)}")
+        return True
+
+    if kind == "dict":
+        restored = {}
+        for key, root_payload in (dyn_roots_payload.get("items", {}) or {}).items():
+            restored[str(key)] = _restore_root_set(graph, root_payload)
+        graph.dyn_roots = restored
+        _log(f"[roots] restored dict dyn_roots={[(k, len(v)) for k, v in restored.items()]}")
+        return True
+
+    _log(f"[roots] unsupported dyn_roots payload kind={kind!r}")
+    return False
+
+
+def _write_graph_manifest(path: str, config: dict):
+    manifest = {
+        "graph_class": "RepresentationGraph",
+        "graph_config": _graph_config(config),
+        "meta_path": config.get("meta_path", []),
+    }
+    manifest_path = get_manifest_file(path)
+    manifest_dir = os.path.dirname(manifest_path)
+    if manifest_dir:
+        os.makedirs(manifest_dir, exist_ok=True)
+    temp_manifest_path = f"{manifest_path}.tmp"
+    with open(temp_manifest_path, "w", encoding="utf-8") as file_handle:
+        json.dump(manifest, file_handle, ensure_ascii=False, indent=2)
+    os.replace(temp_manifest_path, manifest_path)
+
+
+def _write_graphml_atomic(graph, graph_path: str, config: dict):
+    graph_dir = os.path.dirname(graph_path)
+    if graph_dir:
+        os.makedirs(graph_dir, exist_ok=True)
+
+    i_graph = _as_igraph(graph)
+    graph_save = _clean_graph_copy(i_graph)
+    temp_graph_path = f"{graph_path}.tmp"
+    graph_save.write_graphml(temp_graph_path)
+    os.replace(temp_graph_path, graph_path)
+    _write_graph_manifest(graph_path, config)
+
+
+def _make_graph_handoff(config: dict, graph, window_index) -> dict:
+    """
+    Build a small JSON buffer for the random-walk pod.
+
+    The important part is dyn_roots: GraphML does not reliably preserve this
+    Python-side incremental state, so the random-walk pod must receive it
+    explicitly. Otherwise it may rebuild roots from the whole graph and walk
+    far more nodes than intended.
+    """
+    graph_path = os.path.join(GRAPH_SNAPSHOT_DIR, f"graph_window_{window_index}.graphml")
+    _write_graphml_atomic(graph, graph_path, config)
+
+    dyn_roots_payload = _serialize_dyn_roots(graph)
+    _log(
+        f"[handoff] window={window_index} graph_path={graph_path} "
+        f"dyn_roots_total={dyn_roots_payload.get('total', 0)}"
+    )
+
+    return {
+        "type": "representation_graph_handoff",
+        "graph_path": graph_path,
+        "manifest_path": get_manifest_file(graph_path),
+        "dyn_roots": dyn_roots_payload,
+        "window_index": window_index,
+        "delete_graph_snapshot": True,
+    }
+
+
+def _normalize_graph_handoff(payload) -> Tuple[str, Optional[dict], bool]:
+    """Accept the new JSON handoff and legacy string graph-path buffers."""
+    if isinstance(payload, dict):
+        graph_path = payload.get("graph_path") or payload.get("path")
+        if not isinstance(graph_path, str) or not graph_path.strip():
+            raise ValueError(f"Invalid graph handoff payload: missing graph_path. payload={payload!r}")
+        return graph_path, payload.get("dyn_roots"), bool(payload.get("delete_graph_snapshot", False))
+
+    if isinstance(payload, str):
+        return payload, None, False
+
+    raise ValueError(f"Unsupported graph handoff payload type: {type(payload).__name__}")
+
+
+def _cleanup_graph_handoff(payload):
+    if not isinstance(payload, dict) or not payload.get("delete_graph_snapshot"):
+        return
+
+    graph_path = payload.get("graph_path")
+    if not isinstance(graph_path, str) or not graph_path:
+        return
+
+    for path in (graph_path, get_manifest_file(graph_path)):
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+                _log(f"[cleanup] removed {path}")
+        except OSError as exc:
+            _log(f"[cleanup] failed to remove {path}: {exc}")
+
+
 def _bootstrap_dyn_roots_if_empty(graph, config):
     if not hasattr(graph, "get_graph") or not hasattr(graph, "dyn_roots"):
         print("[bootstrap] graph or dyn_roots missing", file=sys.stderr)
@@ -248,8 +486,8 @@ def _bootstrap_dyn_roots_if_empty(graph, config):
     g = graph.get_graph()
     dyn_roots = graph.dyn_roots
 
-    # In Argo, graph construction and random-walk often run in separate pods.
-    # dyn_roots may be empty after reload, so rebuild a sane default root set.
+    # Legacy fallback only. Do not use in incremental mode unless explicitly enabled,
+    # because it can rebuild a root set as large as the whole graph.
     if isinstance(dyn_roots, set):
         if dyn_roots:
             return
@@ -296,7 +534,8 @@ def _bootstrap_dyn_roots_if_empty(graph, config):
     else:
         print(f"[bootstrap] dyn_roots is unsupported type: {type(dyn_roots)}", file=sys.stderr)
 
-def ensure_representation_graph(config: dict, force_reload: bool=False):
+
+def ensure_representation_graph(config: dict, force_reload: bool = False):
     current = get("representation_graph")
     if current is not None and hasattr(current, "build_relation") and not force_reload:
         print("[INFO] graph already cached", file=sys.stderr)
@@ -363,13 +602,16 @@ def update(key, value):
     else:
         _write_text(graph_path, graph)
 
+
 def incremental_graph_construction(config, processed_data):
     graph = ensure_representation_graph(config, force_reload=True)
     return graph_construction(graph, processed_data)
 
+
 def batch_graph_construction(config, processed_data):
     graph = ensure_representation_graph(config)
     return graph_construction(graph, processed_data)
+
 
 # @ccdecorator
 def graph_construction(graph, processed_data):
@@ -385,28 +627,49 @@ def graph_construction(graph, processed_data):
     sample_vertices = [v["name"] for v in g.vs[:5] if "name" in v.attributes()]
     print(f"[graph] sample_vertices={sample_vertices}", file=sys.stderr)
     print(f"[graph] written ids example: {g.vs[0]['id'] if len(g.vs) > 0 and 'id' in g.vs[0].attributes() else 'N/A'}", file=sys.stderr)
+    print(f"[graph] dyn_roots_count={_root_count(getattr(graph, 'dyn_roots', None))}", file=sys.stderr)
 
     return {"status": "graph_built"}
 
-def incremental_random_walk(config, graph_path):
+
+def incremental_random_walk(config, graph_handoff):
+    graph_path, dyn_roots_payload, _delete_snapshot = _normalize_graph_handoff(graph_handoff)
     graph = load_graph_from_path(config, graph_path)
-    return random_walk(graph, config)
+
+    restored = _restore_dyn_roots(graph, dyn_roots_payload)
+    if not restored:
+        _log("[roots] no dyn_roots payload found in graph handoff")
+
+    return random_walk(
+        graph,
+        config,
+        allow_full_bootstrap=ALLOW_FULL_ROOT_BOOTSTRAP,
+    )
+
 
 def batch_random_walk(config):
     graph = ensure_representation_graph(config)
-    return random_walk(graph, config)
+    return random_walk(graph, config, allow_full_bootstrap=True)
+
 
 # @ccdecorator
-def random_walk(graph, config):
-    _bootstrap_dyn_roots_if_empty(graph, config)
-    
+def random_walk(graph, config, allow_full_bootstrap: bool = False):
     has_get_graph = hasattr(graph, "get_graph")
     has_dyn_roots = hasattr(graph, "dyn_roots")
-    
-    if has_get_graph and has_dyn_roots:
-        walks = dynrandom_walks_generation(config, graph)
-        return walks
-    return []
+
+    if not has_get_graph or not has_dyn_roots:
+        return []
+
+    if _root_count(graph.dyn_roots) == 0:
+        if allow_full_bootstrap:
+            _bootstrap_dyn_roots_if_empty(graph, config)
+        else:
+            _log("[random_walk] dyn_roots is empty; skipping instead of walking the whole graph")
+            return []
+
+    _log(f"[random_walk] dyn_roots_count={_root_count(graph.dyn_roots)}")
+    return dynrandom_walks_generation(config, graph)
+
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
     if output_buffer_path:
@@ -417,6 +680,7 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
             file_handle.write(payload)
     else:
         print(payload)
+
 
 def run_argo_batch(mode: str, function: str, processed_data: str, output_path: str = "-"):
     config = load_config()
@@ -435,14 +699,17 @@ def run_argo_batch(mode: str, function: str, processed_data: str, output_path: s
     output = function_map[function]()
     _exit(output_path=output_path, output=output)
 
+
 def run_argo_incremental(function: str, output_path: str = "-"):
     config = load_config()
     config["function"] = function
-    
+
     if function == "graph_construction":
         load_buffer_path = BUFFER_PATH + "processed_data"
         output_buffer_path = BUFFER_PATH + "graph"
-        extension = "graphml"
+        # The graph buffer is now a JSON handoff:
+        # {graph_path, dyn_roots, window_index, ...}
+        extension = "json"
     else:
         load_buffer_path = BUFFER_PATH + "graph"
         output_buffer_path = BUFFER_PATH + "sequences"
@@ -462,19 +729,21 @@ def run_argo_incremental(function: str, output_path: str = "-"):
             data = load_earliest_buffer(load_buffer_path) if next_ready is not None else None
             continue
 
-        function_map = {
-            "graph_construction": lambda: incremental_graph_construction(config, data),
-            "random_walk": lambda: incremental_random_walk(config, data),
-        }
-        
-        output = function_map[function]()
-
-        if function == "graph_construction":
-            output = get("representation_graph").graph
-
         window_index = get_earliest_window_index(load_buffer_path)
 
+        if function == "graph_construction":
+            incremental_graph_construction(config, data)
+            output = _make_graph_handoff(config, get("representation_graph"), window_index)
+        elif function == "random_walk":
+            output = incremental_random_walk(config, data)
+        else:
+            raise ValueError(f"Unsupported function: {function}")
+
         write_buffer(output, output_buffer_path, window_index, extension=extension)
+
+        if function == "random_walk":
+            _cleanup_graph_handoff(data)
+
         delete_earliest_buffer_file(load_buffer_path)
         if stop_requested:
             sys.exit(0)
@@ -485,6 +754,7 @@ def run_argo_incremental(function: str, output_path: str = "-"):
     _exit(output_path, output_buffer_path)
     return
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Graph construction/random walk distribution for Argo")
     parser.add_argument("--mode", default="default")
@@ -494,5 +764,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if "embedding" in args.mode and "inference" in args.mode and "training" not in args.mode:
         run_argo_incremental(function=args.function, output_path=args.output)
-    else:        
+    else:
         run_argo_batch(mode=args.mode, function=args.function, processed_data=args.processed_data, output_path=args.output)
