@@ -15,7 +15,7 @@ from models.similarity_graph import SimilarityGraph
 from pipeline.decision_making import decide_matches
 from pipeline.evaluation import compare_ground_truth
 from utils.buffers import _delete_file_if_exists, load_earliest_buffer, wait_for_buffer, write_buffer, write_eos, delete_earliest_buffer_file, get_earliest_window_index, get_embedding_buffer_file
-from utils.codecarbon import ccdecorator
+from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output, write_text
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
@@ -26,6 +26,10 @@ BUFFER_PATH = "/app/data/buffers/"
 stop_requested = False
 
 def handle_sigterm(signum, frame):
+    """Record termination requests so long-running buffer loops can stop cleanly.
+
+    类别：Pod / Argo 入口类
+    """
     global stop_requested
     stop_requested = True
 
@@ -33,10 +37,18 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
 def _log(message: str):
+    """Write distribution diagnostics to stderr.
+
+    类别：诊断和小工具类
+    """
     print(message, file=sys.stderr)
 
 
 def _safe_len(value):
+    """Return len(value) when possible without raising on unsupported objects.
+
+    类别：诊断和小工具类
+    """
     try:
         return len(value)
     except Exception:
@@ -44,6 +56,10 @@ def _safe_len(value):
 
 
 def _sample_pairs(pairs, limit: int = 5):
+    """Internal helper for sample pairs behavior in this distribution.
+
+    类别：诊断和小工具类
+    """
     if not isinstance(pairs, list) or not pairs:
         return []
     preview = []
@@ -56,6 +72,10 @@ def _sample_pairs(pairs, limit: int = 5):
 
 
 def _side_prefix(rid: str) -> str:
+    """Extract the dataset-side prefix from a record id.
+
+    类别：诊断和小工具类
+    """
     rid = str(rid)
     if "_" not in rid:
         return ""
@@ -63,12 +83,20 @@ def _side_prefix(rid: str) -> str:
 
 
 def _is_same_side_pair(left_id: str, right_id: str) -> bool:
+    """Detect whether two record ids belong to the same dataset side.
+
+    类别：诊断和小工具类
+    """
     left_side = _side_prefix(left_id)
     right_side = _side_prefix(right_id)
     return left_side in {"A", "B"} and left_side == right_side
 
 
 def _filter_cross_side_pairs(pairs):
+    """Remove same-side pairs before decision making.
+
+    类别：诊断和小工具类
+    """
     filtered_pairs = []
     dropped_same_side = 0
     for indexed_id, query_id, score in pairs:
@@ -80,6 +108,10 @@ def _filter_cross_side_pairs(pairs):
 
 
 def load_config(config_path: str = CONFIG_PATH):
+    """Load the mounted pipeline YAML config into a dictionary.
+
+    类别：IO / payload 解析类
+    """
     if not os.path.exists(config_path):
         return {}
     yaml = YAML(typ="safe")
@@ -88,37 +120,29 @@ def load_config(config_path: str = CONFIG_PATH):
     return loaded if isinstance(loaded, dict) else {}
 
 
-def serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    return obj
-
-
-def deserialize_from_json(obj):
-    if isinstance(obj, dict):
-        if obj.get("__dataframe__"):
-            return pd.DataFrame(obj.get("data", []))
-        return {k: deserialize_from_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [deserialize_from_json(item) for item in obj]
-    return obj
-
-
 def _resolve_cache_file(path: str) -> str:
+    """Resolve a state-cache path when the configured value is a directory.
+
+    类别：数据管理类
+    """
     if os.path.isdir(path):
         return os.path.join(path, "state_cache.json")
     return path
 
 
 def _now_iso() -> str:
+    """Return the current UTC time in ISO-like manifest format.
+
+    类别：数据管理类
+    """
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _sha256_file(path: str) -> str:
+    """Compute a SHA256 digest for a file artifact when it exists.
+
+    类别：数据管理类
+    """
     if not os.path.exists(path):
         return ""
     digest = hashlib.sha256()
@@ -129,6 +153,10 @@ def _sha256_file(path: str) -> str:
 
 
 def _load_state_manifest(path: str = STATE_MANIFEST_PATH) -> dict:
+    """Load the versioned state manifest from disk.
+
+    类别：数据管理类
+    """
     try:
         if not os.path.exists(path):
             return {"versions": {}}
@@ -143,6 +171,10 @@ def _load_state_manifest(path: str = STATE_MANIFEST_PATH) -> dict:
 
 
 def _persist_state_manifest(manifest: dict, path: str = STATE_MANIFEST_PATH):
+    """Write the versioned state manifest to disk.
+
+    类别：数据管理类
+    """
     manifest_dir = os.path.dirname(path)
     if manifest_dir:
         os.makedirs(manifest_dir, exist_ok=True)
@@ -151,6 +183,10 @@ def _persist_state_manifest(manifest: dict, path: str = STATE_MANIFEST_PATH):
 
 
 def _register_manifest_artifact(config: dict, logical_name: str, artifact_path: str):
+    """Record an updated artifact path and metadata in the state manifest.
+
+    类别：数据管理类
+    """
     version_name = str(config.get("version_name", "test"))
     manifest = _load_state_manifest()
     versions = manifest.setdefault("versions", {})
@@ -175,6 +211,10 @@ def _register_manifest_artifact(config: dict, logical_name: str, artifact_path: 
 
 
 def _manifest_artifact_path(config: dict, logical_name: str) -> str:
+    """Look up a logical artifact path from the state manifest.
+
+    类别：数据管理类
+    """
     version_name = str(config.get("version_name", "test"))
     manifest = _load_state_manifest()
     path = (
@@ -188,6 +228,10 @@ def _manifest_artifact_path(config: dict, logical_name: str) -> str:
 
 
 def _load_state_cache(path: str = STATE_CACHE_PATH):
+    """Load this distribution state cache from disk if it exists.
+
+    类别：数据管理类
+    """
     path = _resolve_cache_file(path)
     if not os.path.exists(path):
         return {}
@@ -201,6 +245,10 @@ def _load_state_cache(path: str = STATE_CACHE_PATH):
 
 
 def _persist_state_cache(path: str = STATE_CACHE_PATH):
+    """Persist the in-memory distribution state cache to disk.
+
+    类别：数据管理类
+    """
     path = _resolve_cache_file(path)
     cache_dir = os.path.dirname(path)
     if cache_dir:
@@ -222,24 +270,18 @@ STATE_CACHE = _load_state_cache()
 
 
 def _parse_json_payload(content: str):
-    stripped = content.strip()
-    if not stripped:
-        return None
+    """Parse JSON payloads written by upstream steps, including serialized DataFrames.
 
-    # Argo may prepend logs before the JSON payload, so parse the last valid JSON line first.
-    for line in reversed([ln.strip() for ln in stripped.splitlines() if ln.strip()]):
-        try:
-            return deserialize_from_json(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    try:
-        return deserialize_from_json(json.loads(stripped))
-    except json.JSONDecodeError:
-        return None
+    类别：IO / payload 解析类
+    """
+    return parse_json_payload(content, deserializer=deserialize_from_json)
 
 
 def load_input_payload(input_value: str):
+    """Load an entrypoint input from a path, argfile reference, or inline payload.
+
+    类别：IO / payload 解析类
+    """
     original_input = input_value
     if input_value.startswith("@"):
         argfile_path = input_value[1:]
@@ -270,14 +312,18 @@ def load_input_payload(input_value: str):
 
 
 def _write_text(path: str, value):
-    with open(path, "w", encoding="utf-8") as file_handle:
-        if isinstance(value, str):
-            file_handle.write(value)
-        else:
-            file_handle.write(json.dumps(serialize_for_json(value)))
+    """Write plain text or serialized structured data to a file path.
+
+    类别：IO / payload 解析类
+    """
+    write_text(path, value, serializer=serialize_for_json)
 
 
 def _state_config(config: dict) -> dict:
+    """Extract state-management configuration from the loaded pipeline config.
+
+    类别：数据管理类
+    """
     if not isinstance(config, dict):
         return {}
     cfg = config.get("state_management", {}) or config.get("state_config", {}) or {}
@@ -285,6 +331,10 @@ def _state_config(config: dict) -> dict:
 
 
 def _embedding_artifact_path(state_config: dict, config: dict) -> str:
+    """Resolve the configured embedding model artifact path.
+
+    类别：数据管理类
+    """
     emb_dir = state_config.get("embedding-dir", "data/embedding")
     version_name = config.get("version_name", "test")
     emb_name = state_config.get("embedding_model-name") or version_name
@@ -293,6 +343,10 @@ def _embedding_artifact_path(state_config: dict, config: dict) -> str:
 
 
 def _predicted_artifact_path(state_config: dict, config: dict, output_format: str) -> str:
+    """Resolve the configured predicted-matching artifact path.
+
+    类别：数据管理类
+    """
     predicted_dir = state_config.get("predicted_match-dir", "data/predicted")
     version_name = config.get("version_name", "test")
     predicted_name = state_config.get("predicted_match-name") or version_name
@@ -302,6 +356,10 @@ def _predicted_artifact_path(state_config: dict, config: dict, output_format: st
 
 
 def _result_artifact_path(state_config: dict, config: dict) -> str:
+    """Resolve the configured evaluation-result artifact path.
+
+    类别：数据管理类
+    """
     predicted_dir = state_config.get("predicted_match-dir", "data/predicted")
     version_name = config.get("version_name", "test")
     predicted_name = state_config.get("predicted_match-name") or version_name
@@ -310,6 +368,10 @@ def _result_artifact_path(state_config: dict, config: dict) -> str:
 
 
 def _clean_graph_copy(graph):
+    """Return a graph object prepared for durable serialization.
+
+    类别：数据管理类
+    """
     graph_copy = graph.copy()
     allowed_types = (str, int, float, bool)
     for vertex in graph_copy.vs:
@@ -324,6 +386,10 @@ def _clean_graph_copy(graph):
 
 
 def _looks_like_embedding_model(obj) -> bool:
+    """Check whether an object behaves like the expected embedding model.
+
+    类别：数据管理类
+    """
     if obj is None:
         return False
     if isinstance(obj, EmbeddingModel):
@@ -332,12 +398,24 @@ def _looks_like_embedding_model(obj) -> bool:
     return hasattr(base, "wv")
 
 def _file_has_content(path: str) -> bool:
+    """Check whether a path exists and contains data.
+
+    类别：数据管理类
+    """
     return os.path.exists(path) and os.path.getsize(path) > 0
 
 def get(key):
+    """Read an object from this distribution local state cache.
+
+    类别：数据管理类
+    """
     return STATE_CACHE.get(key)
 
 def update(key, value):
+    """Update local state and persist durable artifacts when required.
+
+    类别：数据管理类
+    """
     STATE_CACHE[key] = value
     _persist_state_cache()
 
@@ -380,6 +458,10 @@ def update(key, value):
 
 
 def ensure_embedding_model(config: dict):
+    """Load the embedding model required by decision or similarity steps.
+
+    类别：数据管理类
+    """
     current = get("embedding_model")
     if _looks_like_embedding_model(current):
         _log("[state] embedding_model already in memory cache")
@@ -392,6 +474,10 @@ def ensure_embedding_model(config: dict):
     
 
 def load_embedding_model(config: dict, embedding_path: str):
+    """Load an embedding model from an explicit artifact path.
+
+    类别：数据管理类
+    """
     _log(f"[state] attempting to load embedding_model path={embedding_path} exists={_file_has_content(embedding_path)}")
     if _file_has_content(embedding_path):
         try:
@@ -408,6 +494,10 @@ def load_embedding_model(config: dict, embedding_path: str):
     return None
 
 def _normalize_matching_pairs(matching_pairs):
+    """Validate and normalize matching-pair payloads for decision making.
+
+    类别：诊断和小工具类
+    """
     if isinstance(matching_pairs, dict):
         if "matching_pairs" in matching_pairs:
             matching_pairs = matching_pairs["matching_pairs"]
@@ -439,25 +529,35 @@ def _normalize_matching_pairs(matching_pairs):
     return normalized
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
+    """Write final output or EOS markers before the distribution process exits.
+
+    类别：Pod / Argo 入口类
+    """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
 def decision_making_incremental(config, matching_pairs, embedding_path):
+    """Run decision making for one incremental window using a buffered embedding model.
+
+    类别：业务包装类
+    """
     model = load_embedding_model(config, embedding_path)
     return decision_making(config, matching_pairs, model, previous_pairs=get("mutualtop_pairs"))
 
 def decision_making_batch(config, matching_pairs):
+    """Run decision making for a batch workflow using the persisted embedding model.
+
+    类别：业务包装类
+    """
     model = ensure_embedding_model(config)
     return decision_making(config, matching_pairs, model, previous_pairs=None)
 
-# @ccdecorator
 def decision_making(config, matching_pairs, model, previous_pairs=None):
+    """Resolve matching conflicts and persist the final predicted matching result.
+
+    类别：业务包装类
+    """
     if model is None:
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
 
@@ -492,8 +592,11 @@ def decision_making(config, matching_pairs, model, previous_pairs=None):
     _log(f"[decision_making] final_pairs={final_pairs[:5]}{'...' if len(final_pairs) > 5 else ''}")
     return {"status": "decision_completed", "pair_count": len(final_pairs)}
 
-# @ccdecorator
 def evaluation(config):
+    """Compare predicted matches with ground truth and persist evaluation metrics.
+
+    类别：业务包装类
+    """
     _log("[evaluation] start")
     output_format = config.get("similarity", {}).get("output_format", "graphml")
     config["output_format"] = output_format
@@ -507,6 +610,10 @@ def evaluation(config):
 
 
 def run_argo_once(mode: str,function: str,matching_pairs: str = "", output_path: str = "-",):
+    """Execute the BERT distribution once for the selected batch mode.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["mode"] = mode
     selected_function = function.strip() if isinstance(function, str) else ""
@@ -524,14 +631,13 @@ def run_argo_once(mode: str,function: str,matching_pairs: str = "", output_path:
     else:
         raise ValueError(f"Unsupported function: {selected_function}")
 
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
 def run_argo_incremental(output_path: str = "-",):
+    """Dispatch an incremental worker loop to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
 
     output_buffer_path = BUFFER_PATH + "predicted_matching"

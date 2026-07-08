@@ -8,7 +8,7 @@ from ruamel.yaml import YAML
 from pipeline.bert_evaluation import evaluate_from_saved_model
 from pipeline.bert_inference import process_inference
 from pipeline.bert_training import train_model
-from utils.codecarbon import ccdecorator
+from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output, write_text
 
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-bert.yaml")
@@ -19,6 +19,10 @@ STATE_CACHE = {}
 
 
 def load_config(config_path: str = CONFIG_PATH):
+    """Load the mounted pipeline YAML config into a dictionary.
+
+    类别：IO / payload 解析类
+    """
     if not os.path.exists(config_path):
         return {}
     yaml = YAML(typ="safe")
@@ -28,6 +32,10 @@ def load_config(config_path: str = CONFIG_PATH):
 
 
 def _bert_save_dir(config):
+    """Resolve the directory containing the saved BERT model artifacts.
+
+    类别：数据管理类
+    """
     state_config = config.get("state_management", {}) if isinstance(config, dict) else {}
     bert_dir = state_config.get("bert-dir", "data/bert")
     if not os.path.isabs(bert_dir):
@@ -37,34 +45,18 @@ def _bert_save_dir(config):
 
 
 def _parse_json_payload(content: str):
-    stripped = content.strip()
-    if not stripped:
-        return None
+    """Parse JSON payloads written by upstream steps, including serialized DataFrames.
 
-    # Argo parameter files can include log lines; parse the last valid JSON line first.
-    for line in reversed([ln.strip() for ln in stripped.splitlines() if ln.strip()]):
-        try:
-            return deserialize_from_json(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    try:
-        return deserialize_from_json(json.loads(stripped))
-    except json.JSONDecodeError:
-        return None
-
-
-def deserialize_from_json(obj):
-    if isinstance(obj, dict):
-        if obj.get("__dataframe__"):
-            return pd.DataFrame(obj.get("data", []))
-        return {k: deserialize_from_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [deserialize_from_json(item) for item in obj]
-    return obj
+    类别：IO / payload 解析类
+    """
+    return parse_json_payload(content, deserializer=deserialize_from_json)
 
 
 def _state_config(config):
+    """Extract state-management configuration from the loaded pipeline config.
+
+    类别：数据管理类
+    """
     if not isinstance(config, dict):
         return {}
     state_config = config.get("state_management", {}) or config.get("state_config", {}) or {}
@@ -72,17 +64,18 @@ def _state_config(config):
 
 
 def _write_text(path, value):
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file_handle:
-        if isinstance(value, str):
-            file_handle.write(value)
-        else:
-            file_handle.write(json.dumps(serialize_for_json(value), ensure_ascii=False))
+    """Write plain text or serialized structured data to a file path.
+
+    类别：IO / payload 解析类
+    """
+    write_text(path, value, serializer=serialize_for_json, ensure_ascii=False)
 
 
 def _load_state_cache():
+    """Load this distribution state cache from disk if it exists.
+
+    类别：数据管理类
+    """
     if not os.path.exists(STATE_CACHE_PATH):
         return {}
     try:
@@ -95,6 +88,10 @@ def _load_state_cache():
 
 
 def _persist_state_cache():
+    """Persist the in-memory distribution state cache to disk.
+
+    类别：数据管理类
+    """
     cache_dir = os.path.dirname(STATE_CACHE_PATH)
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
@@ -103,6 +100,10 @@ def _persist_state_cache():
 
 
 def _bert_artifact_dir(config):
+    """Resolve the directory used to persist BERT training artifacts.
+
+    类别：数据管理类
+    """
     state_config = _state_config(config)
     bert_dir = state_config.get("bert-dir", "data/bert")
     if not os.path.isabs(bert_dir):
@@ -112,6 +113,10 @@ def _bert_artifact_dir(config):
 
 
 def _predicted_artifact_path(config):
+    """Resolve the configured predicted-matching artifact path.
+
+    类别：数据管理类
+    """
     state_config = _state_config(config)
     predicted_dir = state_config.get("predicted_match-dir", "data/predicted")
     predicted_name = state_config.get("predicted_match-name") or config.get("version_name", "test")
@@ -122,6 +127,10 @@ def _predicted_artifact_path(config):
 
 
 def _evaluation_artifact_path(config):
+    """Resolve where BERT evaluation results should be written.
+
+    类别：数据管理类
+    """
     state_config = _state_config(config)
     predicted_dir = state_config.get("predicted_match-dir", "data/predicted")
     predicted_name = state_config.get("predicted_match-name") or config.get("version_name", "test")
@@ -132,6 +141,10 @@ def _evaluation_artifact_path(config):
 
 
 def update(key, value):
+    """Update local state and persist durable artifacts when required.
+
+    类别：数据管理类
+    """
     config = load_config()
     STATE_CACHE[key] = value
 
@@ -165,37 +178,40 @@ def update(key, value):
 
 STATE_CACHE.update(_load_state_cache())
 
-# @ccdecorator
 def bert_training(config, processed_data):
+    """Train the BERT model and store trainer/tokenizer state for later steps.
+
+    类别：业务包装类
+    """
     trainer, tokenizer = train_model(config, processed_data)
     save_dir = update("bert_model", {"trainer": trainer, "tokenizer": tokenizer})
     return {"status": "trained", "save_dir": save_dir}
 
-# @ccdecorator
 def bert_inference(config, processed_data):
+    """Run BERT inference from a saved model and persist predicted pairs.
+
+    类别：业务包装类
+    """
     predicted_pairs = process_inference(processed_data, save_dir=_bert_save_dir(config))
     update("predicted_matching", predicted_pairs)
     print("[bert_inference] completed, predicted_pairs count: {count}".format(count=len(predicted_pairs)))
     return predicted_pairs
 
-# @ccdecorator
 def bert_evaluation(config, processed_data):
+    """Evaluate BERT predictions against the configured evaluation data.
+
+    类别：业务包装类
+    """
     evaluation_results = evaluate_from_saved_model(processed_data, config)
     update("evaluation_result", evaluation_results)
     print("[bert_evaluation] completed, evaluation_results: {evaluation_results}".format(evaluation_results=evaluation_results))
     return evaluation_results
 
-def serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    return obj
-
-
 def load_processed_data(processed_data_value: str):
+    """Load processed data from a file path or serialized inline payload.
+
+    类别：IO / payload 解析类
+    """
     if processed_data_value.startswith("@"):
         argfile_path = processed_data_value[1:]
         if os.path.isfile(argfile_path):
@@ -220,6 +236,10 @@ def load_processed_data(processed_data_value: str):
 
 
 def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
+    """Execute the BERT distribution once for the selected batch mode.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["mode"] = mode
     processed_data = load_processed_data(processed_data_value)
@@ -239,12 +259,7 @@ def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 
-    serialized_output = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(serialized_output)
-    else:
-        print(serialized_output)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
 
 if __name__ == "__main__":

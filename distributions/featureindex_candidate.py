@@ -12,7 +12,7 @@ from pipeline.feature_index_construction import create_cg_index
 from pipeline.candidate_enumeration import enumerate_candidates
 from models.cg_index import CGIndex
 from utils.buffers import delete_earliest_buffer_file, delete_earliest_buffer_directory, get_earliest_window_index, get_cg_index_buffer_file, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
-from utils.codecarbon import ccdecorator
+from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output, write_text
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
@@ -21,6 +21,10 @@ BUFFER_PATH = "/app/data/buffers/"
 stop_requested = False
 
 def handle_sigterm(signum, frame):
+    """Record termination requests so long-running buffer loops can stop cleanly.
+
+    类别：Pod / Argo 入口类
+    """
     global stop_requested
     stop_requested = True
 
@@ -28,6 +32,10 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
 def load_config(config_path: str = CONFIG_PATH):
+    """Load the mounted pipeline YAML config into a dictionary.
+
+    类别：IO / payload 解析类
+    """
     if not os.path.exists(config_path):
         return {}
     yaml = YAML(typ="safe")
@@ -36,27 +44,11 @@ def load_config(config_path: str = CONFIG_PATH):
     return loaded if isinstance(loaded, dict) else {}
 
 
-def serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    return obj
-
-
-def deserialize_from_json(obj):
-    if isinstance(obj, dict):
-        if obj.get("__dataframe__"):
-            return pd.DataFrame(obj.get("data", []))
-        return {k: deserialize_from_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [deserialize_from_json(item) for item in obj]
-    return obj
-
-
 def _load_state_cache(path: str = STATE_CACHE_PATH):
+    """Load this distribution state cache from disk if it exists.
+
+    类别：数据管理类
+    """
     if not os.path.exists(path):
         return {}
     try:
@@ -69,6 +61,10 @@ def _load_state_cache(path: str = STATE_CACHE_PATH):
 
 
 def _persist_state_cache(path: str = STATE_CACHE_PATH):
+    """Persist the in-memory distribution state cache to disk.
+
+    类别：数据管理类
+    """
     cache_dir = os.path.dirname(path)
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
@@ -89,24 +85,18 @@ STATE_CACHE = _load_state_cache()
 
 
 def _parse_json_payload(content: str):
-    stripped = content.strip()
-    if not stripped:
-        return None
-    
-    # Argo may prepend logs before the JSON payload, so parse the last valid JSON line first.
-    for line in reversed([ln.strip() for ln in stripped.splitlines() if ln.strip()]):
-        try:
-            return deserialize_from_json(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    """Parse JSON payloads written by upstream steps, including serialized DataFrames.
 
-    try:
-        return deserialize_from_json(json.loads(stripped))
-    except json.JSONDecodeError:
-        return None
+    类别：IO / payload 解析类
+    """
+    return parse_json_payload(content, deserializer=deserialize_from_json)
 
 
 def load_cg_feature(cg_feature_value: str):
+    """Load candidate-generation features from an inline payload or file path.
+
+    类别：IO / payload 解析类
+    """
     if cg_feature_value.startswith("@"):
         argfile_path = cg_feature_value[1:]
         if os.path.isfile(argfile_path):
@@ -127,26 +117,33 @@ def load_cg_feature(cg_feature_value: str):
 
 
 def _write_text(path: str, value):
-    with open(path, "w", encoding="utf-8") as file_handle:
-        if isinstance(value, str):
-            file_handle.write(value)
-        else:
-            file_handle.write(json.dumps(serialize_for_json(value)))
+    """Write plain text or serialized structured data to a file path.
+
+    类别：IO / payload 解析类
+    """
+    write_text(path, value, serializer=serialize_for_json)
 
 def get(key):
+    """Read an object from this distribution local state cache.
+
+    类别：数据管理类
+    """
     return STATE_CACHE.get(key)
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
+    """Write final output or EOS markers before the distribution process exits.
+
+    类别：Pod / Argo 入口类
+    """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
 def _cg_index_save_dir(config: dict):
+    """Resolve the filesystem directory used to store the candidate-generation index.
+
+    类别：数据管理类
+    """
     state_config = {}
     if isinstance(config, dict):
         state_config = config.get("state_management", {}) or config.get("state_config", {}) or {}
@@ -159,6 +156,10 @@ def _cg_index_save_dir(config: dict):
 
 
 def ensure_cg_feature_index(config: dict, force_rebuild: bool = False):
+    """Load or create the candidate-generation index needed by feature/index steps.
+
+    类别：数据管理类
+    """
     current = get("cg_feature_index")
     if current is not None and hasattr(current, "build") and not force_rebuild:
         return current
@@ -168,6 +169,10 @@ def ensure_cg_feature_index(config: dict, force_rebuild: bool = False):
     
 
 def build_cg_feature(save_dir: str, config: dict):
+    """Load a candidate-generation index artifact from disk into local state.
+
+    类别：数据管理类
+    """
     manifest_path = os.path.join(save_dir, "manifest.json")
     if os.path.exists(manifest_path):
         index = CGIndex.from_disk(config, save_dir)
@@ -180,6 +185,10 @@ def build_cg_feature(save_dir: str, config: dict):
     return index
 
 def update(key, value):
+    """Update local state and persist durable artifacts when required.
+
+    类别：数据管理类
+    """
     STATE_CACHE[key] = value
     _persist_state_cache()
 
@@ -200,15 +209,26 @@ def update(key, value):
     
 
 def batch_feature_index_construction(config, cg_feature):
+    """Run feature-index construction for a batch workflow invocation.
+
+    类别：业务包装类
+    """
     ensure_cg_feature_index(config)
     return feature_index_construction(config, cg_feature)
 
 def incremental_feature_index_construction(config, cg_feature):
+    """Run feature-index construction for one incremental buffer window.
+
+    类别：业务包装类
+    """
     ensure_cg_feature_index(config, True)
     return feature_index_construction(config, cg_feature)
 
-# @ccdecorator
 def feature_index_construction(config, cg_feature):
+    """Build the candidate-generation feature index.
+
+    类别：业务包装类
+    """
     if not isinstance(cg_feature, list):
         raise ValueError("cg_feature must be a feature list.")
 
@@ -223,15 +243,26 @@ def feature_index_construction(config, cg_feature):
     return None
 
 def batch_candidate_enumeration(config, cg_feature):
+    """Run candidate enumeration for a batch workflow invocation.
+
+    类别：业务包装类
+    """
     ensure_cg_feature_index(config)
     return candidate_enumeration(config, cg_feature)
 
 def incremental_candidate_enumeration(config, cg_feature, path):
+    """Run candidate enumeration after loading the indexed feature state for a window.
+
+    类别：业务包装类
+    """
     build_cg_feature(path, config)
     return candidate_enumeration(config, cg_feature)
 
-# @ccdecorator
 def candidate_enumeration(config, cg_feature):
+    """Query the candidate-generation index to produce candidate record pairs.
+
+    类别：业务包装类
+    """
     print("[candidate_enumeration]")
     index = get("cg_feature_index")
     if isinstance(cg_feature, list) and cg_feature and index is not None and hasattr(index, "query"):
@@ -243,6 +274,10 @@ def candidate_enumeration(config, cg_feature):
     return None
 
 def run_argo_batch(mode: str, function: str, cg_feature: str, output_path: str = "-"):
+    """Dispatch a batch Argo invocation to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["mode"] = mode
     config["function"] = function
@@ -261,6 +296,10 @@ def run_argo_batch(mode: str, function: str, cg_feature: str, output_path: str =
     return
 
 def run_argo_incremental(function: str, output_path: str = "-"):
+    """Dispatch an incremental worker loop to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["function"] = function
 

@@ -3,18 +3,7 @@ from time import time, time_ns, sleep
 import os
 import sys
 import pandas as pd
-from ruamel.yaml import YAML
 from pandas.errors import EmptyDataError
-
-CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
-
-def load_config(config_path: str = CONFIG_PATH):
-    if not os.path.exists(config_path):
-        return {}
-    yaml = YAML(typ="safe")
-    with open(config_path, "r", encoding="utf-8") as file_handle:
-        loaded = yaml.load(file_handle) or {}
-    return loaded if isinstance(loaded, dict) else {}
 
 def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
     start_time = time()
@@ -26,7 +15,7 @@ def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
     return None
 
 def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
-    accepted_extensions = {".csv", ".json", ".graphml"}
+    accepted_extensions = {".csv", ".json"}
 
     if not os.path.isdir(buffer_dir):
         return None
@@ -43,24 +32,6 @@ def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
         return None
     buffer_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=False)
     return os.path.join(buffer_dir, buffer_files[0])
-
-def get_latest_graphml_file(buffer_dir: str) -> str | None:
-    if not os.path.isdir(buffer_dir):
-        return None
-    graphml_files = [f for f in os.listdir(buffer_dir) if f.endswith(".graphml")]
-    if not graphml_files:
-        return None
-    graphml_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=True)
-    return os.path.join(buffer_dir, graphml_files[0])
-
-def get_earliest_graphml_file(buffer_dir: str) -> str | None:
-    if not os.path.isdir(buffer_dir):
-        return None
-    graphml_files = [f for f in os.listdir(buffer_dir) if f.endswith(".graphml")]
-    if not graphml_files:
-        return None
-    graphml_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=False)
-    return os.path.join(buffer_dir, graphml_files[0])
 
 def get_manifest_file(graph: str) -> str | None:
     if not graph or not os.path.isfile(graph):
@@ -130,6 +101,8 @@ def delete_earliest_buffer_file(buffer_dir: str):
     return True
 
 def load_earliest_buffer(buffer_dir: str):
+    """now for this function, we accept only csv file and output DataFrame
+    """
     earliest_buffer_file = _get_earliest_buffer_file(buffer_dir)
     if earliest_buffer_file and os.path.basename(earliest_buffer_file).startswith("eos_"):
         return None
@@ -145,10 +118,6 @@ def load_earliest_buffer(buffer_dir: str):
                 value = data.get("value", {}) if isinstance(data, dict) else {}
             elif earliest_buffer_file.endswith(".csv"):
                 value = pd.read_csv(earliest_buffer_file)
-            elif earliest_buffer_file.endswith(".graphml"):
-                value = earliest_buffer_file
-            elif earliest_buffer_file.endswith(".emb"):
-                value = earliest_buffer_file
         except EmptyDataError:
             print(f"[WARNING] Unreadable buffer file detected; deleting: {earliest_buffer_file}", file=sys.stderr, flush=True)
             return pd.DataFrame()
@@ -204,7 +173,6 @@ def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "js
     write_functions = {
         "json": _write_json_buffer,
         "csv": _write_csv_buffer,
-        "graphml": _write_graph_buffer,
         "emb": _write_embedding_model_buffer,
         "index": _write_cg_index_buffer,
     }
@@ -217,34 +185,6 @@ def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "js
         write_function(data_buffer, output_dir, prefix)
     except Exception as e:
         print(f"[ERROR] Failed to write buffer to {output_dir} with extension '{extension}': {e}", file=sys.stderr, flush=True)
-
-def _write_graph_buffer(graph, output_dir: str, prefix: str):
-    config = load_config()
-    graph_name = f"{prefix}_{time_ns()}"
-    graph_path = os.path.join(output_dir, f"{graph_name}.graphml")
-    manifest_path = os.path.join(output_dir, f"{graph_name}.manifest.json")
-    temp_graph_path = f"{graph_path}.tmp"
-    temp_manifest_path = f"{manifest_path}.tmp"
-
-    try:
-        graph_save = _clean_graph_copy(graph)
-        graph_save.write_graphml(temp_graph_path)
-        manifest = {
-            "graph_class": type(graph).__name__,
-            "graph_config": _graph_config(config),
-            "meta_path": config.get("meta_path", []),
-        }
-        with open(temp_manifest_path, "w", encoding="utf-8") as file_handle:
-            json.dump(manifest, file_handle, ensure_ascii=False, indent=2)
-
-        os.replace(temp_graph_path, graph_path)
-        os.replace(temp_manifest_path, manifest_path)
-        print(f"[INFO] Wrote graph buffer to {graph_path} with manifest {manifest_path}.", flush=True)
-    except Exception as exc:
-        for temp_path in (temp_graph_path, temp_manifest_path):
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        raise exc
 
 def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
@@ -343,27 +283,3 @@ def clear_buffer_directory(buffer_dir: str):
                 os.remove(file_path)
         except Exception as e:
             print(f"[WARNING] Failed to delete buffer file {file_path}: {e}", flush=True)
-
-def _clean_graph_copy(graph):
-    graph_copy = graph.copy()
-    allowed_types = (str, int, float, bool)
-    for v in graph_copy.vs:
-        for attr in list(v.attributes()):
-            if not isinstance(v[attr], allowed_types):
-                del v[attr]
-    for e in graph_copy.es:
-        for attr in list(e.attributes()):
-            if not isinstance(e[attr], allowed_types):
-                del e[attr]
-    return graph_copy
-
-def _graph_config(config: dict) -> dict:
-    if not isinstance(config, dict):
-        return {}
-    graph_cfg = config.get("graph_construction")
-    if isinstance(graph_cfg, dict):
-        return graph_cfg
-    legacy_cfg = config.get("graph")
-    if isinstance(legacy_cfg, dict):
-        return legacy_cfg
-    return {}

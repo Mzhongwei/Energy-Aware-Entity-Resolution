@@ -20,7 +20,7 @@ from utils.buffers import (
     delete_earliest_buffer_file,
     get_manifest_file,
 )
-from utils.codecarbon import ccdecorator
+from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output, write_text
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 STATE_CACHE_PATH = "/app/data/state_cache.json"
@@ -40,10 +40,18 @@ ALLOW_FULL_ROOT_BOOTSTRAP = os.environ.get(
 stop_requested = False
 
 def _log(message: str):
+    """Write distribution diagnostics to stderr.
+
+    类别：诊断和小工具类
+    """
     print(message, file=sys.stderr)
 
 
 def handle_sigterm(signum, frame):
+    """Record termination requests so long-running buffer loops can stop cleanly.
+
+    类别：Pod / Argo 入口类
+    """
     global stop_requested
     stop_requested = True
 
@@ -53,6 +61,10 @@ signal.signal(signal.SIGINT, handle_sigterm)
 
 
 def load_config(config_path: str = CONFIG_PATH):
+    """Load the mounted pipeline YAML config into a dictionary.
+
+    类别：IO / payload 解析类
+    """
     if not os.path.exists(config_path):
         return {}
     yaml = YAML(typ="safe")
@@ -61,35 +73,21 @@ def load_config(config_path: str = CONFIG_PATH):
     return loaded if isinstance(loaded, dict) else {}
 
 
-def serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, set):
-        return sorted(obj)
-    if isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    return obj
-
-
-def deserialize_from_json(obj):
-    if isinstance(obj, dict):
-        if obj.get("__dataframe__"):
-            return pd.DataFrame(obj.get("data", []))
-        return {k: deserialize_from_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [deserialize_from_json(item) for item in obj]
-    return obj
-
-
 def _resolve_cache_file(path: str) -> str:
+    """Resolve a state-cache path when the configured value is a directory.
+
+    类别：数据管理类
+    """
     if os.path.isdir(path):
         return os.path.join(path, "state_cache.json")
     return path
 
 
 def _load_state_cache(path: str = STATE_CACHE_PATH):
+    """Load this distribution state cache from disk if it exists.
+
+    类别：数据管理类
+    """
     path = _resolve_cache_file(path)
     if not os.path.exists(path):
         return {}
@@ -103,6 +101,10 @@ def _load_state_cache(path: str = STATE_CACHE_PATH):
 
 
 def _persist_state_cache(path: str = STATE_CACHE_PATH):
+    """Persist the in-memory distribution state cache to disk.
+
+    类别：数据管理类
+    """
     path = _resolve_cache_file(path)
     cache_dir = os.path.dirname(path)
     if cache_dir:
@@ -124,24 +126,18 @@ STATE_CACHE = _load_state_cache()
 
 
 def _parse_json_payload(content: str):
-    stripped = content.strip()
-    if not stripped:
-        return None
+    """Parse JSON payloads written by upstream steps, including serialized DataFrames.
 
-    # Argo may prepend logs before the JSON payload, so parse the last valid JSON line first.
-    for line in reversed([ln.strip() for ln in stripped.splitlines() if ln.strip()]):
-        try:
-            return deserialize_from_json(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    try:
-        return deserialize_from_json(json.loads(stripped))
-    except json.JSONDecodeError:
-        return None
+    类别：IO / payload 解析类
+    """
+    return parse_json_payload(content, deserializer=deserialize_from_json)
 
 
 def load_processed_data(processed_data_value: str):
+    """Load processed data from a file path or serialized inline payload.
+
+    类别：IO / payload 解析类
+    """
     if processed_data_value.startswith("@"):
         argfile_path = processed_data_value[1:]
         if os.path.isfile(argfile_path):
@@ -165,14 +161,18 @@ def load_processed_data(processed_data_value: str):
 
 
 def _write_text(path: str, value):
-    with open(path, "w", encoding="utf-8") as file_handle:
-        if isinstance(value, str):
-            file_handle.write(value)
-        else:
-            file_handle.write(json.dumps(serialize_for_json(value)))
+    """Write plain text or serialized structured data to a file path.
+
+    类别：IO / payload 解析类
+    """
+    write_text(path, value, serializer=serialize_for_json)
 
 
 def _state_config(config: dict) -> dict:
+    """Extract state-management configuration from the loaded pipeline config.
+
+    类别：数据管理类
+    """
     if not isinstance(config, dict):
         return {}
     cfg = config.get("state_management", {}) or config.get("state_config", {}) or {}
@@ -180,6 +180,10 @@ def _state_config(config: dict) -> dict:
 
 
 def _graph_artifact_path(state_config: dict, config: dict) -> str:
+    """Resolve where the representation graph artifact should be stored.
+
+    类别：数据管理类
+    """
     graph_dir = state_config.get("graph-dir", "/app/data/graph")
     version_name = config.get("version_name", "test")
     graph_name = state_config.get("graph-name") or version_name
@@ -188,6 +192,10 @@ def _graph_artifact_path(state_config: dict, config: dict) -> str:
 
 
 def _graph_manifest_path(state_config: dict, config: dict) -> str:
+    """Resolve where graph metadata should be stored.
+
+    类别：数据管理类
+    """
     graph_dir = state_config.get("graph-dir", "/app/data/graph")
     version_name = config.get("version_name", "test")
     graph_name = state_config.get("graph-name") or version_name
@@ -196,6 +204,10 @@ def _graph_manifest_path(state_config: dict, config: dict) -> str:
 
 
 def _graph_config(config: dict) -> dict:
+    """Extract graph-related configuration with safe defaults.
+
+    类别：数据管理类
+    """
     if not isinstance(config, dict):
         return {}
     graph_cfg = config.get("graph_construction")
@@ -208,6 +220,10 @@ def _graph_config(config: dict) -> dict:
 
 
 def _clean_graph_copy(graph):
+    """Return a graph object prepared for durable serialization.
+
+    类别：数据管理类
+    """
     graph_copy = graph.copy()
     allowed_types = (str, int, float, bool)
     for v in graph_copy.vs:
@@ -222,15 +238,27 @@ def _clean_graph_copy(graph):
 
 
 def _file_has_content(path: str) -> bool:
+    """Check whether a path exists and contains data.
+
+    类别：数据管理类
+    """
     return os.path.exists(path) and os.path.getsize(path) > 0
 
 
 def _resolve_graph_paths(config: dict):
+    """Resolve graph artifact and manifest paths from the config.
+
+    类别：数据管理类
+    """
     state_cfg = _state_config(config)
     return _graph_artifact_path(state_cfg, config), _graph_manifest_path(state_cfg, config)
 
 
 def _merge_config_from_manifest(config: dict, manifest_path: str):
+    """Merge graph metadata from a manifest into the current config.
+
+    类别：数据管理类
+    """
     merged_config = config
     if not _file_has_content(manifest_path):
         return merged_config
@@ -252,6 +280,10 @@ def _merge_config_from_manifest(config: dict, manifest_path: str):
 
 
 def _load_representation_graph(config: dict, graph_path: str, manifest_path: str):
+    """Load a persisted representation graph and merge its metadata.
+
+    类别：数据管理类
+    """
     merged_config = _merge_config_from_manifest(config, manifest_path)
 
     if _file_has_content(graph_path):
@@ -265,10 +297,18 @@ def _load_representation_graph(config: dict, graph_path: str, manifest_path: str
 
 
 def get(key):
+    """Read an object from this distribution local state cache.
+
+    类别：数据管理类
+    """
     return STATE_CACHE.get(key)
 
 
 def _as_igraph(graph):
+    """Return the igraph object behind a RepresentationGraph-like wrapper.
+
+    类别：数据管理类
+    """
     if hasattr(graph, "get_graph"):
         return graph.get_graph()
     if hasattr(graph, "graph"):
@@ -277,6 +317,10 @@ def _as_igraph(graph):
 
 
 def _root_count(dyn_roots) -> int:
+    """Count dynamic random-walk roots across root groups.
+
+    类别：数据管理类
+    """
     if isinstance(dyn_roots, set):
         return len(dyn_roots)
     if isinstance(dyn_roots, dict):
@@ -285,7 +329,10 @@ def _root_count(dyn_roots) -> int:
 
 
 def _extract_root_names(graph, roots):
-    """Store both indices and names so roots can be restored after GraphML reload."""
+    """Store both indices and names so roots can be restored after GraphML reload.
+
+    类别：数据管理类
+    """
     i_graph = _as_igraph(graph)
     indices = []
     names = []
@@ -310,6 +357,10 @@ def _extract_root_names(graph, roots):
 
 
 def _serialize_dyn_roots(graph) -> dict:
+    """Serialize dynamic random-walk roots for cross-pod handoff.
+
+    类别：数据管理类
+    """
     dyn_roots = getattr(graph, "dyn_roots", None)
 
     if isinstance(dyn_roots, set):
@@ -340,6 +391,10 @@ def _serialize_dyn_roots(graph) -> dict:
 
 
 def _restore_root_set(graph, root_payload: dict) -> set:
+    """Restore a set of graph root vertices from serialized root names.
+
+    类别：数据管理类
+    """
     i_graph = _as_igraph(graph)
     name_to_index = {}
     try:
@@ -369,6 +424,10 @@ def _restore_root_set(graph, root_payload: dict) -> set:
 
 
 def _restore_dyn_roots(graph, dyn_roots_payload: Optional[dict]) -> bool:
+    """Restore dynamic random-walk root groups onto a loaded graph.
+
+    类别：数据管理类
+    """
     if not isinstance(dyn_roots_payload, dict):
         return False
 
@@ -391,6 +450,10 @@ def _restore_dyn_roots(graph, dyn_roots_payload: Optional[dict]) -> bool:
 
 
 def _write_graph_manifest(path: str, config: dict):
+    """Write metadata needed to reload graph artifacts consistently.
+
+    类别：数据管理类
+    """
     manifest = {
         "graph_class": "RepresentationGraph",
         "graph_config": _graph_config(config),
@@ -407,6 +470,10 @@ def _write_graph_manifest(path: str, config: dict):
 
 
 def _write_graphml_atomic(graph, graph_path: str, config: dict):
+    """Write graphml through a temporary file and atomically replace the target.
+
+    类别：数据管理类
+    """
     graph_dir = os.path.dirname(graph_path)
     if graph_dir:
         os.makedirs(graph_dir, exist_ok=True)
@@ -427,6 +494,7 @@ def _make_graph_handoff(config: dict, graph, window_index) -> dict:
     Python-side incremental state, so the random-walk pod must receive it
     explicitly. Otherwise it may rebuild roots from the whole graph and walk
     far more nodes than intended.
+    类别：数据管理类
     """
     graph_path = os.path.join(GRAPH_SNAPSHOT_DIR, f"graph_window_{window_index}.graphml")
     _write_graphml_atomic(graph, graph_path, config)
@@ -448,7 +516,10 @@ def _make_graph_handoff(config: dict, graph, window_index) -> dict:
 
 
 def _normalize_graph_handoff(payload) -> Tuple[str, Optional[dict], bool]:
-    """Accept the new JSON handoff and legacy string graph-path buffers."""
+    """Accept the new JSON handoff and legacy string graph-path buffers.
+
+    类别：数据管理类
+    """
     if isinstance(payload, dict):
         graph_path = payload.get("graph_path") or payload.get("path")
         if not isinstance(graph_path, str) or not graph_path.strip():
@@ -462,6 +533,10 @@ def _normalize_graph_handoff(payload) -> Tuple[str, Optional[dict], bool]:
 
 
 def _cleanup_graph_handoff(payload):
+    """Remove temporary graph handoff artifacts after a downstream step consumes them.
+
+    类别：数据管理类
+    """
     if not isinstance(payload, dict) or not payload.get("delete_graph_snapshot"):
         return
 
@@ -479,6 +554,10 @@ def _cleanup_graph_handoff(payload):
 
 
 def _bootstrap_dyn_roots_if_empty(graph, config):
+    """Initialize random-walk roots from the full graph when allowed and necessary.
+
+    类别：数据管理类
+    """
     if not hasattr(graph, "get_graph") or not hasattr(graph, "dyn_roots"):
         print("[bootstrap] graph or dyn_roots missing", file=sys.stderr)
         return
@@ -536,6 +615,10 @@ def _bootstrap_dyn_roots_if_empty(graph, config):
 
 
 def ensure_representation_graph(config: dict, force_reload: bool = False):
+    """Load or initialize the representation graph for graph construction.
+
+    类别：数据管理类
+    """
     current = get("representation_graph")
     if current is not None and hasattr(current, "build_relation") and not force_reload:
         print("[INFO] graph already cached", file=sys.stderr)
@@ -556,6 +639,10 @@ def ensure_representation_graph(config: dict, force_reload: bool = False):
 
 
 def load_graph_from_path(config: dict, graph_path: str, persist_cache: bool = False):
+    """Load a graph from an explicit graph artifact path.
+
+    类别：数据管理类
+    """
     manifest_path = get_manifest_file(graph_path)
     graph = _load_representation_graph(config, graph_path, manifest_path)
 
@@ -566,6 +653,10 @@ def load_graph_from_path(config: dict, graph_path: str, persist_cache: bool = Fa
 
 
 def update(key, value):
+    """Update local state and persist durable artifacts when required.
+
+    类别：数据管理类
+    """
     STATE_CACHE[key] = value
     _persist_state_cache()
 
@@ -604,17 +695,28 @@ def update(key, value):
 
 
 def incremental_graph_construction(config, processed_data):
+    """Update the representation graph from one incremental processed-data window.
+
+    类别：业务包装类
+    """
     graph = ensure_representation_graph(config, force_reload=True)
     return graph_construction(graph, processed_data)
 
 
 def batch_graph_construction(config, processed_data):
+    """Build or update the representation graph for batch mode.
+
+    类别：业务包装类
+    """
     graph = ensure_representation_graph(config)
     return graph_construction(graph, processed_data)
 
 
-# @ccdecorator
 def graph_construction(graph, processed_data):
+    """Build or update a representation graph from processed records.
+
+    类别：业务包装类
+    """
     if not isinstance(processed_data, pd.DataFrame):
         raise ValueError("processed_data must be a pandas DataFrame for graph construction.")
     if not hasattr(graph, "build_relation"):
@@ -633,6 +735,10 @@ def graph_construction(graph, processed_data):
 
 
 def incremental_random_walk(config, graph_handoff):
+    """Run random walk after loading graph state from an incremental handoff.
+
+    类别：业务包装类
+    """
     graph_path, dyn_roots_payload, _delete_snapshot = _normalize_graph_handoff(graph_handoff)
     graph = load_graph_from_path(config, graph_path)
 
@@ -648,12 +754,19 @@ def incremental_random_walk(config, graph_handoff):
 
 
 def batch_random_walk(config):
+    """Run random walk from the batch representation graph state.
+
+    类别：业务包装类
+    """
     graph = ensure_representation_graph(config)
     return random_walk(graph, config, allow_full_bootstrap=True)
 
 
-# @ccdecorator
 def random_walk(graph, config, allow_full_bootstrap: bool = False):
+    """Generate random-walk sequences from the current representation graph.
+
+    类别：业务包装类
+    """
     has_get_graph = hasattr(graph, "get_graph")
     has_dyn_roots = hasattr(graph, "dyn_roots")
 
@@ -672,17 +785,20 @@ def random_walk(graph, config, allow_full_bootstrap: bool = False):
 
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
+    """Write final output or EOS markers before the distribution process exits.
+
+    类别：Pod / Argo 入口类
+    """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
 
 def run_argo_batch(mode: str, function: str, processed_data: str, output_path: str = "-"):
+    """Dispatch a batch Argo invocation to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["mode"] = mode
     config["function"] = function
@@ -701,6 +817,10 @@ def run_argo_batch(mode: str, function: str, processed_data: str, output_path: s
 
 
 def run_argo_incremental(function: str, output_path: str = "-"):
+    """Dispatch an incremental worker loop to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["function"] = function
 

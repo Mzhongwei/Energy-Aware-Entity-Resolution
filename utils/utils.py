@@ -12,6 +12,9 @@ import pandas as pd
 from copy import deepcopy
 from datetime import datetime
 
+from utils.buffers import write_eos
+from utils.pipeline_io import serialize_for_json, write_step_output
+
 try:
     from sklearn.decomposition import PCA
 except ModuleNotFoundError:
@@ -35,6 +38,7 @@ CG_METHOD_ALIASES = {
 
 OUTPUT_CODE = "%Y%m%d_%H%M%S"
 
+### check configuration ###
 def _merge_with_defaults(user_config, default_config):
     """
     The default configuration is recursively merged into the user configuration, which takes precedence.
@@ -226,6 +230,7 @@ def check_config_validity(config):
 
     return config
 
+### data preparation ###
 def convert_token_value(original_value):
     """
     Convert a cell value into a clean string. Try to evaluate literals using ast.literal_eval first
@@ -333,3 +338,4 @@ def parse_idx_suffix(word: str, prefix: str = "idx__"):
         return int(float(suffix))
     except Exception:
         return None
+

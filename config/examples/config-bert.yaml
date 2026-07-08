@@ -6,16 +6,6 @@ trainset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/train.csv"
 testset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/test.csv"
 evalset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/valid.csv"
 
-# incremental mode
-# meta_path: list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
-meta_path: ["name", "rid"]
-
-kafka:
-  topicid: "entity_resolution_process"
-  groupid: "er_group"
-  bootstrap_servers: "localhost"
-  port: 9092
-
 # STATE MANAGEMENT
 state_management:
 # bert mode

@@ -10,7 +10,7 @@ from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
 from utils.buffers import load_earliest_buffer, write_buffer, get_earliest_window_index, wait_for_buffer, write_eos, delete_earliest_buffer_file
-from utils.codecarbon import ccdecorator
+from utils.pipeline_io import serialize_for_json, write_step_output
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
 
@@ -20,6 +20,10 @@ BUFFER_PATH = "/app/data/buffers/"
 stop_requested = False
 
 def handle_sigterm(signum, frame):
+    """Record termination requests so long-running buffer loops can stop cleanly.
+
+    类别：Pod / Argo 入口类
+    """
     global stop_requested
     stop_requested = True
 
@@ -27,9 +31,17 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
 def _log(message: str):
+    """Write distribution diagnostics to stderr.
+
+    类别：诊断和小工具类
+    """
     print(message, file=sys.stderr)
 
 def load_config(config_path: str = CONFIG_PATH):
+    """Load the mounted pipeline YAML config into a dictionary.
+
+    类别：IO / payload 解析类
+    """
     if not os.path.exists(config_path):
         return {}
     yaml = YAML(typ="safe")
@@ -39,6 +51,10 @@ def load_config(config_path: str = CONFIG_PATH):
 
 
 def safe_read_csv(path):
+    """Read a CSV file when available, otherwise return an empty DataFrame.
+
+    类别：IO / payload 解析类
+    """
     if not path:
         return pd.DataFrame()
     if not os.path.exists(path):
@@ -47,6 +63,10 @@ def safe_read_csv(path):
 
 
 def _as_bool(value, default: bool = False) -> bool:
+    """Convert common string and numeric values into a boolean flag.
+
+    类别：诊断和小工具类
+    """
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -57,12 +77,20 @@ def _as_bool(value, default: bool = False) -> bool:
 
 
 def _counter_path_for_version(version_name: str) -> str:
+    """Resolve the persistent record-id counter path for a config version.
+
+    类别：数据管理类
+    """
     save_dir = os.path.join("data", "ids")
     os.makedirs(save_dir, exist_ok=True)
     return os.path.join(save_dir, f"{version_name}.txt")
 
 
 def _maybe_reset_rid_counter(config: dict, force = False) -> str:
+    """Reset or preserve the record-id counter according to normalization config.
+
+    类别：数据管理类
+    """
     norm_cfg = config.get("normalization", {}) if isinstance(config, dict) else {}
     norm_cfg = norm_cfg if isinstance(norm_cfg, dict) else {}
     reset_counter = _as_bool(norm_cfg.get("reset_counter_on_start", False), default=False)
@@ -77,6 +105,10 @@ def _maybe_reset_rid_counter(config: dict, force = False) -> str:
 
 
 def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
+    """Select the raw DataFrame used for embedding normalization from available inputs.
+
+    类别：其他类
+    """
     if isinstance(raw_data, dict):
         if isinstance(raw_data.get("data"), pd.DataFrame):
             return raw_data["data"]
@@ -109,17 +141,11 @@ def _resolve_embedding_raw_df(config: dict, raw_data: dict | DataFrame):
     return pd.DataFrame()
 
 
-def serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    return obj
-
-
 def _sample_records(df: pd.DataFrame, limit: int = 3):
+    """Return a compact preview of records for normalization diagnostics.
+
+    类别：诊断和小工具类
+    """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
     columns = [col for col in ("rid",) if col in df.columns]
@@ -127,8 +153,11 @@ def _sample_records(df: pd.DataFrame, limit: int = 3):
         columns = list(df.columns[: min(len(df.columns), 5)])
     return df.loc[:, columns].head(limit).to_dict(orient="records")
 
-# @ccdecorator
 def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = False):
+    """Normalize raw records and prepare processed records for downstream steps.
+
+    类别：业务包装类
+    """
     _log(
         f"[normalization_distribution] mode={config.get('mode')} is_training={is_training} "
         f"raw_type={type(raw_data).__name__}"
@@ -169,21 +198,28 @@ def normalization(config: dict, raw_data: dict | DataFrame, is_training: bool = 
 
 
 def load_raw_data(raw_data_value: str) -> dict | DataFrame:
+    """Load raw input data from a path or inline payload.
+
+    类别：IO / payload 解析类
+    """
     if os.path.isfile(raw_data_value) and raw_data_value.lower().endswith(".csv"):
         return {"data": pd.read_csv(raw_data_value)}
     return {"data": pd.DataFrame([{"value": raw_data_value}])}
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
+    """Write final output or EOS markers before the distribution process exits.
+
+    类别：Pod / Argo 入口类
+    """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
-def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_source_b: str = "",):
+def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_source_b: str = "", output_path: str = "-"):
+    """Dispatch a batch Argo invocation to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["mode"] = mode
     if isinstance(data_source_a, str) and data_source_a.strip():
@@ -196,10 +232,16 @@ def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_
     else:
         raw_input_value = raw_data_value
     output = normalization(config=config, raw_data=load_raw_data(raw_input_value), is_training=is_training)
-    _exit(output=output)
+    _exit(output_path=output_path, output=output)
 
-def run_argo_incremental():
+def run_argo_incremental(mode: str | None = None):
+    """Dispatch an incremental worker loop to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
+    if mode:
+        config["mode"] = mode
 
     load_buffer_path = BUFFER_PATH + "raw_data"
     print(f"[normalization_distribution] waiting for raw buffer at {load_buffer_path}", file=sys.stderr)
@@ -250,13 +292,15 @@ if __name__ == "__main__":
     parser.add_argument("--data_source_A", default="")
     parser.add_argument("--data_source_B", default="")
     parser.add_argument("--function", default="")
+    parser.add_argument("--output", default="-")
     args = parser.parse_args()
     if "inc" in args.mode:
-        run_argo_incremental()
+        run_argo_incremental(mode=args.mode)
     else:
         run_argo_batch(
             mode=args.mode,
             raw_data_value=args.raw_data,
             data_source_a=args.data_source_A,
             data_source_b=args.data_source_B,
+            output_path=args.output,
         )

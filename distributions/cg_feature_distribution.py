@@ -10,7 +10,7 @@ from ruamel.yaml import YAML
 
 from pipeline.cg_feature_extraction import compute_features
 from utils.buffers import delete_earliest_buffer_file, get_earliest_window_index, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
-from utils.codecarbon import ccdecorator
+from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 BUFFER_PATH = "/app/data/buffers/"
@@ -19,6 +19,10 @@ BUFFER_PATH = "/app/data/buffers/"
 stop_requested = False
 
 def handle_sigterm(signum, frame):
+    """Record termination requests so long-running buffer loops can stop cleanly.
+
+    类别：Pod / Argo 入口类
+    """
     global stop_requested
     stop_requested = True
 
@@ -27,6 +31,10 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
 def load_config(config_path: str = CONFIG_PATH):
+    """Load the mounted pipeline YAML config into a dictionary.
+
+    类别：IO / payload 解析类
+    """
     if not os.path.exists(config_path):
         return {}
     yaml = YAML(typ="safe")
@@ -36,6 +44,10 @@ def load_config(config_path: str = CONFIG_PATH):
 
 
 def safe_read_csv(path):
+    """Read a CSV file when available, otherwise return an empty DataFrame.
+
+    类别：IO / payload 解析类
+    """
     if not path:
         return pd.DataFrame()
     if not os.path.exists(path):
@@ -43,44 +55,19 @@ def safe_read_csv(path):
     return pd.read_csv(path)
 
 
-def serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, dict):
-        return {k: serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [serialize_for_json(item) for item in obj]
-    return obj
-
-
-def deserialize_from_json(obj):
-    if isinstance(obj, dict):
-        if obj.get("__dataframe__"):
-            return pd.DataFrame(obj.get("data", []))
-        return {k: deserialize_from_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [deserialize_from_json(item) for item in obj]
-    return obj
-
-
 def _parse_json_payload(content: str):
-    stripped = content.strip()
-    if not stripped:
-        return None
-    
-    for line in reversed([ln.strip() for ln in stripped.splitlines() if ln.strip()]):
-        try:
-            return deserialize_from_json(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    """Parse JSON payloads written by upstream steps, including serialized DataFrames.
 
-    try:
-        return deserialize_from_json(json.loads(stripped))
-    except json.JSONDecodeError:
-        return None
+    类别：IO / payload 解析类
+    """
+    return parse_json_payload(content, deserializer=deserialize_from_json)
 
 
 def _coerce_processed_data_to_df(processed_data) -> DataFrame:
+    """Normalize processed-data payload variants into a pandas DataFrame.
+
+    类别：IO / payload 解析类
+    """
     if isinstance(processed_data, pd.DataFrame):
         return processed_data
 
@@ -105,18 +92,20 @@ def _coerce_processed_data_to_df(processed_data) -> DataFrame:
     return pd.DataFrame()
 
 def _exit(output_path=None, output=None, output_buffer_path=None):
+    """Write final output or EOS markers before the distribution process exits.
+
+    类别：Pod / Argo 入口类
+    """
     if output_buffer_path:
         write_eos(output_buffer_path + "_construction", reason=f"timeout_no_initial_buffer")
         write_eos(output_buffer_path + "_candidate", reason=f"timeout_no_initial_buffer")
-    payload = json.dumps(serialize_for_json(output))
-    if output_path and output_path != "-":
-        with open(output_path, "w", encoding="utf-8") as file_handle:
-            file_handle.write(payload)
-    else:
-        print(payload)
+    write_step_output(output_path, output, serializer=serialize_for_json)
 
-# @ccdecorator
 def cg_feature_extraction(config, processed_data):
+    """Compute candidate-generation blocking features from processed records.
+
+    类别：业务包装类
+    """
     print("[cg_feature_extraction]", file=sys.stderr)
     processed_df = _coerce_processed_data_to_df(processed_data)
     if not processed_df.empty:
@@ -130,6 +119,10 @@ def cg_feature_extraction(config, processed_data):
 
 
 def load_processed_data(processed_data_value: str) -> dict | DataFrame:
+    """Load processed data from a file path or serialized inline payload.
+
+    类别：IO / payload 解析类
+    """
     if processed_data_value.startswith("@"):
         argfile_path = processed_data_value[1:]
         if os.path.isfile(argfile_path):
@@ -156,6 +149,10 @@ def load_processed_data(processed_data_value: str) -> dict | DataFrame:
     return processed_data_value
 
 def run_argo_batch(mode: str, processed_data_value: str, output_path: str = "-"):
+    """Dispatch a batch Argo invocation to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
     config["mode"] = mode
 
@@ -164,6 +161,10 @@ def run_argo_batch(mode: str, processed_data_value: str, output_path: str = "-")
     return
 
 def run_argo_incremental(output_path: str = "-"):
+    """Dispatch an incremental worker loop to the requested business function.
+
+    类别：Pod / Argo 入口类
+    """
     config = load_config()
 
     load_buffer_path = BUFFER_PATH + "processed_data_feature"

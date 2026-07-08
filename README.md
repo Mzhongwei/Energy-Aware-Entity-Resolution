@@ -53,22 +53,12 @@ The pipeline passes a shared runtime dictionary through the stages. Typical valu
 
 Stateful stages use the in-memory objects in [models](models) and [pipeline](pipeline), then persist or reuse them as needed across runs.
 
-## CodeCarbon Reporting
-
-Pipeline stages are decorated with the shared CodeCarbon helper in `utils/codecarbon.py`. Each run writes a raw per-pod CSV into shared storage and then aggregates the workflow into a summary CSV that includes:
-
-- emissions
-- total energy consumed
-- CPU, GPU, and RAM energy
-- CPU, GPU, and RAM power
-
-The Argo workflow mounts the report path under `/app/reports/codecarbon/<workflow-name>/`.
-
 ## Useful Entry Points
 
 - [distributions/normalization_distribution.py](distributions/normalization_distribution.py)
 - [distributions/graph_randomwalk.py](distributions/graph_randomwalk.py)
-- [distributions/embedding_calculating.py](distributions/embedding_calculating.py)
+- [distributions/embedding_training_entry.py](distributions/embedding_training_entry.py)
+- [distributions/calculating_similarity_entry.py](distributions/calculating_similarity_entry.py)
 - [distributions/featureindex_candidate.py](distributions/featureindex_candidate.py)
 - [distributions/decision_evaluation.py](distributions/decision_evaluation.py)
 - [distributions/bert_distribution.py](distributions/bert_distribution.py)

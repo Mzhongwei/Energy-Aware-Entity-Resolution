@@ -5,7 +5,6 @@ prometheus_client==0.21.1
 annotated-types==0.7.0
 markdown-it-py==3.0.0
 pyJoules==0.5.1
-codecarbon==3.0.2
 experiment-impact-tracker==0.1.8
 faiss-cpu==1.10.0
 gensim==4.3.3
