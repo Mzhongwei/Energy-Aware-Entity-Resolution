@@ -339,3 +339,9 @@ def parse_idx_suffix(word: str, prefix: str = "idx__"):
     except Exception:
         return None
 
+
+def state_config(config: dict) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    value = config.get("state_management", {}) or config.get("state_config", {}) or {}
+    return value if isinstance(value, dict) else {}

@@ -1,3 +1,4 @@
+### Mandatory
 mode: "embedding-training-inference-evaluation"
 version_name: "embeddingtest"
 
@@ -36,6 +37,7 @@ state_management:
   predicted_match-dir: "/app/data/predicted"
   predicted_match-name: ""
 
+### Optional
 # pipeline
 normalization:
 

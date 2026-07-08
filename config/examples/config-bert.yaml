@@ -1,3 +1,4 @@
+### Mandatory
 mode: "bert-training-inference-b_evaluation"
 version_name: "spa"
 
@@ -20,6 +21,7 @@ state_management:
   predicted_match-dir: "/app/data/predicted"
   predicted_match-name: ""
 
+### Optional
 # pipeline
 normalization:
 

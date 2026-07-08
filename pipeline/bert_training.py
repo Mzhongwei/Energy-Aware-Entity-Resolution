@@ -22,6 +22,7 @@ def train_model(configuration, processed_data):
     :param configuration: Description
     :param processed_data: {"test": df.DataFrame, "eval": df.DataFrame }
     """
+    configuration = configuration.get('bert_training', {})
     set_seed(configuration.get("seed", 42))
 
     model_choice = configuration.get("model", "bert")
