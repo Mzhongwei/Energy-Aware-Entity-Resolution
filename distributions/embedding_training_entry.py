@@ -5,7 +5,7 @@ import sys
 
 from pipeline.embedding_training import train_embeddings
 from state_io.embedding_state import ensure_embedding_model, get, update
-from utils.buffers import (
+from utils.pipeline_io import (
     delete_earliest_buffer_file,
     get_earliest_window_index,
     load_earliest_buffer,
@@ -13,7 +13,7 @@ from utils.buffers import (
     write_buffer,
     write_eos,
 )
-from utils.config_io import load_config
+from utils.pipeline_io import load_config
 from utils.pipeline_io import serialize_for_json, write_step_output
 from embedding_common import load_input_payload, log, safe_len
 
@@ -45,7 +45,13 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     """
     if output_buffer_path:
         write_eos(output_buffer_path, reason="timeout_no_initial_buffer")
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 
 def run_embedding_training(config, sequences, force_reload: bool = False):

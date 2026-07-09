@@ -2,19 +2,26 @@ import argparse
 import signal
 import sys
 
-from utils.config_io import load_config
-from utils.buffers import wait_for_buffer, write_eos, load_earliest_buffer, get_earliest_window_index, write_buffer, delete_earliest_buffer_file
+from utils.pipeline_io import (
+    delete_earliest_buffer_file,
+    get_buffer_directory,
+    get_earliest_window_index,
+    load_config,
+    load_earliest_buffer,
+    wait_for_buffer,
+    write_buffer,
+    write_eos,
+)
 from pipeline.normalization import index_normalization
 """
 mode: incremental + embedding
+input: raw data[buffer]
+output: processed data for feature tasks[buffer], processed data for graph tasks[buffer]
 """
 
-BUFFER_PATH = "/app/data/buffers/"
-# input 
-RAW_BUFFER = f"{BUFFER_PATH}/incremental/embedding/raw_data"
-# output
-GRAPH_BUFFER = f"{BUFFER_PATH}/incremental/embedding/processed_data_graph"
-FEATURE_BUFFER = f"{BUFFER_PATH}/incremental/embedding/processed_data_feature"
+INPUT_DATA_TYPE = "raw_data"
+GRAPH_OUTPUT_DATA_TYPE = "processed_data_graph"
+FEATURE_OUTPUT_DATA_TYPE = "processed_data_feature"
 
 stop_requested = False
 
@@ -32,13 +39,19 @@ signal.signal(signal.SIGINT, handle_sigterm)
 def main():
     """
     k8s jobs entry for mode [incremental][embedding]
-    We don't accecpt training in embedding mode
+    We don't accecpt training in incremental embedding mode
     """
     # parse config
     parser = argparse.ArgumentParser(description="Worker entry for embedding normalization.")
     parser.add_argument("--config", default="/app/config/examples/config-embedding.yaml")
-    parser.add_argument("--mode", default="embedding-inference-inc")
+    parser.add_argument("--workload", default="default")
     args = parser.parse_args()
+    # input 
+    RAW_BUFFER = get_buffer_directory(args.workload, INPUT_DATA_TYPE)
+    # output
+    GRAPH_BUFFER = get_buffer_directory(args.workload, GRAPH_OUTPUT_DATA_TYPE)
+    FEATURE_BUFFER = get_buffer_directory(args.workload, FEATURE_OUTPUT_DATA_TYPE)
+
     # load configuration
     config = load_config(args.config)
     

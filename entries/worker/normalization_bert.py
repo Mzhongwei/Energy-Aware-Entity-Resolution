@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 """
+disabled
 mode: incremental + bert
 to complete
 """

@@ -12,7 +12,7 @@ import pandas as pd
 from copy import deepcopy
 from datetime import datetime
 
-from utils.buffers import write_eos
+from utils.pipeline_io import write_eos
 from utils.pipeline_io import serialize_for_json, write_step_output
 
 try:

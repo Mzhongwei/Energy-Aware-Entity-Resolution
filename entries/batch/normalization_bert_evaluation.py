@@ -1,22 +1,19 @@
 import argparse
-import os
-
 import pandas as pd
 
-from utils.config_io import load_config
+from utils.pipeline_io import load_config
 from pipeline.normalization import sequence_generating_m1
-from utils.pipeline_io import write_step_output
+from utils.pipeline_io import get_transfer_data_directory, write_step_output
 """
 mode: batch + bert
 """
 
-TRANSFER_DATA_DIRECTORY = "batch/bert/"
-OUTPUT_DIRECTORY = "b_evaluation_processed_data"
+OUTPUT_DATA_TYPE = "bert/b_evaluation_processed_data"
 
 def main():
     parser = argparse.ArgumentParser(description="Batch entry for BERT normalization. Preparing data for b_evaluation.")
     parser.add_argument("--config", default="/app/config/examples/config-bert.yaml")
-    parser.add_argument("--run_dir", default="/app/data/runs/default")
+    parser.add_argument("--workload", default="default")
     args = parser.parse_args()
     config = load_config(args.config)
 
@@ -28,8 +25,12 @@ def main():
             raw_data[key] = sequence_generating_m1(df)
     processed_data = raw_data
     # write transfer data
-    output_dir = os.path.join(args.run_dir, TRANSFER_DATA_DIRECTORY, OUTPUT_DIRECTORY)
-    write_step_output(output_path=os.path.join(output_dir, "test.csv"), output=processed_data["test"])
+    write_step_output(
+        directory=get_transfer_data_directory(args.workload, OUTPUT_DATA_TYPE),
+        file_name="test",
+        extension="csv",
+        output=processed_data["test"],
+    )
 
 if __name__ == "__main__":
     main()

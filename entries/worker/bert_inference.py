@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -6,9 +7,12 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from utils.config_io import load_config
+from utils.pipeline_io import load_config
 from utils.pipeline_io import serialize_for_json, write_step_output
 
+"""
+disabled
+"""
 
 def run(config: dict):
     pass
@@ -24,7 +28,10 @@ def main():
     config = load_config(args.config)
     config["mode"] = args.mode
     output = run(config)
-    write_step_output(args.output, output, serializer=serialize_for_json)
+    output_directory = os.path.dirname(args.output) or "."
+    output_base = os.path.basename(args.output)
+    file_name, extension = os.path.splitext(output_base)
+    write_step_output(output_directory, file_name, extension.lstrip("."), output, serializer=serialize_for_json)
 
 
 if __name__ == "__main__":

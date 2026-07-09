@@ -9,7 +9,7 @@ from pandas import DataFrame
 from ruamel.yaml import YAML
 
 from pipeline.cg_feature_extraction import compute_features
-from utils.buffers import delete_earliest_buffer_file, get_earliest_window_index, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
+from utils.pipeline_io import delete_earliest_buffer_file, get_earliest_window_index, load_earliest_buffer, write_buffer, write_eos, wait_for_buffer
 from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
@@ -99,7 +99,13 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     if output_buffer_path:
         write_eos(output_buffer_path + "_construction", reason=f"timeout_no_initial_buffer")
         write_eos(output_buffer_path + "_candidate", reason=f"timeout_no_initial_buffer")
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 def cg_feature_extraction(config, processed_data):
     """Compute candidate-generation blocking features from processed records.

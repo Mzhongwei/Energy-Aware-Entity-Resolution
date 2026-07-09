@@ -260,7 +260,13 @@ def run_argo_once(mode: str, processed_data_value: str, output_path: str = "-"):
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 
 if __name__ == "__main__":

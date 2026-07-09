@@ -319,6 +319,7 @@ TASKS = {
         "output": [],
         "func": feature_index_construction
     },
+    # 这里有点错 但顺序跑的时候不影响 candidate_enumeration 在 feature_index_construction 之后
     "candidate_enumeration": {
         "deps": ["cg_feature_extraction"],
         "input": ["cg_feature", "state_manager"],

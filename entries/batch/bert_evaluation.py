@@ -1,13 +1,15 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
 
 from utils.pipeline_io import load_processed_data
-from utils.config_io import load_config
+from utils.pipeline_io import load_config
 from utils.pipeline_io import serialize_for_json, write_step_output
 
 """
+disabled
 To complete
 """
 
@@ -31,7 +33,10 @@ def main():
         raise ValueError("BERT evaluation expects processed_data with a 'test' dataset.")
 
     output = run(config, processed_data)
-    write_step_output(args.output, output, serializer=serialize_for_json)
+    output_directory = os.path.dirname(args.output) or "."
+    output_base = os.path.basename(args.output)
+    file_name, extension = os.path.splitext(output_base)
+    write_step_output(output_directory, file_name, extension.lstrip("."), output, serializer=serialize_for_json)
 
 
 if __name__ == "__main__":

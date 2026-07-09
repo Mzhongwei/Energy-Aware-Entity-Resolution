@@ -11,7 +11,7 @@ from confluent_kafka import Consumer, KafkaException, KafkaError, Producer as Ka
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from utils.write_log import write_log
-from utils.buffers import clear_buffer_directory, write_buffer, write_eos
+from utils.pipeline_io import clear_buffer_directory, write_buffer, write_eos
 
 
 ACTIVE_JAVA_PROC = None

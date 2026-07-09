@@ -11,7 +11,7 @@ from ruamel.yaml import YAML
 from models.representation_graph import RepresentationGraph
 from pipeline.graph_construction import dyn_graph_generation
 from pipeline.random_walk import dynrandom_walks_generation
-from utils.buffers import (
+from utils.pipeline_io import (
     get_earliest_window_index,
     load_earliest_buffer,
     write_buffer,
@@ -791,7 +791,13 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 
 def run_argo_batch(mode: str, function: str, processed_data: str, output_path: str = "-"):

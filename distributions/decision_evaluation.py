@@ -14,7 +14,7 @@ from models.embedding_model import EmbeddingModel
 from models.similarity_graph import SimilarityGraph
 from pipeline.decision_making import decide_matches
 from pipeline.evaluation import compare_ground_truth
-from utils.buffers import _delete_file_if_exists, load_earliest_buffer, wait_for_buffer, write_buffer, write_eos, delete_earliest_buffer_file, get_earliest_window_index, get_embedding_buffer_file
+from utils.pipeline_io import _delete_file_if_exists, load_earliest_buffer, wait_for_buffer, write_buffer, write_eos, delete_earliest_buffer_file, get_earliest_window_index, get_embedding_buffer_file
 from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output, write_text
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
@@ -535,7 +535,13 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 def decision_making_incremental(config, matching_pairs, embedding_path):
     """Run decision making for one incremental window using a buffered embedding model.
@@ -631,7 +637,13 @@ def run_argo_once(mode: str,function: str,matching_pairs: str = "", output_path:
     else:
         raise ValueError(f"Unsupported function: {selected_function}")
 
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 def run_argo_incremental(output_path: str = "-",):
     """Dispatch an incremental worker loop to the requested business function.

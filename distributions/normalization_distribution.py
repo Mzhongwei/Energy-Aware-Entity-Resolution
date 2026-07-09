@@ -10,7 +10,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 from pandas import DataFrame
 from ruamel.yaml import YAML
-from utils.buffers import load_earliest_buffer, write_buffer, get_earliest_window_index, wait_for_buffer, write_eos, delete_earliest_buffer_file
+from utils.pipeline_io import load_earliest_buffer, write_buffer, get_earliest_window_index, wait_for_buffer, write_eos, delete_earliest_buffer_file
 from utils.pipeline_io import serialize_for_json, write_step_output
 
 from pipeline.normalization import index_normalization, sequence_generating_m1
@@ -214,7 +214,13 @@ def _exit(output_path=None, output=None, output_buffer_path=None):
     """
     if output_buffer_path:
         write_eos(output_buffer_path, reason=f"timeout_no_initial_buffer")
-    write_step_output(output_path, output, serializer=serialize_for_json)
+    write_step_output(
+        os.path.dirname(output_path) or ".",
+        os.path.splitext(os.path.basename(output_path))[0],
+        os.path.splitext(os.path.basename(output_path))[1].lstrip("."),
+        output,
+        serializer=serialize_for_json,
+    )
 
 def run_argo_batch(mode: str,raw_data_value: str, data_source_a: str = "", data_source_b: str = "", output_path: str = "-"):
     """Dispatch a batch Argo invocation to the requested business function.
