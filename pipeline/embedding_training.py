@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Iterable, List, Optional, Sequence
 
 from models.embedding_model import EmbeddingModel
@@ -52,8 +53,16 @@ def retrain_embeddings(config, model: Optional[EmbeddingModel], sequences) -> Em
 train_embeddings = retrain_embeddings
 
 
+def load_or_create_model(config, model_path: str) -> EmbeddingModel:
+    """Load a persisted embedding model if present, else initialize a fresh one."""
+    if os.path.isfile(model_path):
+        return EmbeddingModel.load(model_path)
+    return initialize_embeddings(config)
+
+
 __all__ = [
     "initialize_embeddings",
     "retrain_embeddings",
     "train_embeddings",
+    "load_or_create_model",
 ]

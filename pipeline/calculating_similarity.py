@@ -18,8 +18,8 @@ def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> Li
 
     flattened_pairs: List[Tuple[str, str]] = []
     for pair in candidate_pairs:
-        if not isinstance(pair, tuple) or len(pair) != 2:
-            raise ValueError("Each candidate_pairs item must be a tuple of (indexed_id, query_ids).")
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError("Each candidate_pairs item must be a 2-element list or tuple of (indexed_id, query_ids).")
         indexed_id, query_ids = pair
         if isinstance(query_ids, str):
             iterable_query_ids = [query_ids]
