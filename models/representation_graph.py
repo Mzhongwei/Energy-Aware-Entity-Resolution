@@ -36,17 +36,25 @@ class RepresentationGraph:
     def get_edge_index(self, node1_index: int, node2_index: int) -> Optional[int]:
         return self.edge2eid.get(self._edge_key(node1_index, node2_index))
 
-    def clean_attributes(self) -> Graph:
+    @staticmethod
+    def _strip_non_primitive_attrs(g: Graph) -> Graph:
         allowed_types = (str, int, float, bool)
-        for v in self.graph.vs:
+        for v in g.vs:
             for attr in list(v.attributes()):
                 if not isinstance(v[attr], allowed_types):
                     del v[attr]
-        for e in self.graph.es:
+        for e in g.es:
             for attr in list(e.attributes()):
                 if not isinstance(e[attr], allowed_types):
                     del e[attr]
-        return self.graph
+        return g
+
+    def clean_attributes(self) -> Graph:
+        return self._strip_non_primitive_attrs(self.graph)
+
+    def clean_attributes_copy(self) -> Graph:
+        """Strip a copy, leaving self.graph's attributes intact for continued use."""
+        return self._strip_non_primitive_attrs(self.graph.copy())
 
     def load_graph(self, graph_file: str) -> None:
         self.graph = Graph.Read_GraphML(graph_file)

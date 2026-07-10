@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple, Iterable, Optional, Set
 
 import math
+import os
 import numpy as np
 import pandas as pd
 import ast
@@ -635,6 +636,61 @@ def dyn_graph_generation(configuration):
     print(OUTPUT_FORMAT.format('Graph construction complete', t_end.strftime(TIME_FORMAT)))
     print(OUTPUT_FORMAT.format('Time required to build graph:', f'{dt.total_seconds():.2f} seconds.'))
     return g
+
+
+def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
+    """
+    Load a persisted representation graph if present, else build a fresh one.
+
+    GraphML round-trips lose dyn_roots (only primitive vertex/edge attributes
+    survive) -- callers must restore roots afterward via restore_dyn_roots,
+    using the dyn_roots produced alongside this graph by graph construction.
+    """
+    if os.path.isfile(graph_path) and os.path.getsize(graph_path) > 0:
+        graph = dyn_graph_generation(configuration)
+        graph.load_graph(graph_path)
+        return graph
+    return dyn_graph_generation(configuration)
+
+
+def persist_graph(graph: DynGraphIgraph, graph_path: str) -> None:
+    """Atomically write a GraphML snapshot from a stripped copy of the graph."""
+    graph_dir = os.path.dirname(graph_path)
+    if graph_dir:
+        os.makedirs(graph_dir, exist_ok=True)
+    graph_copy = graph.clean_attributes_copy()
+    temp_path = f"{graph_path}.tmp"
+    graph_copy.write_graphml(temp_path)
+    os.replace(temp_path, graph_path)
+
+
+def serialize_dyn_roots(graph: DynGraphIgraph) -> list:
+    """
+    Serialize dyn_roots (a set of vertex indices, per this project's meta_path-less
+    configuration) as vertex names, to be carried as transfer/buffer data directly
+    from graph construction to random walk.
+
+    Vertex indices do not survive a GraphML round-trip, so names are the only
+    stable identifier a downstream consumer can restore from.
+    """
+    i_graph = graph.get_graph()
+    names = []
+    for idx in graph.dyn_roots or []:
+        try:
+            v = i_graph.vs[int(idx)]
+        except Exception:
+            continue
+        if "name" in v.attributes():
+            names.append(str(v["name"]))
+    return sorted(set(names))
+
+
+def restore_dyn_roots(graph: DynGraphIgraph, root_names) -> None:
+    """Restore dyn_roots on a freshly loaded graph from a serialize_dyn_roots payload."""
+    i_graph = graph.get_graph()
+    name_to_index = {v["name"]: int(v.index) for v in i_graph.vs if "name" in v.attributes()}
+    graph.dyn_roots = {name_to_index[n] for n in (root_names or []) if n in name_to_index}
+
 
 # ------------------------
 # test
