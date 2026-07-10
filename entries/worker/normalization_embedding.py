@@ -64,6 +64,7 @@ def main():
         if raw_data is None:
             break
         if raw_data.empty:
+            delete_earliest_buffer_file(RAW_BUFFER)
             continue
 
         print(

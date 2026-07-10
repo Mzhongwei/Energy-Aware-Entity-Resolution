@@ -33,6 +33,7 @@ MODEL_PATH_KEYS = {
     "graph": ("graph-dir", "graph-name", "/app/data/models/graph"),
     "embedding": ("embedding-dir", "embedding_model-name", "/app/data/models/embedding"),
     "bert": ("bert-dir", "bert-name", "/app/data/models/bert"),
+    "predicted_match": ("predicted_match-dir", "predicted_match-name", "/app/data/models/predicted"),
 }
 
 

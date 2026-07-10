@@ -9,8 +9,7 @@ from utils.pipeline_io import load_config
 from utils.pipeline_io import serialize_for_json, write_step_output
 
 """
-disabled
-To complete
+disabled: legacy BERT evaluation entry is not implemented yet.
 """
 
 def run(config: dict, processed_data):

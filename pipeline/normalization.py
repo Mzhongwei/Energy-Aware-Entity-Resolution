@@ -101,7 +101,7 @@ def _drop_source_id_columns(raw_data):
 
 
 
-def index_normalization(config, raw_data, raw_data_path, is_training):
+def index_normalization(config, raw_data=None, raw_data_path=None, is_training=False):
     """
     incremental mode: index and normalization
     * 'rid' should appear in meta_path if it is setted

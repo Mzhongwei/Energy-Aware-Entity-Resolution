@@ -4,9 +4,8 @@ import sys
 from pathlib import Path
 
 """
-disabled
 mode: incremental + bert
-to complete
+disabled: k8s BERT normalization worker interface is not implemented yet.
 """
 
 def main():

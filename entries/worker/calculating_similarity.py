@@ -22,6 +22,8 @@ task: similarity calculation
 mode: incremental + embedding
 input: candidate pairs [buffer], embedding model snapshot [buffer]
 output: matching pairs [buffer]
+description: reads the embedding snapshot without deleting it -- decision_making reads the
+same snapshot downstream and owns its cleanup.
 """
 
 INPUT_DATA_TYPE = "candidate_pairs"

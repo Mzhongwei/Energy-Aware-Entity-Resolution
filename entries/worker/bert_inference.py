@@ -11,7 +11,7 @@ from utils.pipeline_io import load_config
 from utils.pipeline_io import serialize_for_json, write_step_output
 
 """
-disabled
+disabled: k8s BERT inference worker interface is not implemented yet.
 """
 
 def run(config: dict):

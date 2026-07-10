@@ -95,11 +95,12 @@ def _compute_metrics(predicted_pairs: Set[Pair], actual_pairs: Set[Pair]) -> Dic
     }
 
 
-def compare_ground_truth(configuration: dict) -> Dict[str, Dict[str, float]]:
+def compare_ground_truth(configuration: dict, similarity_file=None) -> Dict[str, Dict[str, float]]:
     ground_truth_file = configuration.get("match_file") or configuration.get("ground_truth")
     if not ground_truth_file:
         raise ValueError("Evaluation requires 'match_file' or 'ground_truth' in the configuration.")
-    similarity_file = _get_similarity_file(configuration)
+    if not similarity_file:
+        similarity_file = _get_similarity_file(configuration)
     output_format = configuration.get("output_format", "graphml")
     if output_format != "graphml":
         raise ValueError("Current evaluation implementation supports graphml output only.")

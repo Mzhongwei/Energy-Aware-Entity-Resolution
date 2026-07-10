@@ -18,7 +18,7 @@ def main():
     config = load_config(args.config)
     
     raw_data_path = config.get("data_source_B")
-    output = index_normalization(config=config, raw_data_path=raw_data_path, is_training=False)
+    output = index_normalization(config=config, raw_data=None, raw_data_path=raw_data_path, is_training=False)
 
     write_step_output(
         directory=get_transfer_data_directory(args.workload, OUTPUT_DATA_TYPE),
