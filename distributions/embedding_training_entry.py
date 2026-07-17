@@ -5,7 +5,7 @@ import signal
 import sys
 
 from pipeline.embedding_training import train_embeddings
-from state_io.embedding_state import ensure_embedding_model, get, update
+from embedding_state import ensure_embedding_model, get, update
 from utils.pipeline_io import (
     delete_earliest_buffer_file,
     get_earliest_window_index,

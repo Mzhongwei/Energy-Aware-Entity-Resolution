@@ -29,6 +29,12 @@ from this incremental path -- only per-window snapshots are shipped downstream.
 INPUT_DATA_TYPE = "processed_data_graph"
 OUTPUT_DATA_TYPE = "graph"
 GRAPH_FILE_NAME = "graph.graphml"
+TASK_CONFIG_KEY = "graph_construction"
+
+# See normalization_embedding.py for why first/steady waits are split and what a timeout
+# (vs an explicit upstream EOS) means.
+DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
+DEFAULT_WAIT_TIMEOUT_SECONDS = 120
 
 stop_requested = False
 
@@ -50,13 +56,27 @@ def main():
     SNAPSHOT_DIR = os.path.join(OUTPUT_BUFFER, "snapshots")
 
     config = load_config(args.config)
+    task_config = config.get(TASK_CONFIG_KEY, {}) or {}
+    first_wait_timeout = int(task_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
+    wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
     graph_path = os.path.join(get_model_directory(config, "graph"), GRAPH_FILE_NAME)
     graph = load_or_create_graph(config, graph_path)  # seed from batch-trained graph if present
 
+    seen_first_item = False
+    eos_reason = "stream_completed"
     while not stop_requested:
-        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=120)
+        timeout = wait_timeout if seen_first_item else first_wait_timeout
+        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
         if ready is None:
+            if not stop_requested:
+                print(
+                    f"[WARNING] [graph_construction] timed out after {timeout}s waiting for {INPUT_BUFFER} "
+                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
+                    file=sys.stderr,
+                )
+                eos_reason = "timeout_no_upstream_eos"
             break
+        seen_first_item = True
         processed_data = load_earliest_buffer(INPUT_BUFFER)
         if processed_data is None:
             break
@@ -74,7 +94,7 @@ def main():
         write_buffer(handoff, OUTPUT_BUFFER, window_index, extension="json")
         delete_earliest_buffer_file(INPUT_BUFFER)
 
-    write_eos(OUTPUT_BUFFER, reason="stream_completed")
+    write_eos(OUTPUT_BUFFER, reason=eos_reason)
     print("[graph_construction] worker completed", file=sys.stderr)
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-from models import Model
+from models.bert_model import Model
 import torch
 import random
 import numpy as np

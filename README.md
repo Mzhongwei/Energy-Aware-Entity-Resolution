@@ -19,7 +19,7 @@ The main orchestrator is [main_distribution.py](main_distribution.py), while the
 - [services](services) - producer, consumer, and simulator utilities.
 - [scripts](scripts) - helper scripts used by ConfigMap generation and runtime wiring.
 - [config](config) - example runtime configuration files.
-- [requirements*.txt](requirements.txt) - dependency sets for the different deployment profiles.
+- [requirements/](requirements/) - dependency sets for entry images and legacy deployment profiles.
 - [distributions](distributions) - per-stage wrappers used by the container images.
 
 ## Modes

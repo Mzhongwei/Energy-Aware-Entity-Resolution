@@ -29,6 +29,16 @@ same snapshot downstream and owns its cleanup.
 INPUT_DATA_TYPE = "candidate_pairs"
 EMBEDDING_INPUT_DATA_TYPE = "embedding_calculating"
 OUTPUT_DATA_TYPE = "matching_pairs"
+TASK_CONFIG_KEY = "calculating_similarity"
+
+# See normalization_embedding.py for why first/steady waits are split and what a timeout
+# (vs an explicit upstream EOS) means. The embedding-buffer wait has no EOS concept of its
+# own (it waits for one specific window's .emb snapshot, not a stream), so a timeout there
+# is always ambiguous and always logged.
+DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
+DEFAULT_WAIT_TIMEOUT_SECONDS = 120
+DEFAULT_EMBEDDING_FIRST_WAIT_TIMEOUT_SECONDS = 1800
+DEFAULT_EMBEDDING_WAIT_TIMEOUT_SECONDS = 30
 
 stop_requested = False
 
@@ -50,12 +60,33 @@ def main():
     OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
 
     config = load_config(args.config)
-    batch_threshold = int(config.get("calculating_similarity", {}).get("batch_threshold", 2048))
+    task_config = config.get(TASK_CONFIG_KEY, {}) or {}
+    batch_threshold = int(task_config.get("batch_threshold", 2048))
+    first_wait_timeout = int(task_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
+    wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
+    embedding_first_wait_timeout = int(
+        task_config.get("embedding_first_wait_timeout_seconds", DEFAULT_EMBEDDING_FIRST_WAIT_TIMEOUT_SECONDS)
+    )
+    embedding_wait_timeout = int(
+        task_config.get("embedding_wait_timeout_seconds", DEFAULT_EMBEDDING_WAIT_TIMEOUT_SECONDS)
+    )
 
+    seen_first_item = False
+    seen_first_embedding = False
+    eos_reason = "stream_completed"
     while not stop_requested:
-        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=120)
+        timeout = wait_timeout if seen_first_item else first_wait_timeout
+        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
         if ready is None:
+            if not stop_requested:
+                print(
+                    f"[WARNING] [calculating_similarity] timed out after {timeout}s waiting for {INPUT_BUFFER} "
+                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
+                    file=sys.stderr,
+                )
+                eos_reason = "timeout_no_upstream_eos"
             break
+        seen_first_item = True
         candidate_pairs = load_earliest_buffer(INPUT_BUFFER)
         if candidate_pairs is None:
             break
@@ -64,9 +95,21 @@ def main():
             continue
 
         window_index = get_earliest_window_index(INPUT_BUFFER)
-        embedding_path = wait_for_embedding_buffer(EMBEDDING_BUFFER, window_index, timeout_seconds=30)
+        embedding_timeout = embedding_wait_timeout if seen_first_embedding else embedding_first_wait_timeout
+        embedding_path = wait_for_embedding_buffer(
+            EMBEDDING_BUFFER, window_index, timeout_seconds=embedding_timeout, should_stop=lambda: stop_requested
+        )
         if embedding_path is None:
+            if not stop_requested:
+                print(
+                    f"[WARNING] [calculating_similarity] timed out after {embedding_timeout}s waiting for window "
+                    f"{window_index}'s embedding snapshot in {EMBEDDING_BUFFER}; exiting (embedding_training may "
+                    "have stalled or died -- this window's candidate pairs are left unprocessed).",
+                    file=sys.stderr,
+                )
+                eos_reason = "timeout_no_upstream_eos"
             break
+        seen_first_embedding = True
 
         model = EmbeddingModel.load(embedding_path)
         matching_pairs = score_mutual_top1_candidate_pairs(model, candidate_pairs, batch_threshold=batch_threshold)
@@ -77,7 +120,7 @@ def main():
                 os.remove(path)
         delete_earliest_buffer_file(INPUT_BUFFER)
 
-    write_eos(OUTPUT_BUFFER, reason="stream_completed")
+    write_eos(OUTPUT_BUFFER, reason=eos_reason)
     print("[calculating_similarity] worker completed", file=sys.stderr)
 
 if __name__ == "__main__":

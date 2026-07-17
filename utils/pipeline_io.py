@@ -152,34 +152,46 @@ def load_processed_data(processed_data_path: str):
 # =========================
 
 
-def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60) -> str | None:
+def _find_earliest(buffer_dir: str, predicate, missing_dir_msg: str | None = None, not_found_msg: str | None = None) -> str | None:
+    if not os.path.isdir(buffer_dir):
+        if missing_dir_msg:
+            print(missing_dir_msg, file=sys.stderr, flush=True)
+        return None
+    entries = [name for name in os.listdir(buffer_dir) if predicate(os.path.join(buffer_dir, name), name)]
+    if not entries:
+        if not_found_msg:
+            print(not_found_msg, file=sys.stderr, flush=True)
+        return None
+    entries.sort(key=lambda name: os.path.getmtime(os.path.join(buffer_dir, name)), reverse=False)
+    return os.path.join(buffer_dir, entries[0])
+
+
+def _wait_for(finder, timeout_seconds: int, should_stop=None) -> str | None:
     start_time = time()
     while time() - start_time < timeout_seconds:
-        last_buffer_file = _get_earliest_buffer_file(buffer_dir)
-        if last_buffer_file:
-            return last_buffer_file
+        if should_stop is not None and should_stop():
+            return None
+        found = finder()
+        if found:
+            return found
         sleep(1)
     return None
 
 
+def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60, should_stop=None) -> str | None:
+    return _wait_for(lambda: _get_earliest_buffer_file(buffer_dir), timeout_seconds, should_stop=should_stop)
+
+
 def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
     accepted_extensions = {".csv", ".json"}
-
-    if not os.path.isdir(buffer_dir):
-        return None
-    buffer_files = [
-        f
-        for f in os.listdir(buffer_dir)
-        if (
-            os.path.isfile(os.path.join(buffer_dir, f))
-            and os.path.splitext(f)[1] in accepted_extensions
-            and not f.endswith(".manifest.json")
-        )
-    ]
-    if not buffer_files:
-        return None
-    buffer_files.sort(key=lambda x: os.path.getmtime(os.path.join(buffer_dir, x)), reverse=False)
-    return os.path.join(buffer_dir, buffer_files[0])
+    return _find_earliest(
+        buffer_dir,
+        lambda path, name: (
+            os.path.isfile(path)
+            and os.path.splitext(name)[1] in accepted_extensions
+            and not name.endswith(".manifest.json")
+        ),
+    )
 
 
 def get_manifest_file(graph: str) -> str | None:
@@ -281,42 +293,24 @@ def load_earliest_buffer(buffer_dir: str):
 
 
 def get_cg_index_buffer_file(buffer_dir: str, window_index: int) -> str | None:
-    if not os.path.isdir(buffer_dir):
-        print(f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve CG index buffer file.", file=sys.stderr, flush=True)
-        return None
-    index_dirs = [
-        d for d in os.listdir(buffer_dir)
-        if os.path.isdir(os.path.join(buffer_dir, d)) and d.startswith(f"{window_index}_")
-    ]
-    if not index_dirs:
-        print(f"[WARNING] No CG index buffer directories found in '{buffer_dir}' for window index {window_index}.", file=sys.stderr, flush=True)
-        return None
-    index_dirs.sort(key=lambda d: os.path.getmtime(os.path.join(buffer_dir, d)), reverse=False)
-    return os.path.join(buffer_dir, index_dirs[0])
+    return _find_earliest(
+        buffer_dir,
+        lambda path, name: os.path.isdir(path) and name.startswith(f"{window_index}_"),
+        missing_dir_msg=f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve CG index buffer file.",
+        not_found_msg=f"[WARNING] No CG index buffer directories found in '{buffer_dir}' for window index {window_index}.",
+    )
 
 
-def wait_for_embedding_buffer(buffer_dir: str, window_index: int, timeout_seconds: int = 60) -> str | None:
-    start_time = time()
-    while time() - start_time < timeout_seconds:
-        emb_file = get_embedding_buffer_file(buffer_dir, window_index)
-        if emb_file:
-            return emb_file
-        sleep(1)
-    return None
+def wait_for_embedding_buffer(buffer_dir: str, window_index: int, timeout_seconds: int = 60, should_stop=None) -> str | None:
+    return _wait_for(lambda: get_embedding_buffer_file(buffer_dir, window_index), timeout_seconds, should_stop=should_stop)
 
 
 def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
-    if not os.path.isdir(buffer_dir):
-        print(f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve embedding buffer file.", file=sys.stderr, flush=True)
-        return None
-    emb_files = [
-        f for f in os.listdir(buffer_dir)
-        if os.path.isfile(os.path.join(buffer_dir, f)) and f.startswith(f"{window_index}_") and f.endswith(".emb")
-    ]
-    if not emb_files:
-        return None
-    emb_files.sort(key=lambda f: os.path.getmtime(os.path.join(buffer_dir, f)), reverse=False)
-    return os.path.join(buffer_dir, emb_files[0])
+    return _find_earliest(
+        buffer_dir,
+        lambda path, name: os.path.isfile(path) and name.startswith(f"{window_index}_") and name.endswith(".emb"),
+        missing_dir_msg=f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve embedding buffer file.",
+    )
 
 
 def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "json"):
@@ -398,13 +392,7 @@ def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
 
 
 def _get_earliest_buffer_directory(buffer_dir: str) -> str | None:
-    if not os.path.isdir(buffer_dir):
-        return None
-    subdirs = [d for d in os.listdir(buffer_dir) if os.path.isdir(os.path.join(buffer_dir, d))]
-    if not subdirs:
-        return None
-    subdirs.sort(key=lambda d: os.path.getmtime(os.path.join(buffer_dir, d)), reverse=False)
-    return os.path.join(buffer_dir, subdirs[0])
+    return _find_earliest(buffer_dir, lambda path, name: os.path.isdir(path))
 
 
 def get_earliest_window_index(buffer_dir: str) -> int:

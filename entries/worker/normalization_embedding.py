@@ -22,6 +22,14 @@ output: processed data for feature tasks[buffer], processed data for graph tasks
 INPUT_DATA_TYPE = "raw_data"
 GRAPH_OUTPUT_DATA_TYPE = "processed_data_graph"
 FEATURE_OUTPUT_DATA_TYPE = "processed_data_feature"
+TASK_CONFIG_KEY = "normalization"
+
+# The first raw_data window depends on producer/consumer startup and Kafka delivering the
+# first batch, which can take much longer than steady-state windows. A timeout here (first
+# or steady) with no upstream EOS is logged as a WARNING and treated as end-of-stream, but
+# it's ambiguous -- upstream may just be slow rather than actually done.
+DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
+DEFAULT_WAIT_TIMEOUT_SECONDS = 120
 
 stop_requested = False
 
@@ -54,12 +62,26 @@ def main():
 
     # load configuration
     config = load_config(args.config)
-    
+    task_config = config.get(TASK_CONFIG_KEY, {}) or {}
+    first_wait_timeout = int(task_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
+    wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
+
     print(f"[normalization] get raw buffer from {RAW_BUFFER}", file=sys.stderr)
+    seen_first_item = False
+    eos_reason = "stream_completed"
     while not stop_requested:
-        ready = wait_for_buffer(RAW_BUFFER, timeout_seconds=120)
+        timeout = wait_timeout if seen_first_item else first_wait_timeout
+        ready = wait_for_buffer(RAW_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
         if ready is None:
+            if not stop_requested:
+                print(
+                    f"[WARNING] [normalization] timed out after {timeout}s waiting for {RAW_BUFFER} "
+                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
+                    file=sys.stderr,
+                )
+                eos_reason = "timeout_no_upstream_eos"
             break
+        seen_first_item = True
         raw_data = load_earliest_buffer(RAW_BUFFER)
         if raw_data is None:
             break
@@ -81,8 +103,8 @@ def main():
 
         delete_earliest_buffer_file(RAW_BUFFER)
     # close buffers
-    write_eos(GRAPH_BUFFER, reason="stream_completed")
-    write_eos(FEATURE_BUFFER, reason="stream_completed")
+    write_eos(GRAPH_BUFFER, reason=eos_reason)
+    write_eos(FEATURE_BUFFER, reason=eos_reason)
 
 if __name__ == "__main__":
     main()

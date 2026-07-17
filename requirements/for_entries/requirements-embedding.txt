@@ -1,0 +1,5 @@
+-r requirements-base.txt
+
+gensim==4.3.3
+scipy==1.13.1
+

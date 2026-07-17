@@ -113,12 +113,17 @@ def start_producer(config):
     print(f"[INFO] Started Java producer process with PID {java_proc.pid}.")
 
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
     try:
+        # Kubernetes sends SIGTERM (not SIGINT) when stopping a pod, so both need to route
+        # through the same handler or the Java subprocess is left orphaned on pod teardown.
         signal.signal(signal.SIGINT, _handle_sigint)
+        signal.signal(signal.SIGTERM, _handle_sigint)
         print(f"[INFO] Java producer is running. Press Ctrl+C to stop.")
         java_proc.wait()
     finally:
         signal.signal(signal.SIGINT, previous_sigint_handler)
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
         _stop_process_group(java_proc, interrupt_first=True)
         ACTIVE_JAVA_PROC = None
 

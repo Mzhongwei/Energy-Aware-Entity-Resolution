@@ -1,8 +1,16 @@
 ### Mandatory
-mode: "bert-training-inference-b_evaluation"
+mode: "bert-training-evaluation"
 version_name: "spa"
 
 # bert mode, source data
+# NOTE: these absolute paths assume the container mounts pipeline-data-claim at /data
+# (see k8s/pvc-manifests/pvc-data.yaml and the "pipeline-data" volume in
+# k8s/pipeline/batch/pipeline.yaml / k8s/pipeline/incremental/*.yaml). If that mountPath
+# ever changes, these paths must be updated to match -- nothing checks this alignment
+# automatically. The PVC itself is populated separately by k8s/scripts/sync-data-pvc.sh,
+# which shares the same PVC/directory as config-embedding.yaml's data_source_A/B (same
+# underlying dataset, different files within it -- see sync-data-pvc.sh's own gap: it only
+# verifies tableA/tableB/matches.txt exist locally before syncing, not train/test/valid.csv).
 trainset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/train.csv"
 testset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/test.csv"
 evalset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/valid.csv"

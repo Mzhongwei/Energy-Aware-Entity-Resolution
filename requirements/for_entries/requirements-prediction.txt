@@ -1,0 +1,11 @@
+-r requirements-base.txt
+
+gensim==4.3.3
+igraph==0.11.8
+joblib==1.4.2
+Levenshtein==0.27.1
+scikit-learn==1.5.1
+scipy==1.13.1
+threadpoolctl==3.5.0
+tqdm==4.67.1
+

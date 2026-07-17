@@ -1,0 +1,21 @@
+-r requirements-base.txt
+
+experiment-impact-tracker==0.1.8
+peft==0.3.0
+pillow==11.1.0
+matplotlib==3.10.1
+multiprocess==0.70.14
+pyarrow==15.0.0
+regex==2024.11.6
+gensim==4.3.3
+igraph==0.11.8
+scipy==1.13.1
+sentence-transformers==2.2.2
+accelerate==0.20.3
+datasets==2.14.5
+evaluate==0.4.0
+triton==3.4.0; platform_system == "Linux"
+transformers==4.30.2
+huggingface-hub==0.16.4
+tokenizers==0.13.3
+

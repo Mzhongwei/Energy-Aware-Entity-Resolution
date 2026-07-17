@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 
 from ruamel.yaml import YAML
@@ -175,7 +176,7 @@ def _stop_process_group(proc, interrupt_first=False, wait_seconds=5):
 
 def _handle_sigint(signum, frame):
     global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
-    print("\n[INFO] Ctrl+C received. Terminating Python and Java processes now.")
+    print("\n[INFO] Termination signal received. Closing Kafka consumer and Java process now.", flush=True)
     if ACTIVE_CONSUMER is not None:
         try:
             ACTIVE_CONSUMER.close()
@@ -184,6 +185,10 @@ def _handle_sigint(signum, frame):
         ACTIVE_CONSUMER = None
     _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
     ACTIVE_JAVA_PROC = None
+    # Exit with code 0: this is a deliberate shutdown, not a failure. Without this, closing
+    # ACTIVE_CONSUMER here makes the next consumer.poll() in the main loop raise, which the
+    # top-level except now (correctly) turns into exit(1) -- misreporting a graceful stop.
+    sys.exit(0)
 
 
 def _commit_processed_offsets(consumer: Consumer, msg, reason: str):
@@ -226,6 +231,7 @@ def start_consumer(config):
     
     ACTIVE_CONSUMER = consumer
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     data_buffer = []
     last_valid_msg = None
@@ -234,7 +240,10 @@ def start_consumer(config):
     started_at = time.time()
     window_index = 0
     try:
+        # Kubernetes sends SIGTERM (not SIGINT) when stopping a pod, so both need to route
+        # through the same handler or the consumer/Java subprocess is left running.
         signal.signal(signal.SIGINT, _handle_sigint)
+        signal.signal(signal.SIGTERM, _handle_sigint)
         while True:
             msg = consumer.poll(poll_timeout)  # Non-blocking batch pull
 
@@ -334,6 +343,7 @@ def start_consumer(config):
                 data_buffer = []
     finally:
         signal.signal(signal.SIGINT, previous_sigint_handler)
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
         if ACTIVE_CONSUMER is not None:
             try:
                 ACTIVE_CONSUMER.close()
@@ -370,5 +380,6 @@ if __name__ == '__main__':
         app_logger = write_log("logs", "main", "bug")
         app_logger.error(f"Fatal error in consumer service: {str(e)}")
         print(f"Fatal error in consumer service: {str(e)}", flush=True)
+        sys.exit(1)
     total_end = time.perf_counter()
     print(f"Total execution time: {total_end - total_start:.2f} seconds", flush=True)

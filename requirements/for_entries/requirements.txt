@@ -1,0 +1,9 @@
+# Aggregate development environment. Kubernetes images install only their
+# component-specific requirements file.
+-r requirements-graph.txt
+-r requirements-embedding.txt
+-r requirements-feature-index.txt
+-r requirements-bert.txt
+-r requirements-prediction.txt
+-r requirements-kafka.txt
+

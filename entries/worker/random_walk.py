@@ -27,6 +27,12 @@ no whole-graph traversal is needed since graph construction already carries the 
 
 INPUT_DATA_TYPE = "graph"
 OUTPUT_DATA_TYPE = "sequences"
+TASK_CONFIG_KEY = "random_walk"
+
+# See normalization_embedding.py for why first/steady waits are split and what a timeout
+# (vs an explicit upstream EOS) means.
+DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
+DEFAULT_WAIT_TIMEOUT_SECONDS = 120
 
 stop_requested = False
 
@@ -47,11 +53,25 @@ def main():
     OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
 
     config = load_config(args.config)
+    task_config = config.get(TASK_CONFIG_KEY, {}) or {}
+    first_wait_timeout = int(task_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
+    wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
 
+    seen_first_item = False
+    eos_reason = "stream_completed"
     while not stop_requested:
-        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=120)
+        timeout = wait_timeout if seen_first_item else first_wait_timeout
+        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
         if ready is None:
+            if not stop_requested:
+                print(
+                    f"[WARNING] [random_walk] timed out after {timeout}s waiting for {INPUT_BUFFER} "
+                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
+                    file=sys.stderr,
+                )
+                eos_reason = "timeout_no_upstream_eos"
             break
+        seen_first_item = True
         handoff = load_earliest_buffer(INPUT_BUFFER)
         if handoff is None:
             break
@@ -71,7 +91,7 @@ def main():
             os.remove(graph_path)
         delete_earliest_buffer_file(INPUT_BUFFER)
 
-    write_eos(OUTPUT_BUFFER, reason="stream_completed")
+    write_eos(OUTPUT_BUFFER, reason=eos_reason)
     print("[random_walk] worker completed", file=sys.stderr)
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+-r requirements-base.txt
+
+faiss-cpu==1.10.0
+joblib==1.4.2
+Levenshtein==0.27.1
+scikit-learn==1.5.1
+threadpoolctl==3.5.0
+

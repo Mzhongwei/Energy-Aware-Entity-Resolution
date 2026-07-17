@@ -5,7 +5,7 @@ import signal
 import sys
 
 from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
-from state_io.embedding_state import ensure_embedding_model, load_embedding_model
+from embedding_state import ensure_embedding_model, load_embedding_model
 from utils.pipeline_io import (
     _delete_file_if_exists,
     delete_earliest_buffer_file,

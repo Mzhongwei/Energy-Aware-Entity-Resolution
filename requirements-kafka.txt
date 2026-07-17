@@ -1,4 +1,0 @@
-pandas==2.2.3
-ruamel.yaml==0.18.10
-ruamel.yaml.clib==0.2.12
-confluent-kafka==2.11.1
