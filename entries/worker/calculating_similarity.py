@@ -36,7 +36,7 @@ TASK_CONFIG_KEY = "calculating_similarity"
 # own (it waits for one specific window's .emb snapshot, not a stream), so a timeout there
 # is always ambiguous and always logged.
 DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 120
+DEFAULT_WAIT_TIMEOUT_SECONDS = 60
 DEFAULT_EMBEDDING_FIRST_WAIT_TIMEOUT_SECONDS = 1800
 DEFAULT_EMBEDDING_WAIT_TIMEOUT_SECONDS = 30
 

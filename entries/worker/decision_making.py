@@ -41,7 +41,7 @@ TASK_CONFIG_KEY = "decision_making"
 # See normalization_embedding.py for why first/steady waits are split and what a timeout
 # (vs an explicit upstream EOS) means.
 DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 120
+DEFAULT_WAIT_TIMEOUT_SECONDS = 60
 
 stop_requested = False
 

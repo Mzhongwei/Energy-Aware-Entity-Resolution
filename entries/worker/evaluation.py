@@ -36,7 +36,7 @@ REPORT_EXTENSION = "json"
 # first output first. Steady-state windows only need a short idle timeout to detect that
 # the upstream stream has ended.
 DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 600
+DEFAULT_WAIT_TIMEOUT_SECONDS = 60
 
 stop_requested = False
 

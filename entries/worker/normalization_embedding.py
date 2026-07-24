@@ -29,7 +29,7 @@ TASK_CONFIG_KEY = "normalization"
 # or steady) with no upstream EOS is logged as a WARNING and treated as end-of-stream, but
 # it's ambiguous -- upstream may just be slow rather than actually done.
 DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 120
+DEFAULT_WAIT_TIMEOUT_SECONDS = 60
 
 stop_requested = False
 
