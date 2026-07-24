@@ -61,6 +61,7 @@ def main():
     INPUT_BUFFER = get_buffer_directory(args.workload, INPUT_DATA_TYPE)
     OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
     SNAPSHOT_DIR = os.path.join(OUTPUT_BUFFER, "snapshots")
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
     config = load_config(args.config)
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}

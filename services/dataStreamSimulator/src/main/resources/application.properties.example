@@ -1,0 +1,21 @@
+spring.application.name=dataStreamSimulator
+server.port=8082
+
+# KafkaConfig
+spring.kafka.bootstrap-servers=localhost:9092
+# KafkaProducerConfig.java
+spring.kafka.producer.topic-id=entity_resolution_process
+spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
+spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
+
+
+# csv file path info
+# csv.file.path=<your file path>
+csv.file.timeout=100
+
+# Config for log files, remember to set up your own path of log files in "logging.file.name"
+logging.file.name=logs/app.log
+logging.file.max-size=10MB
+logging.file.max-history=10
+logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
+logging.level.root=INFO

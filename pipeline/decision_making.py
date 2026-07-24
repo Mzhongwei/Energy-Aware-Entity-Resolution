@@ -9,15 +9,21 @@ from models.similarity_graph import SimilarityGraph
 ScoredPair = Tuple[str, str, float]
 
 
+def _to_scored_pair(pair) -> ScoredPair:
+    """Normalize a Python tuple or JSON-decoded list to one scored tuple."""
+    if not isinstance(pair, (list, tuple)) or len(pair) != 3:
+        raise ValueError("Each pair must be a list or tuple of (left_id/indexed_id, right_id/query_id, score).")
+    return str(pair[0]), str(pair[1]), float(pair[2])
+
+
 def _select_best_pairs(matching_pairs: List[ScoredPair]) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Tuple[str, float]]]:
     best_for_indexed: Dict[str, Tuple[str, float]] = {}
     best_for_query: Dict[str, Tuple[str, float]] = {}
 
     for pair in matching_pairs:
-        if not isinstance(pair, tuple) or len(pair) != 3:
-            raise ValueError("Each matching_pairs item must be a tuple of (left_id/indexed_id, right_id/query_id, score).")
-        indexed_id, query_id, score = pair
-        score = float(score)
+        # JSON has no tuple type, so scored tuples written to a JSON buffer are loaded
+        # back as lists. Both representations are valid at this serialization boundary.
+        indexed_id, query_id, score = _to_scored_pair(pair)
 
         current_indexed = best_for_indexed.get(indexed_id)
         if current_indexed is None or score > current_indexed[1]:
@@ -82,9 +88,7 @@ def _normalize_pairs(pairs: List[ScoredPair] | None) -> List[ScoredPair]:
 
     best_scores: Dict[Tuple[str, str], float] = {}
     for pair in pairs:
-        if not isinstance(pair, tuple) or len(pair) != 3:
-            raise ValueError("Each pair must be a tuple of (left_id/indexed_id, right_id/query_id, score).")
-        indexed_id, query_id, score = str(pair[0]), str(pair[1]), float(pair[2])
+        indexed_id, query_id, score = _to_scored_pair(pair)
         pair_key = (indexed_id, query_id)
         current = best_scores.get(pair_key)
         if current is None or score > current:
