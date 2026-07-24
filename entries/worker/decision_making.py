@@ -70,6 +70,7 @@ def main():
     wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
     model_path = os.path.join(get_model_directory(config, "embedding"), MODEL_FILE_NAME)
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
+    os.makedirs(os.path.dirname(predicted_match_path), exist_ok=True)
 
     previous_pairs = None
     seen_first_item = False
