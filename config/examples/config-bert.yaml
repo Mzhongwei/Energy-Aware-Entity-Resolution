@@ -11,10 +11,12 @@ version_name: "spa"
 # which shares the same PVC/directory as config-embedding.yaml's data_source_A/B (same
 # underlying dataset, different files within it -- see sync-data-pvc.sh's own gap: it only
 # verifies tableA/tableB/matches.txt exist locally before syncing, not train/test/valid.csv).
-trainset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/train.csv"
-testset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/test.csv"
-evalset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/valid.csv"
-
+# trainset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/train.csv"
+# testset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/test.csv"
+# evalset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/valid.csv"
+trainset_path: "/app/code/Energy-Aware-Entity-Resolution/Data_example/bert/train.csv"
+testset_path: "/app/code/Energy-Aware-Entity-Resolution/Data_example/bert/test.csv"
+evalset_path: "/app/code/Energy-Aware-Entity-Resolution/Data_example/bert/valid.csv"
 # STATE MANAGEMENT
 state_management:
 # bert mode

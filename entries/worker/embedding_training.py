@@ -7,6 +7,7 @@ from utils.pipeline_io import (
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
+    get_incremental_wait_config,
     get_model_directory,
     load_config,
     load_earliest_buffer,
@@ -29,13 +30,6 @@ to the shared model directory on every window so training survives pod restarts.
 INPUT_DATA_TYPE = "sequences"
 OUTPUT_DATA_TYPE = "embedding_calculating"
 MODEL_FILE_NAME = "embedding.emb"
-TASK_CONFIG_KEY = "embeddings_training"
-
-# See normalization_embedding.py for why first/steady waits are split and what a timeout
-# (vs an explicit upstream EOS) means.
-DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 60
-
 stop_requested = False
 
 def handle_sigterm(signum, frame):
@@ -55,30 +49,29 @@ def main():
     OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
 
     config = load_config(args.config)
-    task_config = config.get(TASK_CONFIG_KEY, {}) or {}
-    first_wait_timeout = int(task_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
-    wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
+    startup_timeout, poll_interval = get_incremental_wait_config(config)
     model_path = os.path.join(get_model_directory(config, "embedding"), MODEL_FILE_NAME)
     model = load_or_create_model(config, model_path)  # seed from batch-trained model if present
 
     seen_first_item = False
-    eos_reason = "stream_completed"
     while not stop_requested:
-        timeout = wait_timeout if seen_first_item else first_wait_timeout
-        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
+        timeout = None if seen_first_item else startup_timeout
+        ready = wait_for_buffer(
+            INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested,
+            poll_interval_seconds=poll_interval,
+        )
         if ready is None:
-            if not stop_requested:
-                print(
-                    f"[WARNING] [embedding_training] timed out after {timeout}s waiting for {INPUT_BUFFER} "
-                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
-                    file=sys.stderr,
-                )
-                eos_reason = "timeout_no_upstream_eos"
-            break
+            if stop_requested:
+                return
+            raise TimeoutError(
+                f"[embedding_training] startup timed out after {startup_timeout}s waiting for {INPUT_BUFFER}"
+            )
         seen_first_item = True
         sequences = load_earliest_buffer(INPUT_BUFFER)
         if sequences is None:
-            break
+            write_eos(OUTPUT_BUFFER)
+            print("[embedding_training] worker completed after upstream EOS", file=sys.stderr)
+            return
         if not sequences:
             delete_earliest_buffer_file(INPUT_BUFFER)
             continue
@@ -91,8 +84,7 @@ def main():
         write_buffer(model, OUTPUT_BUFFER, window_index, extension="emb")
         delete_earliest_buffer_file(INPUT_BUFFER)
 
-    write_eos(OUTPUT_BUFFER, reason=eos_reason)
-    print("[embedding_training] worker completed", file=sys.stderr)
+    print("[embedding_training] worker stopped without emitting EOS", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

@@ -207,7 +207,6 @@ def _flush_buffer_if_any(consumer: Consumer, data_buffer: list, window_index: in
 
     write_buffer(data_buffer, BUFFER_DIR, window_index, extension="csv")
     _commit_processed_offsets(consumer, last_valid_msg, reason)
-    write_eos(BUFFER_DIR, reason=reason)
     return []
 
 
@@ -341,6 +340,9 @@ def start_consumer(config):
                 write_buffer(data_buffer, BUFFER_DIR, window_index, extension="csv")
                 _commit_processed_offsets(consumer, last_valid_msg, "window flush")
                 data_buffer = []
+        # EOS is a stream-level marker. It must be written exactly once even when the
+        # final window was full and data_buffer is already empty.
+        write_eos(BUFFER_DIR, reason="source_idle_completed")
     finally:
         signal.signal(signal.SIGINT, previous_sigint_handler)
         signal.signal(signal.SIGTERM, previous_sigterm_handler)

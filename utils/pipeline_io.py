@@ -24,6 +24,18 @@ def load_config(config_path: str):
     return loaded if isinstance(loaded, dict) else {}
 
 
+def get_incremental_wait_config(config: dict) -> tuple[int, float]:
+    """Return the single startup timeout and the non-terminal polling interval."""
+    incremental = config.get("incremental", {}) if isinstance(config, dict) else {}
+    startup_timeout = int(incremental.get("startup_timeout_seconds", 1800))
+    poll_interval = float(incremental.get("poll_interval_seconds", 1))
+    if startup_timeout <= 0:
+        raise ValueError("incremental.startup_timeout_seconds must be greater than zero")
+    if poll_interval <= 0:
+        raise ValueError("incremental.poll_interval_seconds must be greater than zero")
+    return startup_timeout, poll_interval
+
+
 # =========================
 # Directory helpers
 # =========================
@@ -166,31 +178,57 @@ def _find_earliest(buffer_dir: str, predicate, missing_dir_msg: str | None = Non
     return os.path.join(buffer_dir, entries[0])
 
 
-def _wait_for(finder, timeout_seconds: int, should_stop=None) -> str | None:
+def _wait_for(finder, timeout_seconds: int | None, should_stop=None, poll_interval_seconds: float = 1) -> str | None:
     start_time = time()
-    while time() - start_time < timeout_seconds:
+    while timeout_seconds is None or time() - start_time < timeout_seconds:
         if should_stop is not None and should_stop():
             return None
         found = finder()
         if found:
             return found
-        sleep(1)
+        sleep(poll_interval_seconds)
     return None
 
 
-def wait_for_buffer(buffer_dir: str, timeout_seconds: int = 60, should_stop=None) -> str | None:
-    return _wait_for(lambda: _get_earliest_buffer_file(buffer_dir), timeout_seconds, should_stop=should_stop)
+def wait_for_buffer(
+    buffer_dir: str,
+    timeout_seconds: int | None = None,
+    should_stop=None,
+    poll_interval_seconds: float = 1,
+) -> str | None:
+    """Wait for a data buffer or EOS marker.
+
+    ``None`` means wait indefinitely. A finite timeout is intended only for the
+    first input of a worker; normal stream completion is signalled exclusively
+    by an EOS marker.
+    """
+    return _wait_for(
+        lambda: _get_earliest_buffer_file(buffer_dir),
+        timeout_seconds,
+        should_stop=should_stop,
+        poll_interval_seconds=poll_interval_seconds,
+    )
 
 
 def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
     accepted_extensions = {".csv", ".json"}
-    return _find_earliest(
+    data_file = _find_earliest(
         buffer_dir,
         lambda path, name: (
             os.path.isfile(path)
             and os.path.splitext(name)[1] in accepted_extensions
             and not name.endswith(".manifest.json")
+            and not name.startswith("eos_")
         ),
+    )
+    if data_file:
+        return data_file
+    # EOS is considered only after every data buffer in this directory has been
+    # consumed. This prevents equal/coarse mtimes from making the final buffer appear
+    # newer than EOS and being skipped.
+    return _find_earliest(
+        buffer_dir,
+        lambda path, name: os.path.isfile(path) and name.startswith("eos_") and name.endswith(".json"),
     )
 
 
@@ -301,8 +339,28 @@ def get_cg_index_buffer_file(buffer_dir: str, window_index: int) -> str | None:
     )
 
 
-def wait_for_embedding_buffer(buffer_dir: str, window_index: int, timeout_seconds: int = 60, should_stop=None) -> str | None:
-    return _wait_for(lambda: get_embedding_buffer_file(buffer_dir, window_index), timeout_seconds, should_stop=should_stop)
+def wait_for_embedding_buffer(
+    buffer_dir: str,
+    window_index: int,
+    timeout_seconds: int | None = None,
+    should_stop=None,
+    poll_interval_seconds: float = 1,
+) -> str | None:
+    def find_embedding_or_eos():
+        embedding_path = get_embedding_buffer_file(buffer_dir, window_index)
+        if embedding_path:
+            return embedding_path
+        return _find_earliest(
+            buffer_dir,
+            lambda path, name: os.path.isfile(path) and name.startswith("eos_") and name.endswith(".json"),
+        )
+
+    return _wait_for(
+        find_embedding_or_eos,
+        timeout_seconds,
+        should_stop=should_stop,
+        poll_interval_seconds=poll_interval_seconds,
+    )
 
 
 def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
@@ -327,13 +385,11 @@ def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "js
     }
     write_function = write_functions.get(extension)
     if not write_function:
-        print(f"[ERROR] Unsupported buffer extension '{extension}'; supported extensions are: {list(write_functions.keys())}", file=sys.stderr, flush=True)
-        return
+        raise ValueError(
+            f"Unsupported buffer extension '{extension}'; supported extensions are: {list(write_functions.keys())}"
+        )
 
-    try:
-        write_function(data_buffer, output_dir, prefix)
-    except Exception as e:
-        print(f"[ERROR] Failed to write buffer to {output_dir} with extension '{extension}': {e}", file=sys.stderr, flush=True)
+    return write_function(data_buffer, output_dir, prefix)
 
 
 def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
@@ -342,6 +398,7 @@ def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
     cg_index.index_dir = index_dir
     cg_index.persist()
     print(f"[INFO] Wrote CGIndex buffer to {index_dir}", flush=True)
+    return index_dir
 
 
 def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
@@ -352,6 +409,7 @@ def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
     df.to_csv(temp_path, index=False)
     os.replace(temp_path, output_path)
     print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as CSV.", flush=True)
+    return output_path
 
 
 def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
@@ -366,8 +424,9 @@ def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
         print(f"[ERROR] Failed to write JSON buffer to {output_path}: {e}", file=sys.stderr, flush=True)
         if os.path.exists(temp_path):
             os.remove(temp_path)
-        return
+        raise
     print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as JSON.", file=sys.stderr, flush=True)
+    return output_path
 
 
 def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
@@ -389,6 +448,7 @@ def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
                 except Exception:
                     pass
         raise
+    return emb_path
 
 
 def _get_earliest_buffer_directory(buffer_dir: str) -> str | None:

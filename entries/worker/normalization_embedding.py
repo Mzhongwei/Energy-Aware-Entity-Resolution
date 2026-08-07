@@ -6,6 +6,7 @@ from utils.pipeline_io import (
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
+    get_incremental_wait_config,
     load_config,
     load_earliest_buffer,
     wait_for_buffer,
@@ -22,15 +23,6 @@ output: processed data for feature tasks[buffer], processed data for graph tasks
 INPUT_DATA_TYPE = "raw_data"
 GRAPH_OUTPUT_DATA_TYPE = "processed_data_graph"
 FEATURE_OUTPUT_DATA_TYPE = "processed_data_feature"
-TASK_CONFIG_KEY = "normalization"
-
-# The first raw_data window depends on producer/consumer startup and Kafka delivering the
-# first batch, which can take much longer than steady-state windows. A timeout here (first
-# or steady) with no upstream EOS is logged as a WARNING and treated as end-of-stream, but
-# it's ambiguous -- upstream may just be slow rather than actually done.
-DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 60
-
 stop_requested = False
 
 def handle_sigterm(signum, frame):
@@ -62,29 +54,29 @@ def main():
 
     # load configuration
     config = load_config(args.config)
-    task_config = config.get(TASK_CONFIG_KEY, {}) or {}
-    first_wait_timeout = int(task_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
-    wait_timeout = int(task_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
+    startup_timeout, poll_interval = get_incremental_wait_config(config)
 
     print(f"[normalization] get raw buffer from {RAW_BUFFER}", file=sys.stderr)
     seen_first_item = False
-    eos_reason = "stream_completed"
     while not stop_requested:
-        timeout = wait_timeout if seen_first_item else first_wait_timeout
-        ready = wait_for_buffer(RAW_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
+        timeout = None if seen_first_item else startup_timeout
+        ready = wait_for_buffer(
+            RAW_BUFFER,
+            timeout_seconds=timeout,
+            should_stop=lambda: stop_requested,
+            poll_interval_seconds=poll_interval,
+        )
         if ready is None:
-            if not stop_requested:
-                print(
-                    f"[WARNING] [normalization] timed out after {timeout}s waiting for {RAW_BUFFER} "
-                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
-                    file=sys.stderr,
-                )
-                eos_reason = "timeout_no_upstream_eos"
-            break
+            if stop_requested:
+                return
+            raise TimeoutError(f"[normalization] startup timed out after {startup_timeout}s waiting for {RAW_BUFFER}")
         seen_first_item = True
         raw_data = load_earliest_buffer(RAW_BUFFER)
         if raw_data is None:
-            break
+            write_eos(GRAPH_BUFFER)
+            write_eos(FEATURE_BUFFER)
+            print("[normalization] worker completed after upstream EOS", file=sys.stderr)
+            return
         if raw_data.empty:
             delete_earliest_buffer_file(RAW_BUFFER)
             continue
@@ -102,9 +94,7 @@ def main():
             write_buffer(returned, FEATURE_BUFFER, window_index, extension="csv")
 
         delete_earliest_buffer_file(RAW_BUFFER)
-    # close buffers
-    write_eos(GRAPH_BUFFER, reason=eos_reason)
-    write_eos(FEATURE_BUFFER, reason=eos_reason)
+    print("[normalization] worker stopped without emitting EOS", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

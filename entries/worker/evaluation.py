@@ -6,6 +6,7 @@ import sys
 from utils.pipeline_io import (
     delete_earliest_buffer_file,
     get_buffer_directory,
+    get_incremental_wait_config,
     get_transfer_data_directory,
     load_config,
     load_earliest_buffer,
@@ -31,13 +32,6 @@ REPORT_DATA_TYPE = "report"
 REPORT_FILE_NAME = "evaluation_report"
 REPORT_EXTENSION = "json"
 
-# The first decision event can take much longer than steady-state windows to arrive --
-# candidate_enumeration/calculating_similarity/decision_making all have to produce their
-# first output first. Steady-state windows only need a short idle timeout to detect that
-# the upstream stream has ended.
-DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS = 1800
-DEFAULT_WAIT_TIMEOUT_SECONDS = 60
-
 stop_requested = False
 
 def handle_sigterm(signum, frame):
@@ -57,26 +51,24 @@ def main():
 
     config = load_config(args.config)
     config["output_format"] = config.get("decision_making", {}).get("output_format", "graphml")
-    eval_config = config.get("evaluation", {}) or {}
-    first_wait_timeout = int(eval_config.get("first_wait_timeout_seconds", DEFAULT_FIRST_WAIT_TIMEOUT_SECONDS))
-    wait_timeout = int(eval_config.get("wait_timeout_seconds", DEFAULT_WAIT_TIMEOUT_SECONDS))
+    startup_timeout, poll_interval = get_incremental_wait_config(config)
 
     seen_first_event = False
     while not stop_requested:
-        timeout = wait_timeout if seen_first_event else first_wait_timeout
-        ready = wait_for_buffer(INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested)
+        timeout = None if seen_first_event else startup_timeout
+        ready = wait_for_buffer(
+            INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested,
+            poll_interval_seconds=poll_interval,
+        )
         if ready is None:
-            if not stop_requested:
-                print(
-                    f"[WARNING] [evaluation] timed out after {timeout}s waiting for {INPUT_BUFFER} "
-                    "with no upstream EOS seen; exiting as if stream ended (possible silent data loss upstream).",
-                    file=sys.stderr,
-                )
-            break
+            if stop_requested:
+                return
+            raise TimeoutError(f"[evaluation] startup timed out after {startup_timeout}s waiting for {INPUT_BUFFER}")
         seen_first_event = True
         decision_event = load_earliest_buffer(INPUT_BUFFER)
         if decision_event is None:
-            break
+            print("[evaluation] worker completed after upstream EOS", file=sys.stderr)
+            return
 
         snapshot_path = decision_event.get("predicted_match_path") if decision_event else None
         if not snapshot_path or not os.path.exists(snapshot_path):
@@ -95,7 +87,7 @@ def main():
         os.remove(snapshot_path)
         delete_earliest_buffer_file(INPUT_BUFFER)
 
-    print("[evaluation] worker completed", file=sys.stderr)
+    print("[evaluation] worker stopped", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

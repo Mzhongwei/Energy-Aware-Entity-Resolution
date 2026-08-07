@@ -8,9 +8,12 @@ version_name: "embeddingtest"
 # k8s/pipeline/batch/pipeline.yaml / k8s/pipeline/incremental/*.yaml). If that mountPath
 # ever changes, these paths must be updated to match -- nothing checks this alignment
 # automatically. The PVC itself is populated separately by k8s/scripts/sync-data-pvc.sh.
-data_source_A: "/data/exp_datasets/4-1_dirty_dblp_acm/tableA.csv"
-data_source_B: "/data/exp_datasets/4-1_dirty_dblp_acm/tableB.csv"
-ground_truth: "/data/exp_datasets/4-1_dirty_dblp_acm/matches.txt"
+# data_source_A: "/data/exp_datasets/4-1_dirty_dblp_acm/tableA.csv"
+# data_source_B: "/data/exp_datasets/4-1_dirty_dblp_acm/tableB.csv"
+# ground_truth: "/data/exp_datasets/4-1_dirty_dblp_acm/matches.txt"
+data_source_A: "/app/code/Energy-Aware-Entity-Resolution/Data_example/fodors_zagats-tableA.csv"
+data_source_B: "/app/code/Energy-Aware-Entity-Resolution/Data_example/fodors_zagats-tableB.csv"
+ground_truth: "/app/code/Energy-Aware-Entity-Resolution/Data_example/fodors_zagats-matches.txt"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
@@ -45,16 +48,14 @@ state_management:
 ### Optional
 # pipeline
 #
-# first_wait_timeout_seconds / wait_timeout_seconds, present on every incremental worker's
-# task section below: first_wait applies only to the first item this worker ever waits for
-# (its whole upstream chain has to cold-start first, which can take much longer than
-# steady-state); wait applies to every wait after that, to detect an idle upstream. A
-# timeout with no explicit upstream EOS is logged as a [WARNING] and treated as end of
-# stream, but it's inherently ambiguous -- upstream may just be slow rather than actually
-# done, so check the logs for that warning before trusting an early-looking finish.
-normalization:
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
+# Workers use this timeout only while waiting for their first buffer or upstream EOS.
+# After startup they remain alive until an explicit EOS arrives; poll_interval_seconds is
+# only the filesystem check interval and never ends a worker.
+incremental:
+  startup_timeout_seconds: 1800
+  poll_interval_seconds: 2
+
+normalization: {}
 
 candidate_generation:
   status: True
@@ -76,8 +77,6 @@ graph_construction:
     # token_n: [2, 3]
     # char_n: []
     # skip: 0                    # How many positions can there be between words when forming an n-gram
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
 
 
 random_walk:
@@ -86,12 +85,8 @@ random_walk:
   walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
   rw_stat: false                 # statistical result of random walk
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
 
-cg_feature_extraction:
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
+cg_feature_extraction: {}
 
 embeddings_training:
   learning_method: "skipgram"    # skipgram / CBOW
@@ -99,21 +94,10 @@ embeddings_training:
   n_dimensions: 128
   training_algorithm: "word2vec" # word2vec / fasttext
   sampling_factor: 0.001
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
 
-candidate_enumeration:
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
+candidate_enumeration: {}
 
-calculating_similarity:
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
-  # Separate timeouts for the embedding-model snapshot wait: it waits for one specific
-  # window's .emb file from embedding_training, not a stream, so it has no EOS concept of
-  # its own -- every timeout here is logged, not just the ones without an explicit EOS.
-  embedding_first_wait_timeout_seconds: 1800
-  embedding_wait_timeout_seconds: 30
+calculating_similarity: {}
 
 decision_making:
   top_k: 10                      # top K most similar entries to keep
@@ -122,21 +106,11 @@ decision_making:
   strategy_suppl: "basic"        # similarity algorithm: basic / faiss
   sim_structure: "graph"         # list / graph
   output_format: "graphml"            # db / json / parquet / graphml
-  first_wait_timeout_seconds: 1800
-  wait_timeout_seconds: 60
 
 bert_training:
 
 bert_inference:
 
-evaluation:
-  # How long entries/worker/evaluation.py waits for the first decision_making event before
-  # giving up (the whole candidate_enumeration/calculating_similarity/decision_making chain
-  # has to produce its first output first, which can take much longer than a steady-state
-  # window). Defaults to 1800s if unset.
-  first_wait_timeout_seconds: 1800
-  # Idle timeout used for every wait after the first event, to detect that the upstream
-  # stream has ended. Defaults to 60s if unset.
-  wait_timeout_seconds: 60
+evaluation: {}
 
 b_evaluation:
