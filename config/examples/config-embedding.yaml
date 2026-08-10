@@ -3,10 +3,10 @@ mode: "embedding-training-inference-evaluation"
 version_name: "embeddingtest"
 
 # incremental mode
-# The static dataset volume mounts /srv/shared/data/exp_datasets at /data.
-data_source_A: "/data/2-fordors_zagats/tableA.csv"
-data_source_B: "/data/2-fordors_zagats/tableB.csv"
-ground_truth: "/data/2-fordors_zagats/matches.txt"
+# The static NFS dataset volume is mounted at /data.
+data_source_A: "/data/exp_datasets/2-fordors_zagats/tableA.csv"
+data_source_B: "/data/exp_datasets/2-fordors_zagats/tableB.csv"
+ground_truth: "/data/exp_datasets/2-fordors_zagats/matches.txt"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"

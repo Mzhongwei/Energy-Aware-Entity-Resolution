@@ -3,10 +3,10 @@ mode: "bert-training-evaluation"
 version_name: "spa"
 
 # bert mode, source data
-# The static dataset volume mounts /srv/shared/data/exp_datasets at /data.
-trainset_path: "/data/4-1_dirty_dblp_acm/train.csv"
-testset_path: "/data/4-1_dirty_dblp_acm/test.csv"
-evalset_path: "/data/4-1_dirty_dblp_acm/valid.csv"
+# The static NFS dataset volume is mounted at /data.
+trainset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/train.csv"
+testset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/test.csv"
+evalset_path: "/data/exp_datasets/4-1_dirty_dblp_acm/valid.csv"
 # STATE MANAGEMENT
 state_management:
 # bert mode
