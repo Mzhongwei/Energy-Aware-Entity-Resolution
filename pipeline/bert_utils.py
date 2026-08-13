@@ -1,5 +1,6 @@
-import evaluate
 import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
 
 def build_tokenize_fn(tokenizer):
     def tokenize_dataset(dataset):
@@ -12,21 +13,21 @@ def build_tokenize_fn(tokenizer):
         )
     return tokenize_dataset
 
-def build_compute_metrics():
-    metric_acc = evaluate.load("accuracy")
-    metric_f1 = evaluate.load("f1")
-    metric_precision = evaluate.load("precision")
-    metric_recall = evaluate.load("recall")
 
+def build_compute_metrics():
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         predictions = np.argmax(logits, axis=-1)
 
         return {
-            "accuracy": metric_acc.compute(predictions=predictions, references=labels)["accuracy"],
-            "f1": metric_f1.compute(predictions=predictions, references=labels, average="weighted")["f1"],
-            "precision": metric_precision.compute(predictions=predictions, references=labels, average="weighted")["precision"],
-            "recall": metric_recall.compute(predictions=predictions, references=labels, average="weighted")["recall"],
+            "accuracy": accuracy_score(labels, predictions),
+            "f1": f1_score(labels, predictions, average="weighted", zero_division=0),
+            "precision": precision_score(
+                labels, predictions, average="weighted", zero_division=0
+            ),
+            "recall": recall_score(
+                labels, predictions, average="weighted", zero_division=0
+            ),
         }
 
     return compute_metrics

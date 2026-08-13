@@ -1,6 +1,5 @@
 from datasets import Dataset, DatasetDict
 import numpy as np
-import evaluate
 import os
 from transformers import (
     AutoTokenizer,
