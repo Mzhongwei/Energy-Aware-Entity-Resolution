@@ -16,6 +16,7 @@ from pipeline.decision_making import decide_matches
 from pipeline.evaluation import compare_ground_truth
 from utils.pipeline_io import _delete_file_if_exists, load_earliest_buffer, wait_for_buffer, write_buffer, write_eos, delete_earliest_buffer_file, get_earliest_window_index, get_embedding_buffer_file
 from utils.pipeline_io import deserialize_from_json, parse_json_payload, serialize_for_json, write_step_output, write_text
+from utils.utils import is_cross_side_pair, orient_record_pair
 
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "").strip()
@@ -71,28 +72,7 @@ def _sample_pairs(pairs, limit: int = 5):
     return preview
 
 
-def _side_prefix(rid: str) -> str:
-    """Extract the dataset-side prefix from a record id.
-
-    类别：诊断和小工具类
-    """
-    rid = str(rid)
-    if "_" not in rid:
-        return ""
-    return rid.split("_", 1)[0]
-
-
-def _is_same_side_pair(left_id: str, right_id: str) -> bool:
-    """Detect whether two record ids belong to the same dataset side.
-
-    类别：诊断和小工具类
-    """
-    left_side = _side_prefix(left_id)
-    right_side = _side_prefix(right_id)
-    return left_side in {"A", "B"} and left_side == right_side
-
-
-def _filter_cross_side_pairs(pairs):
+def _filter_cross_side_pairs(config, pairs):
     """Remove same-side pairs before decision making.
 
     类别：诊断和小工具类
@@ -100,10 +80,11 @@ def _filter_cross_side_pairs(pairs):
     filtered_pairs = []
     dropped_same_side = 0
     for indexed_id, query_id, score in pairs:
-        if _is_same_side_pair(indexed_id, query_id):
+        if not is_cross_side_pair(config, indexed_id, query_id):
             dropped_same_side += 1
             continue
-        filtered_pairs.append((indexed_id, query_id, score))
+        left_id, right_id = orient_record_pair(config, indexed_id, query_id)
+        filtered_pairs.append((left_id, right_id, score))
     return filtered_pairs, dropped_same_side
 
 
@@ -568,7 +549,7 @@ def decision_making(config, matching_pairs, model, previous_pairs=None):
         raise ValueError("embedding_model must be initialized or loaded before decision_making.")
 
     matching_pairs = _normalize_matching_pairs(matching_pairs)
-    matching_pairs, dropped_same_side = _filter_cross_side_pairs(matching_pairs)
+    matching_pairs, dropped_same_side = _filter_cross_side_pairs(config, matching_pairs)
     _log(
         f"[decision_making] matching_pairs_count={len(matching_pairs)} "
         f"dropped_same_side={dropped_same_side} sample={_sample_pairs(matching_pairs)}"

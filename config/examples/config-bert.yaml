@@ -2,6 +2,11 @@
 mode: "bert-training-evaluation"
 version_name: "spa"
 
+# Prefixes identify the left and right datasets when record pairs are compared.
+record_ids:
+  left_prefix: "A_"
+  right_prefix: "B_"
+
 # bert mode, source data
 # The static NFS dataset volume is mounted at /data.
 trainset_path: "/data/exp_datasets/2-fordors_zagats/train.csv"

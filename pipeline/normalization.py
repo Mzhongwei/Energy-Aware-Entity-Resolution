@@ -7,7 +7,7 @@ except ModuleNotFoundError:
     def tqdm(iterable, **kwargs):
         return iterable
     
-from utils.utils import convert_token_value, data_cleaning
+from utils.utils import convert_token_value, data_cleaning, get_record_id_prefixes
 
 
 IDS_DIR = os.path.join("data", "ids")
@@ -63,16 +63,17 @@ def clear_id_counters(config=None):
 
 def _resolve_id_config(config, is_training=False):
     version_name = str(config.get("version_name", "default")).strip() or "default"
+    left_prefix, right_prefix = get_record_id_prefixes(config)
 
     if is_training:
         return {
             "counter_path": os.path.join(IDS_DIR, f"{version_name}_A.txt"),
-            "prefix": "A_",
+            "prefix": left_prefix,
         }
 
     return {
         "counter_path": os.path.join(IDS_DIR, f"{version_name}_B.txt"),
-        "prefix": "B_",
+        "prefix": right_prefix,
     }
 
 

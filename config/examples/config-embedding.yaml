@@ -2,6 +2,11 @@
 mode: "embedding-training-inference-evaluation"
 version_name: "embeddingtest"
 
+# Prefixes identify the indexed (left) and incremental/query (right) datasets.
+record_ids:
+  left_prefix: "A_"
+  right_prefix: "B_"
+
 # incremental mode
 # The static NFS dataset volume is mounted at /data.
 data_source_A: "/data/exp_datasets/2-fordors_zagats/tableA.csv"

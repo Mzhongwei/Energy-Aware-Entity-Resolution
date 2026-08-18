@@ -38,6 +38,80 @@ CG_METHOD_ALIASES = {
 
 OUTPUT_CODE = "%Y%m%d_%H%M%S"
 
+
+def get_record_id_prefixes(config: dict) -> tuple[str, str]:
+    """Return the required, unambiguous left/right record-id prefixes."""
+    record_ids = config.get("record_ids") if isinstance(config, dict) else None
+    if not isinstance(record_ids, dict):
+        raise ValueError("Missing required configuration block: record_ids")
+
+    left = record_ids.get("left_prefix")
+    right = record_ids.get("right_prefix")
+    if not isinstance(left, str) or not left:
+        raise ValueError("record_ids.left_prefix must be a non-empty string")
+    if not isinstance(right, str) or not right:
+        raise ValueError("record_ids.right_prefix must be a non-empty string")
+    if left.startswith(right) or right.startswith(left):
+        raise ValueError("record_ids.left_prefix and right_prefix must not overlap")
+    return left, right
+
+
+def record_id_side(config: dict, record_id) -> str:
+    """Classify a record id as ``left`` or ``right`` from configured prefixes."""
+    left_prefix, right_prefix = get_record_id_prefixes(config)
+    value = str(record_id)
+    if value.startswith(left_prefix):
+        return "left"
+    if value.startswith(right_prefix):
+        return "right"
+    raise ValueError(f"Record id does not match a configured prefix: {value}")
+
+
+def orient_record_pair(config: dict, first, second) -> tuple[str, str]:
+    """Return a pair in canonical ``(left, right)`` order."""
+    first, second = str(first), str(second)
+    first_side = record_id_side(config, first)
+    second_side = record_id_side(config, second)
+    if first_side == second_side:
+        raise ValueError(f"Pair members belong to the same dataset side: {first}, {second}")
+    return (first, second) if first_side == "left" else (second, first)
+
+
+def is_cross_side_pair(config: dict, first, second) -> bool:
+    """Return whether two record ids belong to different configured sides."""
+    return record_id_side(config, first) != record_id_side(config, second)
+
+
+def load_scored_pairs_from_graphml(config: dict, graph_path: str) -> list[tuple[str, str, float]]:
+    """Restore canonical scored pairs from edges and score-1 merged vertices."""
+    from igraph import Graph
+
+    graph = Graph.Read_GraphML(graph_path)
+    scores: dict[tuple[str, str], float] = {}
+
+    for edge in graph.es:
+        left, right = orient_record_pair(
+            config,
+            graph.vs[edge.source]["name"],
+            graph.vs[edge.target]["name"],
+        )
+        score = float(edge["weight"])
+        scores[(left, right)] = max(score, scores.get((left, right), float("-inf")))
+
+    for vertex in graph.vs:
+        members = (
+            str(vertex["members"]).split(",")
+            if "members" in vertex.attributes() and vertex["members"]
+            else []
+        )
+        left_members = [member for member in members if record_id_side(config, member) == "left"]
+        right_members = [member for member in members if record_id_side(config, member) == "right"]
+        for left in left_members:
+            for right in right_members:
+                scores[(left, right)] = 1.0
+
+    return [(left, right, score) for (left, right), score in scores.items()]
+
 ### check configuration ###
 def _merge_with_defaults(user_config, default_config):
     """

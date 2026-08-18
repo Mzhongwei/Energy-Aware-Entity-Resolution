@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-from igraph import Graph
+from utils.utils import load_scored_pairs_from_graphml, orient_record_pair
 
 
 Pair = Tuple[str, str]
@@ -41,41 +41,29 @@ def _get_similarity_file(configuration: dict) -> str:
     return str(Path(save_dir) / f"{name}{ext}")
 
 
-def _ground_truth_pairs(ground_truth_file: str) -> Tuple[Set[Pair], Set[str]]:
+def _ground_truth_pairs(configuration: dict, ground_truth_file: str) -> Tuple[Set[Pair], Set[str]]:
     matches = _get_ground_truth(ground_truth_file)
     pair_set: Set[Pair] = set()
     left_target_rids: Set[str] = set()
 
     for left_rid, right_rids in matches.items():
-        left_target_rids.add(left_rid)
         for right_rid in right_rids:
             if left_rid != right_rid:
-                pair_set.add((left_rid, right_rid))
+                left, right = orient_record_pair(configuration, left_rid, right_rid)
+                left_target_rids.add(left)
+                pair_set.add((left, right))
 
     return pair_set, left_target_rids
 
 
-def _predicted_pairs_from_graphml(similarity_file: str) -> Set[Pair]:
+def _predicted_pairs_from_graphml(configuration: dict, similarity_file: str) -> Set[Pair]:
     if not Path(similarity_file).exists():
         raise FileNotFoundError(f"Similarity file not found: {similarity_file}")
 
-    graph = Graph.Read_GraphML(similarity_file)
-    predicted_pairs: Set[Pair] = set()
-    for edge in graph.es:
-        source = str(graph.vs[edge.source]["name"])
-        target = str(graph.vs[edge.target]["name"])
-        if source == target:
-            continue
-        predicted_pairs.add((source, target))
-
-    for vertex in graph.vs:
-        members = vertex["members"].split(",") if "members" in vertex.attributes() and vertex["members"] else []
-        if len(members) >= 2:
-            for idx, left in enumerate(members):
-                for right in members[idx + 1:]:
-                    if left != right:
-                        predicted_pairs.add((str(left), str(right)))
-    return predicted_pairs
+    return {
+        (left, right)
+        for left, right, _score in load_scored_pairs_from_graphml(configuration, similarity_file)
+    }
 
 
 def _compute_metrics(predicted_pairs: Set[Pair], actual_pairs: Set[Pair]) -> Dict[str, float]:
@@ -105,8 +93,8 @@ def compare_ground_truth(configuration: dict, similarity_file=None) -> Dict[str,
     if output_format != "graphml":
         raise ValueError("Current evaluation implementation supports graphml output only.")
 
-    actual_pairs, left_target_rids = _ground_truth_pairs(ground_truth_file)
-    predicted_pairs = _predicted_pairs_from_graphml(similarity_file)
+    actual_pairs, left_target_rids = _ground_truth_pairs(configuration, ground_truth_file)
+    predicted_pairs = _predicted_pairs_from_graphml(configuration, similarity_file)
 
     all_metrics = _compute_metrics(predicted_pairs, actual_pairs)
 

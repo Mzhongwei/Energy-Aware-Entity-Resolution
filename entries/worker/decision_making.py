@@ -17,6 +17,7 @@ from utils.pipeline_io import (
 )
 from models.embedding_model import EmbeddingModel
 from pipeline.decision_making import decide_matches
+from utils.utils import load_scored_pairs_from_graphml
 
 """
 task: decision making
@@ -67,7 +68,13 @@ def main():
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
     os.makedirs(os.path.dirname(predicted_match_path), exist_ok=True)
 
-    previous_pairs = None
+    previous_pairs = (
+        load_scored_pairs_from_graphml(config, predicted_match_path)
+        if os.path.isfile(predicted_match_path)
+        else None
+    )
+    if previous_pairs:
+        print(f"[decision_making] restored {len(previous_pairs)} previous pairs from {predicted_match_path}")
     seen_first_item = False
     while not stop_requested:
         timeout = None if seen_first_item else startup_timeout
