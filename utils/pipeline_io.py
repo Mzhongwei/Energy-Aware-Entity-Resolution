@@ -24,7 +24,7 @@ def load_config(config_path: str):
     return loaded if isinstance(loaded, dict) else {}
 
 
-def get_incremental_wait_config(config: dict) -> tuple[int, float]:
+def get_incremental_wait_config(config: dict) -> tuple[int | None, float]:
     """Return the single startup timeout and the non-terminal polling interval."""
     incremental = config.get("incremental", {}) if isinstance(config, dict) else {}
     startup_timeout = int(incremental.get("startup_timeout_seconds", 1800))
@@ -33,6 +33,8 @@ def get_incremental_wait_config(config: dict) -> tuple[int, float]:
         raise ValueError("incremental.startup_timeout_seconds must be greater than zero")
     if poll_interval <= 0:
         raise ValueError("incremental.poll_interval_seconds must be greater than zero")
+    if os.environ.get("EAER_HOT_RESTART", "").strip().lower() == "true":
+        return None, poll_interval
     return startup_timeout, poll_interval
 
 
