@@ -15,7 +15,12 @@ from utils.pipeline_io import (
     write_buffer,
     write_eos,
 )
-from pipeline.graph_construction import load_or_create_graph, persist_graph, serialize_dyn_roots
+from pipeline.graph_construction import (
+    clear_dyn_roots,
+    load_or_create_graph,
+    persist_graph,
+    serialize_dyn_roots,
+)
 
 """
 task: representation graph construction
@@ -85,6 +90,7 @@ def main():
         handoff = {"graph_path": snapshot_path, "dyn_roots": serialize_dyn_roots(graph)}
 
         write_buffer(handoff, OUTPUT_BUFFER, window_index, extension="json")
+        clear_dyn_roots(graph)
         delete_earliest_buffer_file(INPUT_BUFFER)
 
     print("[graph_construction] worker stopped without emitting EOS", file=sys.stderr)

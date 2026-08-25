@@ -685,6 +685,16 @@ def serialize_dyn_roots(graph: DynGraphIgraph) -> list:
     return sorted(set(names))
 
 
+def clear_dyn_roots(graph: DynGraphIgraph) -> None:
+    """Clear roots already handed to random walk while preserving meta-path keys."""
+    roots = graph.dyn_roots
+    if isinstance(roots, dict):
+        for root_set in roots.values():
+            root_set.clear()
+    elif roots is not None:
+        roots.clear()
+
+
 def restore_dyn_roots(graph: DynGraphIgraph, root_names) -> None:
     """Restore dyn_roots on a freshly loaded graph from a serialize_dyn_roots payload."""
     i_graph = graph.get_graph()
