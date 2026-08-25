@@ -95,7 +95,8 @@ embeddings_training:
 
 candidate_enumeration: {}
 
-calculating_similarity: {}
+calculating_similarity:
+  chunk_size: 4096              # candidate pairs scored per in-memory chunk
 
 decision_making:
   top_k: 10                      # top K most similar entries to keep

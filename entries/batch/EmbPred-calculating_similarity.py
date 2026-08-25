@@ -32,8 +32,15 @@ def main():
     model_path = os.path.join(get_model_directory(config, "embedding"), MODEL_FILE_NAME)
     model = EmbeddingModel.load(model_path)
 
-    batch_threshold = int(config.get("calculating_similarity", {}).get("batch_threshold", 2048))
-    matching_pairs = score_mutual_top1_candidate_pairs(model, candidate_pairs, batch_threshold=batch_threshold) if candidate_pairs else []
+    task_config = config.get("calculating_similarity", {}) or {}
+    batch_threshold = int(task_config.get("batch_threshold", 2048))
+    chunk_size = int(task_config.get("chunk_size", 4096))
+    matching_pairs = score_mutual_top1_candidate_pairs(
+        model,
+        candidate_pairs,
+        batch_threshold=batch_threshold,
+        chunk_size=chunk_size,
+    ) if candidate_pairs else []
 
     write_step_output(
         directory=get_transfer_data_directory(args.workload, OUTPUT_DATA_TYPE),

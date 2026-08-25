@@ -1,8 +1,9 @@
 import numpy as np
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, Iterator, List, Tuple
 
 
 ScoredPair = Tuple[str, str, float]
+CandidatePair = Tuple[str, str]
 
 
 def _resolve_keyed_vectors(model):
@@ -12,11 +13,10 @@ def _resolve_keyed_vectors(model):
     raise ValueError("embedding_model must expose keyed vectors via `.wv`.")
 
 
-def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> List[Tuple[str, str]]:
+def _iter_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> Iterator[CandidatePair]:
     if not isinstance(candidate_pairs, list):
         raise ValueError("candidate_pairs must be a list of tuples.")
 
-    flattened_pairs: List[Tuple[str, str]] = []
     for pair in candidate_pairs:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise ValueError("Each candidate_pairs item must be a 2-element list or tuple of (indexed_id, query_ids).")
@@ -28,8 +28,25 @@ def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> Li
         else:
             raise ValueError("query_ids must be a string or an iterable of query ids.")
         for query_id in iterable_query_ids:
-            flattened_pairs.append((str(indexed_id), str(query_id)))
-    return flattened_pairs
+            yield str(indexed_id), str(query_id)
+
+
+def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> List[CandidatePair]:
+    return list(_iter_candidate_pairs(candidate_pairs))
+
+
+def _chunk_pairs(pairs: Iterable[CandidatePair], chunk_size: int) -> Iterator[List[CandidatePair]]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero.")
+
+    chunk: List[CandidatePair] = []
+    for pair in pairs:
+        chunk.append(pair)
+        if len(chunk) == chunk_size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def _cosine_similarity(vec_a, vec_b) -> float:
@@ -87,10 +104,11 @@ def score_candidate_pairs(model, candidate_pairs: List[Tuple[str, List[str]]], b
     return _score_pairs_iterative(kv, flattened_pairs)
 
 
-def _select_best_pairs(matching_pairs: List[ScoredPair]) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Tuple[str, float]]]:
-    best_for_indexed: Dict[str, Tuple[str, float]] = {}
-    best_for_query: Dict[str, Tuple[str, float]] = {}
-
+def _update_best_pairs(
+    matching_pairs: Iterable[ScoredPair],
+    best_for_indexed: Dict[str, Tuple[str, float]],
+    best_for_query: Dict[str, Tuple[str, float]],
+) -> None:
     for pair in matching_pairs:
         if not isinstance(pair, tuple) or len(pair) != 3:
             raise ValueError("Each matching_pairs item must be a tuple of (left_id/indexed_id, right_id/query_id, score).")
@@ -104,16 +122,19 @@ def _select_best_pairs(matching_pairs: List[ScoredPair]) -> Tuple[Dict[str, Tupl
         if current_query is None or score > current_query[1]:
             best_for_query[query_id] = (indexed_id, score)
 
+
+def _select_best_pairs(matching_pairs: List[ScoredPair]) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Tuple[str, float]]]:
+    best_for_indexed: Dict[str, Tuple[str, float]] = {}
+    best_for_query: Dict[str, Tuple[str, float]] = {}
+    _update_best_pairs(matching_pairs, best_for_indexed, best_for_query)
+
     return best_for_indexed, best_for_query
 
 
-def select_mutual_top1_pairs(matching_pairs: List[ScoredPair]) -> List[ScoredPair]:
-    if not isinstance(matching_pairs, list):
-        raise ValueError("matching_pairs must be a list of scored tuples.")
-    if not matching_pairs:
-        raise ValueError("matching_pairs is empty; cannot perform mutual top1 selection.")
-
-    best_for_indexed, best_for_query = _select_best_pairs(matching_pairs)
+def _mutual_top1_from_best(
+    best_for_indexed: Dict[str, Tuple[str, float]],
+    best_for_query: Dict[str, Tuple[str, float]],
+) -> List[ScoredPair]:
     final_pairs: List[ScoredPair] = []
     for indexed_id, (query_id, score) in best_for_indexed.items():
         reverse_best = best_for_query.get(query_id)
@@ -125,15 +146,41 @@ def select_mutual_top1_pairs(matching_pairs: List[ScoredPair]) -> List[ScoredPai
     return final_pairs
 
 
-def score_mutual_top1_candidate_pairs(model, candidate_pairs: List[Tuple[str, List[str]]], batch_threshold: int = 2048) -> List[ScoredPair]:
+def select_mutual_top1_pairs(matching_pairs: List[ScoredPair]) -> List[ScoredPair]:
+    if not isinstance(matching_pairs, list):
+        raise ValueError("matching_pairs must be a list of scored tuples.")
+    if not matching_pairs:
+        raise ValueError("matching_pairs is empty; cannot perform mutual top1 selection.")
+
+    return _mutual_top1_from_best(*_select_best_pairs(matching_pairs))
+
+
+def score_mutual_top1_candidate_pairs(
+    model,
+    candidate_pairs: List[Tuple[str, List[str]]],
+    batch_threshold: int = 2048,
+    chunk_size: int = 4096,
+) -> List[ScoredPair]:
     """
     Compute local mutual top1 pairs with unified semantics:
 
     - left_id == indexed_id == training-side id
     - right_id == query_id == incremental-side id
     """
-    matching_pairs = score_candidate_pairs(model, candidate_pairs, batch_threshold=batch_threshold)
-    return select_mutual_top1_pairs(matching_pairs)
+    pair_count = sum(1 for _ in _iter_candidate_pairs(candidate_pairs))
+    if pair_count == 0:
+        raise ValueError("candidate_pairs is empty; cannot calculate similarity.")
+
+    kv = _resolve_keyed_vectors(model)
+    use_batch = pair_count >= int(batch_threshold)
+    best_for_indexed: Dict[str, Tuple[str, float]] = {}
+    best_for_query: Dict[str, Tuple[str, float]] = {}
+
+    for chunk in _chunk_pairs(_iter_candidate_pairs(candidate_pairs), int(chunk_size)):
+        scored_chunk = _score_pairs_batch(kv, chunk) if use_batch else _score_pairs_iterative(kv, chunk)
+        _update_best_pairs(scored_chunk, best_for_indexed, best_for_query)
+
+    return _mutual_top1_from_best(best_for_indexed, best_for_query)
 
 
 __all__ = ["score_candidate_pairs", "select_mutual_top1_pairs", "score_mutual_top1_candidate_pairs"]

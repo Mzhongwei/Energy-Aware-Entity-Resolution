@@ -83,9 +83,10 @@ def run_calculating_similarity(config, candidate_pairs, embedding_model):
             "count": 0,
         }
 
-    sim_cfg = config.get("similarity", {})
+    sim_cfg = config.get("calculating_similarity", {}) or {}
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
-    log(f"[calculating_similarity] batch_threshold={batch_threshold}")
+    chunk_size = int(sim_cfg.get("chunk_size", 4096))
+    log(f"[calculating_similarity] batch_threshold={batch_threshold} chunk_size={chunk_size}")
 
     try:
         base_kv = getattr(embedding_model, "wv", getattr(embedding_model, "model", None))
@@ -109,6 +110,7 @@ def run_calculating_similarity(config, candidate_pairs, embedding_model):
         embedding_model,
         candidate_pairs,
         batch_threshold=batch_threshold,
+        chunk_size=chunk_size,
     )
     preview = candidate_pairs_score[:3] if isinstance(candidate_pairs_score, list) else candidate_pairs_score
     log(f"[calculating_similarity] score_count={safe_len(candidate_pairs_score)} preview={preview}")

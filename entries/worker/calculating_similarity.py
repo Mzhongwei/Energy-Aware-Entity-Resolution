@@ -54,6 +54,7 @@ def main():
     config = load_config(args.config)
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
     batch_threshold = int(task_config.get("batch_threshold", 2048))
+    chunk_size = int(task_config.get("chunk_size", 4096))
     startup_timeout, poll_interval = get_incremental_wait_config(config)
 
     seen_first_item = False
@@ -95,7 +96,12 @@ def main():
             )
 
         model = EmbeddingModel.load(embedding_path)
-        matching_pairs = score_mutual_top1_candidate_pairs(model, candidate_pairs, batch_threshold=batch_threshold)
+        matching_pairs = score_mutual_top1_candidate_pairs(
+            model,
+            candidate_pairs,
+            batch_threshold=batch_threshold,
+            chunk_size=chunk_size,
+        )
         write_buffer(matching_pairs, OUTPUT_BUFFER, window_index, extension="json")
 
         for path in (embedding_path, f"{embedding_path}.meta.json"):
