@@ -219,7 +219,7 @@ def start_consumer(config):
     
     # start kafka
     poll_timeout = 5
-    max_empty_polls = 5
+    max_empty_polls = 20
     startup_grace_seconds =  120
     empty_poll_count = 0
 
