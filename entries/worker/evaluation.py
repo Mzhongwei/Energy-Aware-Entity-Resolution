@@ -73,8 +73,10 @@ def main():
         snapshot_path = decision_event.get("predicted_match_path") if decision_event else None
         if not snapshot_path or not os.path.exists(snapshot_path):
             print(f"[evaluation] no snapshot for event {decision_event}; skipping", file=sys.stderr)
+            del decision_event
             delete_earliest_buffer_file(INPUT_BUFFER)
             continue
+        del decision_event
 
         result = compare_ground_truth(config, similarity_file=snapshot_path)
         write_step_output(
@@ -83,6 +85,7 @@ def main():
             extension=REPORT_EXTENSION,
             output=result,
         )
+        del result
 
         os.remove(snapshot_path)
         delete_earliest_buffer_file(INPUT_BUFFER)

@@ -81,14 +81,19 @@ def main():
             index = CGIndex.from_disk(config, get_model_directory(config, "index"))
             # calculate candidate pairs 
             candidate_pairs = enumerate_candidates(cg_feature, index)
+            del index
         else:
             data_pairs_file = config.get("candidate_generation", {}).get("data_pairs_fixed", "")
             if data_pairs_file:
                 print(f"[candidate_enumeration] fetch from file {data_pairs_file}")
                 candidate_pairs = fetch_candidates(data_pairs_file)
             else:
-                print(f"error: [candidate_enumeration] fetch from file {data_pairs_file}, file not found")
+                raise FileNotFoundError(
+                    "candidate_generation.data_pairs_fixed is required when candidate generation is disabled"
+                )
+        del cg_feature
         write_buffer(candidate_pairs, OUTPUT_BUFFER, window_index, extension="json")
+        del candidate_pairs
         delete_earliest_buffer_file(INPUT_BUFFER)
 
     print("[candidate_enumeration] worker stopped without emitting EOS", file=sys.stderr)

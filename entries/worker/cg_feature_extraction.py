@@ -76,8 +76,10 @@ def main():
         window_index = get_earliest_window_index(INPUT_BUFFER)
         method = config.get("candidate_generation", {}).get("method", "fullindexing")
         cg_feature = compute_features(processed_data, method, config)
+        del processed_data
         if cg_feature is not None:
             write_buffer(cg_feature, OUTPUT_BUFFER, window_index, extension="json")
+        del cg_feature
 
         delete_earliest_buffer_file(INPUT_BUFFER)
 

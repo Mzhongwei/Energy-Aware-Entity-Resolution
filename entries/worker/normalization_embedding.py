@@ -87,11 +87,13 @@ def main():
             file=sys.stderr,
         )
         returned = index_normalization(config=config, raw_data=raw_data, raw_data_path=None, is_training=False)    
+        del raw_data
         window_index = get_earliest_window_index(RAW_BUFFER)
 
         if returned is not None:
             write_buffer(returned, GRAPH_BUFFER, window_index, extension="csv")
             write_buffer(returned, FEATURE_BUFFER, window_index, extension="csv")
+        del returned
 
         delete_earliest_buffer_file(RAW_BUFFER)
     print("[normalization] worker stopped without emitting EOS", file=sys.stderr)

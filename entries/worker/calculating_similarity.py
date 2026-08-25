@@ -102,7 +102,10 @@ def main():
             batch_threshold=batch_threshold,
             chunk_size=chunk_size,
         )
+        del model
+        del candidate_pairs
         write_buffer(matching_pairs, OUTPUT_BUFFER, window_index, extension="json")
+        del matching_pairs
 
         for path in (embedding_path, f"{embedding_path}.meta.json"):
             if os.path.exists(path):

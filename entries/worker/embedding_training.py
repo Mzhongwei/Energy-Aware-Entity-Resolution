@@ -79,6 +79,7 @@ def main():
         window_index = get_earliest_window_index(INPUT_BUFFER)
 
         model = train_embeddings(config, model, sequences)
+        del sequences
         model.save(model_path)
 
         write_buffer(model, OUTPUT_BUFFER, window_index, extension="emb")

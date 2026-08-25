@@ -212,11 +212,7 @@ def _flush_buffer_if_any(consumer: Consumer, data_buffer: list, window_index: in
 
 def start_consumer(config):
     global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
-    data_store = {
-        "raw_data": None,
-        "is_training": False,
-    }
-    
+
     # start kafka
     poll_timeout = 5
     max_empty_polls = 20
@@ -262,7 +258,6 @@ def start_consumer(config):
                         continue
                     print("[INFO] No new messages for a while. Exiting consumer loop.", flush=True)
                     if data_buffer:
-                        data_store['raw_data'] = pd.DataFrame(data_buffer)
                         data_buffer = _flush_buffer_if_any(
                             consumer,
                             data_buffer,
@@ -288,7 +283,6 @@ def start_consumer(config):
                             continue
                         print("[INFO] No new messages for a while. Exiting consumer loop.", flush=True)
                         if data_buffer:
-                            data_store['raw_data'] = pd.DataFrame(data_buffer)
                             data_buffer = _flush_buffer_if_any(
                                 consumer,
                                 data_buffer,
@@ -336,7 +330,6 @@ def start_consumer(config):
             data_buffer.append(metadata)
             last_valid_msg = msg
             if len(data_buffer) >= config["kafka"]["window_count"]:
-                data_store['raw_data'] = pd.DataFrame(data_buffer)
                 write_buffer(data_buffer, BUFFER_DIR, window_index, extension="csv")
                 _commit_processed_offsets(consumer, last_valid_msg, "window flush")
                 data_buffer = []

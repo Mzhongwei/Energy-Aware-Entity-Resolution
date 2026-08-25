@@ -84,12 +84,14 @@ def main():
 
         window_index = get_earliest_window_index(INPUT_BUFFER)
         graph.build_relation(processed_data)
+        del processed_data
 
         snapshot_path = os.path.join(SNAPSHOT_DIR, f"graph_window_{window_index}.graphml")
         persist_graph(graph, snapshot_path)
         handoff = {"graph_path": snapshot_path, "dyn_roots": serialize_dyn_roots(graph)}
 
         write_buffer(handoff, OUTPUT_BUFFER, window_index, extension="json")
+        del handoff
         clear_dyn_roots(graph)
         delete_earliest_buffer_file(INPUT_BUFFER)
 

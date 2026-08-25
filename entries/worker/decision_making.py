@@ -106,6 +106,8 @@ def main():
             model=model,
             output_format=output_format,
         )
+        del model
+        del matching_pairs
         predicted_graph.export_graphml(predicted_match_path)
 
         snapshot_path = os.path.join(SNAPSHOT_DIR, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
@@ -117,6 +119,7 @@ def main():
             window_index,
             extension="json",
         )
+        del predicted_graph
         delete_earliest_buffer_file(INPUT_BUFFER)
 
     print("[decision_making] worker stopped without emitting EOS", file=sys.stderr)

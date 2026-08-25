@@ -1,4 +1,5 @@
 import argparse
+import gc
 import os
 import signal
 import sys
@@ -74,9 +75,17 @@ def main():
         graph_path = handoff["graph_path"]
         graph = load_or_create_graph(config, graph_path)
         restore_dyn_roots(graph, handoff.get("dyn_roots"))
+        del handoff
 
         sequences = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
+        # The next window loads a complete graph snapshot. Release this window's graph
+        # before serializing walks so the old and new snapshots never overlap in memory.
+        del graph
+        gc.collect()
+
         write_buffer(sequences, OUTPUT_BUFFER, window_index, extension="json")
+        del sequences
+        gc.collect()
 
         if os.path.exists(graph_path):
             os.remove(graph_path)
