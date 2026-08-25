@@ -9,9 +9,9 @@ record_ids:
 
 # incremental mode
 # The static NFS dataset volume is mounted at /data.
-data_source_A: "/data/exp_datasets/2-fordors_zagats/tableA.csv"
-data_source_B: "/data/exp_datasets/2-fordors_zagats/tableB.csv"
-ground_truth: "/data/exp_datasets/2-fordors_zagats/matches.txt"
+data_source_A: "/data/exp_datasets/6_1-dirty_itunes_amazon/tableA.csv"
+data_source_B: "/data/exp_datasets/6_1-dirty_itunes_amazon/tableB.csv"
+ground_truth: "/data/exp_datasets/6_1-dirty_itunes_amazon/matches.txt"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
@@ -23,7 +23,7 @@ kafka:
 
   # sliding window strategy
   window_strategy: "count"       # "count" or "time"
-  window_count: 26               # used if strategy is "count"
+  window_count: 1381             # used if strategy is "count"
   update_frequency: 0            # "csv" (file windows) or "kafka" (poll broker per iteration)
 
 ## meta_path:list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
