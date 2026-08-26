@@ -4,14 +4,18 @@ import signal
 import sys
 
 from utils.pipeline_io import (
+    acknowledge_window_checkpoint,
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
     get_incremental_wait_config,
     get_model_directory,
+    is_window_checkpoint_acknowledged,
     load_config,
+    load_checkpoint_reference,
     load_earliest_buffer,
     wait_for_buffer,
+    wait_for_checkpoint_reference,
     write_buffer,
     write_eos,
 )
@@ -24,8 +28,8 @@ task: decision making
 mode: incremental + embedding
 input: matching pairs [buffer]
 output: decision event, triggering evaluation [buffer]
-description: rescores conflicts against the latest embedding model in the shared model
-directory (not a per-window snapshot -- the model keeps evolving), and overwrites the
+description: rescores conflicts against the same immutable embedding checkpoint used by
+similarity calculation, and overwrites the
 predicted matching graph at a fixed path so it always reflects the most recent decision
 (for external inspection). Also persists a per-window snapshot under the output buffer and
 references it in the buffer event, so evaluation -- which may run concurrently with this
@@ -34,8 +38,8 @@ path happens to hold when it gets around to reading it.
 """
 
 INPUT_DATA_TYPE = "matching_pairs"
+EMBEDDING_INPUT_DATA_TYPE = "embedding_calculating"
 OUTPUT_DATA_TYPE = "predicted_matching"
-MODEL_FILE_NAME = "embedding.emb"
 PREDICTED_MATCH_FILE_NAME = "predicted_matching.graphml"
 SNAPSHOT_FILE_NAME_TEMPLATE = "predicted_matching_window_{window_index}.graphml"
 TASK_CONFIG_KEY = "decision_making"
@@ -56,6 +60,7 @@ def main():
     args = parser.parse_args()
 
     INPUT_BUFFER = get_buffer_directory(args.workload, INPUT_DATA_TYPE)
+    EMBEDDING_BUFFER = get_buffer_directory(args.workload, EMBEDDING_INPUT_DATA_TYPE)
     OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
     SNAPSHOT_DIR = os.path.join(OUTPUT_BUFFER, "snapshots")
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -64,7 +69,7 @@ def main():
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
     output_format = task_config.get("output_format", "graphml")
     startup_timeout, poll_interval = get_incremental_wait_config(config)
-    model_path = os.path.join(get_model_directory(config, "embedding"), MODEL_FILE_NAME)
+    checkpoint_dir = os.path.join(get_model_directory(config, "embedding"), "incremental_checkpoints")
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
     os.makedirs(os.path.dirname(predicted_match_path), exist_ok=True)
 
@@ -94,12 +99,36 @@ def main():
             write_eos(OUTPUT_BUFFER)
             print("[decision_making] worker completed after upstream EOS", file=sys.stderr)
             return
-        if not matching_pairs:
-            delete_earliest_buffer_file(INPUT_BUFFER)
-            continue
 
         window_index = get_earliest_window_index(INPUT_BUFFER)
-        model = EmbeddingModel.load(model_path)
+        reference_path = os.path.join(EMBEDDING_BUFFER, f"{window_index}.json")
+        if is_window_checkpoint_acknowledged(checkpoint_dir, window_index):
+            delete_earliest_buffer_file(INPUT_BUFFER)
+            if os.path.isfile(reference_path):
+                os.remove(reference_path)
+            continue
+        if not matching_pairs:
+            acknowledge_window_checkpoint(checkpoint_dir, window_index)
+            delete_earliest_buffer_file(INPUT_BUFFER)
+            if os.path.isfile(reference_path):
+                os.remove(reference_path)
+            continue
+
+        reference_path = wait_for_checkpoint_reference(
+            EMBEDDING_BUFFER,
+            window_index,
+            timeout_seconds=None,
+            should_stop=lambda: stop_requested,
+            poll_interval_seconds=poll_interval,
+        )
+        if reference_path is None:
+            return
+        if os.path.basename(reference_path).startswith("eos_"):
+            raise RuntimeError(
+                f"[decision_making] embedding stream ended before window {window_index} was produced"
+            )
+        reference = load_checkpoint_reference(reference_path)
+        model = EmbeddingModel.load(reference["checkpoint_path"])
         previous_pairs, predicted_graph = decide_matches(
             mutualtop_pairs=matching_pairs,
             previous_pairs=previous_pairs,
@@ -108,6 +137,7 @@ def main():
         )
         del model
         del matching_pairs
+        del reference
         predicted_graph.export_graphml(predicted_match_path)
 
         snapshot_path = os.path.join(SNAPSHOT_DIR, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
@@ -120,7 +150,10 @@ def main():
             extension="json",
         )
         del predicted_graph
+        acknowledge_window_checkpoint(checkpoint_dir, window_index)
         delete_earliest_buffer_file(INPUT_BUFFER)
+        if os.path.isfile(reference_path):
+            os.remove(reference_path)
 
     print("[decision_making] worker stopped without emitting EOS", file=sys.stderr)
 

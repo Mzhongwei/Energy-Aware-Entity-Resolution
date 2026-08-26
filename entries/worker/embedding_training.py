@@ -16,7 +16,9 @@ from utils.pipeline_io import (
     mark_window_published,
     prune_window_checkpoints,
     wait_for_buffer,
+    wait_for_window_checkpoint_ack,
     write_buffer,
+    write_checkpoint_reference,
     write_eos,
 )
 from pipeline.embedding_training import load_or_create_model, train_embeddings
@@ -61,7 +63,16 @@ def main():
     checkpoint_model_path = latest_checkpoint[1] if latest_checkpoint else model_path
     model = load_or_create_model(config, checkpoint_model_path)
     if latest_checkpoint:
-        model.save(model_path)
+        write_checkpoint_reference(
+            os.path.dirname(model_path),
+            "current",
+            checkpoint_model_path,
+            checkpoint_window,
+        )
+        for seed_path in (model_path, f"{model_path}.meta.json"):
+            if os.path.isfile(seed_path):
+                os.remove(seed_path)
+        prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
     seen_first_item = False
     while not stop_requested:
@@ -76,6 +87,17 @@ def main():
             raise TimeoutError(
                 f"[embedding_training] startup timed out after {startup_timeout}s waiting for {INPUT_BUFFER}"
             )
+        if (
+            checkpoint_window >= 0
+            and is_window_published(checkpoint_dir, checkpoint_window)
+            and not wait_for_window_checkpoint_ack(
+                checkpoint_dir,
+                checkpoint_window,
+                should_stop=lambda: stop_requested,
+                poll_interval_seconds=poll_interval,
+            )
+        ):
+            return
         seen_first_item = True
         sequences = load_earliest_buffer(INPUT_BUFFER)
         if sequences is None:
@@ -90,7 +112,12 @@ def main():
 
         if window_index <= checkpoint_window:
             if window_index == checkpoint_window and not is_window_published(checkpoint_dir, window_index):
-                write_buffer(model, OUTPUT_BUFFER, window_index, extension="emb")
+                write_checkpoint_reference(
+                    OUTPUT_BUFFER,
+                    window_index,
+                    checkpoint_model_path,
+                    checkpoint_window,
+                )
                 mark_window_published(checkpoint_dir, window_index)
             del sequences
             delete_earliest_buffer_file(INPUT_BUFFER)
@@ -99,11 +126,24 @@ def main():
 
         model = train_embeddings(config, model, sequences)
         del sequences
-        model.save(model_path)
 
-        write_buffer(model, checkpoint_dir, window_index, extension="emb")
-        write_buffer(model, OUTPUT_BUFFER, window_index, extension="emb")
+        checkpoint_model_path = write_buffer(model, checkpoint_dir, window_index, extension="emb")
+        write_checkpoint_reference(
+            os.path.dirname(model_path),
+            "current",
+            checkpoint_model_path,
+            window_index,
+        )
+        write_checkpoint_reference(
+            OUTPUT_BUFFER,
+            window_index,
+            checkpoint_model_path,
+            window_index,
+        )
         mark_window_published(checkpoint_dir, window_index)
+        for seed_path in (model_path, f"{model_path}.meta.json"):
+            if os.path.isfile(seed_path):
+                os.remove(seed_path)
         delete_earliest_buffer_file(INPUT_BUFFER)
         checkpoint_window = window_index
         prune_window_checkpoints(checkpoint_dir, checkpoint_window)

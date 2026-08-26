@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import sys
 from time import sleep, time, time_ns
 
@@ -360,42 +359,71 @@ def get_cg_index_buffer_file(buffer_dir: str, window_index: int) -> str | None:
     )
 
 
-def wait_for_embedding_buffer(
+def wait_for_checkpoint_reference(
     buffer_dir: str,
     window_index: int,
     timeout_seconds: int | None = None,
     should_stop=None,
     poll_interval_seconds: float = 1,
 ) -> str | None:
-    def find_embedding_or_eos():
-        embedding_path = get_embedding_buffer_file(buffer_dir, window_index)
-        if embedding_path:
-            return embedding_path
+    def find_reference_or_eos():
+        reference_path = os.path.join(buffer_dir, f"{window_index}.json")
+        if os.path.isfile(reference_path):
+            return reference_path
         return _find_earliest(
             buffer_dir,
             lambda path, name: os.path.isfile(path) and name.startswith("eos_") and name.endswith(".json"),
         )
 
     return _wait_for(
-        find_embedding_or_eos,
+        find_reference_or_eos,
         timeout_seconds,
         should_stop=should_stop,
         poll_interval_seconds=poll_interval_seconds,
     )
 
 
-def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
-    embedding_dir = _find_earliest(
-        buffer_dir,
-        lambda path, name: (
-            os.path.isdir(path)
-            and name == str(window_index)
-            and os.path.isfile(os.path.join(path, "embedding.emb"))
-            and os.path.isfile(os.path.join(path, ".complete"))
-        ),
-        missing_dir_msg=f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve embedding buffer file.",
-    )
-    return os.path.join(embedding_dir, "embedding.emb") if embedding_dir else None
+def load_checkpoint_reference(reference_path: str) -> dict:
+    with open(reference_path, "r", encoding="utf-8") as reference_file:
+        payload = json.load(reference_file)
+    reference = payload.get("value") if isinstance(payload, dict) else None
+    return resolve_checkpoint_reference(reference, reference_path)
+
+
+def resolve_checkpoint_reference(reference, source: str = "checkpoint reference") -> dict:
+    if not isinstance(reference, dict):
+        raise ValueError(f"Invalid checkpoint reference: {source}")
+    checkpoint_path = reference.get("checkpoint_path")
+    if not checkpoint_path or not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint target does not exist: {checkpoint_path}")
+    if checkpoint_path.endswith(".emb") and not os.path.isfile(
+        os.path.join(os.path.dirname(checkpoint_path), ".complete")
+    ):
+        raise RuntimeError(f"Embedding checkpoint is incomplete: {checkpoint_path}")
+    if checkpoint_path.endswith(".graphml"):
+        metadata_path = os.path.splitext(checkpoint_path)[0] + ".json"
+        if not os.path.isfile(metadata_path):
+            raise RuntimeError(f"Graph checkpoint is incomplete: {checkpoint_path}")
+    return reference
+
+
+def write_checkpoint_reference(
+    output_dir: str,
+    reference_name: int | str,
+    checkpoint_path: str,
+    checkpoint_window: int,
+    **metadata,
+) -> str:
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    if checkpoint_path.endswith(".emb"):
+        checkpoint_dir = os.path.dirname(checkpoint_dir)
+    reference = {
+        "checkpoint_path": checkpoint_path,
+        "checkpoint_dir": checkpoint_dir,
+        "checkpoint_window": checkpoint_window,
+        **metadata,
+    }
+    return _write_json_buffer(reference, output_dir, reference_name)
 
 
 def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "json"):
@@ -518,18 +546,6 @@ def get_earliest_window_index(buffer_dir: str) -> int:
     return prefix
 
 
-def copy_file_atomic(source_path: str, destination_path: str) -> None:
-    ensure_parent_dir(destination_path)
-    temp_path = f"{destination_path}.{time_ns()}.tmp"
-    try:
-        shutil.copyfile(source_path, temp_path)
-        os.replace(temp_path, destination_path)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
-
-
 def write_window_checkpoint(checkpoint_dir: str, window_index: int, value) -> str:
     return _write_json_buffer(value, checkpoint_dir, window_index)
 
@@ -554,6 +570,39 @@ def mark_window_published(checkpoint_dir: str, window_index: int) -> None:
 
 def is_window_published(checkpoint_dir: str, window_index: int) -> bool:
     return os.path.isfile(os.path.join(checkpoint_dir, f"{window_index}.published"))
+
+
+def acknowledge_window_checkpoint(checkpoint_dir: str, window_index: int) -> None:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    marker_path = os.path.join(checkpoint_dir, f"{window_index}.ack")
+    temp_path = f"{marker_path}.{time_ns()}.tmp"
+    with open(temp_path, "w", encoding="utf-8"):
+        pass
+    os.replace(temp_path, marker_path)
+    print(f"[INFO] Acknowledged checkpoint window {window_index}: {checkpoint_dir}", flush=True)
+
+
+def is_window_checkpoint_acknowledged(checkpoint_dir: str, window_index: int) -> bool:
+    return os.path.isfile(os.path.join(checkpoint_dir, f"{window_index}.ack"))
+
+
+def wait_for_window_checkpoint_ack(
+    checkpoint_dir: str,
+    window_index: int,
+    should_stop=None,
+    poll_interval_seconds: float = 1,
+) -> bool:
+    marker_path = os.path.join(checkpoint_dir, f"{window_index}.ack")
+    if not os.path.isfile(marker_path):
+        print(f"[INFO] Waiting for checkpoint window {window_index} to be consumed", flush=True)
+    return bool(
+        _wait_for(
+            lambda: marker_path if os.path.isfile(marker_path) else None,
+            None,
+            should_stop=should_stop,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+    )
 
 
 def latest_graph_checkpoint(checkpoint_dir: str):
@@ -594,15 +643,28 @@ def latest_embedding_checkpoint(checkpoint_dir: str):
 def prune_window_checkpoints(checkpoint_dir: str, keep_window_index: int) -> None:
     if not os.path.isdir(checkpoint_dir):
         return
-    for name in os.listdir(checkpoint_dir):
-        window_index = _window_index_from_name(name)
-        if window_index is None or window_index >= keep_window_index:
+    names = os.listdir(checkpoint_dir)
+    indexes = sorted({
+        window_index
+        for name in names
+        for window_index in [_window_index_from_name(name)]
+        if window_index is not None and window_index < keep_window_index
+    })
+    for window_index in indexes:
+        ack_path = os.path.join(checkpoint_dir, f"{window_index}.ack")
+        if not os.path.isfile(ack_path):
             continue
-        path = os.path.join(checkpoint_dir, name)
-        if os.path.isdir(path):
-            _delete_directory_if_exists(path)
-        elif os.path.isfile(path):
-            os.remove(path)
+        deleted = True
+        for name in names:
+            if _window_index_from_name(name) != window_index or name == f"{window_index}.ack":
+                continue
+            path = os.path.join(checkpoint_dir, name)
+            if os.path.isdir(path):
+                deleted = _delete_directory_if_exists(path) and deleted
+            elif os.path.isfile(path):
+                os.remove(path)
+        if deleted:
+            os.remove(ack_path)
 
 
 def write_eos(output_dir: str, reason: str = "stream_completed"):

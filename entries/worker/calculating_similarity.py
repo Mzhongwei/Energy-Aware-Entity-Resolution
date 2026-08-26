@@ -4,15 +4,15 @@ import signal
 import sys
 
 from utils.pipeline_io import (
-    _delete_directory_if_exists,
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
     get_incremental_wait_config,
     load_config,
+    load_checkpoint_reference,
     load_earliest_buffer,
     wait_for_buffer,
-    wait_for_embedding_buffer,
+    wait_for_checkpoint_reference,
     write_buffer,
     write_eos,
 )
@@ -24,7 +24,7 @@ task: similarity calculation
 mode: incremental + embedding
 input: candidate pairs [buffer], embedding model snapshot [buffer]
 output: matching pairs [buffer]
-description: reads and removes the per-window embedding snapshot after scoring.
+description: reads an immutable per-window embedding checkpoint by reference.
 """
 
 INPUT_DATA_TYPE = "candidate_pairs"
@@ -76,39 +76,39 @@ def main():
             write_eos(OUTPUT_BUFFER)
             print("[calculating_similarity] worker completed after upstream EOS", file=sys.stderr)
             return
-        if not candidate_pairs:
-            delete_earliest_buffer_file(INPUT_BUFFER)
-            continue
-
         window_index = get_earliest_window_index(INPUT_BUFFER)
-        embedding_path = wait_for_embedding_buffer(
+        reference_path = wait_for_checkpoint_reference(
             EMBEDDING_BUFFER,
             window_index,
             timeout_seconds=None,
             should_stop=lambda: stop_requested,
             poll_interval_seconds=poll_interval,
         )
-        if embedding_path is None:
+        if reference_path is None:
             return
-        if os.path.basename(embedding_path).startswith("eos_"):
+        if os.path.basename(reference_path).startswith("eos_"):
             raise RuntimeError(
                 f"[calculating_similarity] embedding stream ended before window {window_index} was produced"
             )
+        reference = load_checkpoint_reference(reference_path)
+        embedding_path = reference["checkpoint_path"]
 
-        model = EmbeddingModel.load(embedding_path)
-        matching_pairs = score_mutual_top1_candidate_pairs(
-            model,
-            candidate_pairs,
-            batch_threshold=batch_threshold,
-            chunk_size=chunk_size,
-        )
-        del model
+        if candidate_pairs:
+            model = EmbeddingModel.load(embedding_path)
+            matching_pairs = score_mutual_top1_candidate_pairs(
+                model,
+                candidate_pairs,
+                batch_threshold=batch_threshold,
+                chunk_size=chunk_size,
+            )
+            del model
+        else:
+            matching_pairs = []
         del candidate_pairs
         write_buffer(matching_pairs, OUTPUT_BUFFER, window_index, extension="json")
         del matching_pairs
 
         delete_earliest_buffer_file(INPUT_BUFFER)
-        _delete_directory_if_exists(os.path.dirname(embedding_path))
 
     print("[calculating_similarity] worker stopped without emitting EOS", file=sys.stderr)
 

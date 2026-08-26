@@ -1,16 +1,18 @@
 import argparse
 import gc
-import os
 import signal
 import sys
 
 from utils.pipeline_io import (
+    acknowledge_window_checkpoint,
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
     get_incremental_wait_config,
+    is_window_checkpoint_acknowledged,
     load_config,
     load_earliest_buffer,
+    resolve_checkpoint_reference,
     wait_for_buffer,
     write_buffer,
     write_eos,
@@ -72,7 +74,15 @@ def main():
             continue
 
         window_index = get_earliest_window_index(INPUT_BUFFER)
-        graph_path = handoff["graph_path"]
+        checkpoint_dir = handoff.get("checkpoint_dir", "")
+        checkpoint_window = int(handoff.get("checkpoint_window", window_index))
+        if not checkpoint_dir:
+            raise ValueError(f"[random_walk] missing checkpoint_dir for window {window_index}")
+        if is_window_checkpoint_acknowledged(checkpoint_dir, checkpoint_window):
+            delete_earliest_buffer_file(INPUT_BUFFER)
+            continue
+        handoff = resolve_checkpoint_reference(handoff)
+        graph_path = handoff["checkpoint_path"]
         graph = load_or_create_graph(config, graph_path)
         restore_dyn_roots(graph, handoff.get("dyn_roots"))
         del handoff
@@ -87,9 +97,8 @@ def main():
         del sequences
         gc.collect()
 
+        acknowledge_window_checkpoint(checkpoint_dir, checkpoint_window)
         delete_earliest_buffer_file(INPUT_BUFFER)
-        if os.path.exists(graph_path):
-            os.remove(graph_path)
 
     print("[random_walk] worker stopped without emitting EOS", file=sys.stderr)
 
