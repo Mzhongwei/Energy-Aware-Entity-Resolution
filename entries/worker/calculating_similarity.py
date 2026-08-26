@@ -4,6 +4,7 @@ import signal
 import sys
 
 from utils.pipeline_io import (
+    _delete_directory_if_exists,
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
@@ -23,8 +24,7 @@ task: similarity calculation
 mode: incremental + embedding
 input: candidate pairs [buffer], embedding model snapshot [buffer]
 output: matching pairs [buffer]
-description: reads the embedding snapshot without deleting it -- decision_making reads the
-same snapshot downstream and owns its cleanup.
+description: reads and removes the per-window embedding snapshot after scoring.
 """
 
 INPUT_DATA_TYPE = "candidate_pairs"
@@ -107,9 +107,7 @@ def main():
         write_buffer(matching_pairs, OUTPUT_BUFFER, window_index, extension="json")
         del matching_pairs
 
-        for path in (embedding_path, f"{embedding_path}.meta.json"):
-            if os.path.exists(path):
-                os.remove(path)
+        _delete_directory_if_exists(os.path.dirname(embedding_path))
         delete_earliest_buffer_file(INPUT_BUFFER)
 
     print("[calculating_similarity] worker stopped without emitting EOS", file=sys.stderr)

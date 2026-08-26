@@ -57,7 +57,7 @@ def main():
     config = load_config(args.config)
     startup_timeout, poll_interval = get_incremental_wait_config(config)
     graph_path = os.path.join(get_model_directory(config, "graph"), GRAPH_FILE_NAME)
-    graph = load_or_create_graph(config, graph_path)  # seed from batch-trained graph if present
+    graph = load_or_create_graph(config, graph_path, enable_samplers=False)
 
     seen_first_item = False
     while not stop_requested:

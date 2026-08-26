@@ -62,6 +62,7 @@ class DynGraphIgraph(RepresentationGraph):
         rare_alpha: float = 1.0,
         undirected_weighted: bool = True,
         cache_ngram_size: int = 200_000,
+        enable_samplers: bool = True,
     ) -> None:
         super().__init__(directed=directed)
 
@@ -79,6 +80,7 @@ class DynGraphIgraph(RepresentationGraph):
         self._check_flatten()
 
         self.samplers = []
+        self.enable_samplers = enable_samplers
         self.ngram_config = ngram_config if isinstance(ngram_config, dict) else None
         self._cache_ngram_size = cache_ngram_size
         self.rare_bias = rare_bias
@@ -151,13 +153,17 @@ class DynGraphIgraph(RepresentationGraph):
                 node_class = v["node_class"] if "node_class" in v.attributes() else None
                 if (not isinstance(node_class, dict)) and v["type"] in self.node_classes:
                     v["node_class"] = self._update_node_class(v["type"])
-        self.samplers = [None] * self.graph.vcount()
+        self.samplers = [None] * self.graph.vcount() if self.enable_samplers else []
         for v in self.graph.vs:
-            self._update_neighbors(int(v.index))
+            if self.enable_samplers:
+                self._update_neighbors(int(v.index))
             v["test_pretraining"] = True
             v["test_neighbors_freq"] = {}
 
     def _after_topology_changed(self) -> None:
+        if not self.enable_samplers:
+            self.samplers = []
+            return
         self.samplers = [None] * self.graph.vcount()
         for v in self.graph.vs:
             self._update_neighbors(int(v.index))
@@ -542,6 +548,9 @@ class DynGraphIgraph(RepresentationGraph):
 
         self._flush_pending_edges(pending_edges)
 
+        if not self.enable_samplers:
+            return
+
         # extend & update samplers
         self._extend_sampler(self.graph.vcount())
         neighbor_updated = set()
@@ -583,7 +592,7 @@ class DynGraphIgraph(RepresentationGraph):
             index_list.add(ng_index)
         return index_list
 
-def dyn_graph_generation(configuration):
+def dyn_graph_generation(configuration, enable_samplers: bool = True):
     """
     Generate the graph for the given dataframe following the specifications in configuration.
     :param df: dataframe to transform in graph.
@@ -627,7 +636,8 @@ def dyn_graph_generation(configuration):
         rare_bias='idf',
         rare_alpha=0.7,
         undirected_weighted=False,
-        meta_path=meta_path
+        meta_path=meta_path,
+        enable_samplers=enable_samplers,
     )
 
     t_end = datetime.now()
@@ -638,7 +648,7 @@ def dyn_graph_generation(configuration):
     return g
 
 
-def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
+def load_or_create_graph(configuration, graph_path: str, enable_samplers: bool = True) -> DynGraphIgraph:
     """
     Load a persisted representation graph if present, else build a fresh one.
 
@@ -647,10 +657,10 @@ def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
     using the dyn_roots produced alongside this graph by graph construction.
     """
     if os.path.isfile(graph_path) and os.path.getsize(graph_path) > 0:
-        graph = dyn_graph_generation(configuration)
+        graph = dyn_graph_generation(configuration, enable_samplers=enable_samplers)
         graph.load_graph(graph_path)
         return graph
-    return dyn_graph_generation(configuration)
+    return dyn_graph_generation(configuration, enable_samplers=enable_samplers)
 
 
 def persist_graph(graph: DynGraphIgraph, graph_path: str) -> None:

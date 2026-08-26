@@ -91,24 +91,37 @@ class EmbeddingModel:
         if model_dir:
             os.makedirs(model_dir, exist_ok=True)
 
-        self.model.save(path)
-        with open(f"{path}.meta.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "dimensions": self.dimensions,
-                    "window_size": self.window_size,
-                    "negative": self.negative,
-                    "epochs": self.epochs,
-                    "min_count": self.min_count,
-                    "training_algorithm": self.training_algorithm,
-                    "learning_method": self.learning_method,
-                    "workers": self.workers,
-                    "sampling_factor": self.sampling_factor,
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
+        temp_path = f"{path}.{os.getpid()}.tmp"
+        temp_meta_path = f"{temp_path}.meta.json"
+        try:
+            # A file handle keeps Gensim arrays in one file, so os.replace can
+            # publish the complete model atomically for concurrent readers.
+            with open(temp_path, "wb") as model_file:
+                self.model.save(model_file)
+            with open(temp_meta_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "dimensions": self.dimensions,
+                        "window_size": self.window_size,
+                        "negative": self.negative,
+                        "epochs": self.epochs,
+                        "min_count": self.min_count,
+                        "training_algorithm": self.training_algorithm,
+                        "learning_method": self.learning_method,
+                        "workers": self.workers,
+                        "sampling_factor": self.sampling_factor,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            os.replace(temp_meta_path, f"{path}.meta.json")
+            os.replace(temp_path, path)
+        except Exception:
+            for temp_file in (temp_path, temp_meta_path):
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            raise
 
     @classmethod
     def load(cls, path):

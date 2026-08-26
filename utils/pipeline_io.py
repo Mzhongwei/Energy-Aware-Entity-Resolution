@@ -366,11 +366,16 @@ def wait_for_embedding_buffer(
 
 
 def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
-    return _find_earliest(
+    embedding_dir = _find_earliest(
         buffer_dir,
-        lambda path, name: os.path.isfile(path) and name.startswith(f"{window_index}_") and name.endswith(".emb"),
+        lambda path, name: (
+            os.path.isdir(path)
+            and name.startswith(f"{window_index}_")
+            and os.path.isfile(os.path.join(path, "embedding.emb"))
+        ),
         missing_dir_msg=f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve embedding buffer file.",
     )
+    return os.path.join(embedding_dir, "embedding.emb") if embedding_dir else None
 
 
 def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "json"):
@@ -432,25 +437,19 @@ def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
 
 
 def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
-    emb_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.emb")
-    temp_emb_path = f"{emb_path}.tmp"
-    temp_meta_path = f"{temp_emb_path}.meta.json"
-    final_meta_path = f"{emb_path}.meta.json"
+    buffer_name = f"{prefix}_{time_ns()}"
+    final_dir = os.path.join(output_dir, buffer_name)
+    temp_dir = os.path.join(output_dir, f".{buffer_name}.tmp")
+    temp_emb_path = os.path.join(temp_dir, "embedding.emb")
 
     try:
+        os.makedirs(temp_dir)
         model.save(temp_emb_path)
-        os.replace(temp_emb_path, emb_path)
-        if os.path.exists(temp_meta_path):
-            os.replace(temp_meta_path, final_meta_path)
+        os.replace(temp_dir, final_dir)
     except Exception:
-        for path in (temp_emb_path, temp_meta_path):
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
+        _delete_directory_if_exists(temp_dir)
         raise
-    return emb_path
+    return os.path.join(final_dir, "embedding.emb")
 
 
 def _get_earliest_buffer_directory(buffer_dir: str) -> str | None:
