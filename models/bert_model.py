@@ -15,8 +15,12 @@ class Model:
             self.model = AutoModelForSequenceClassification.from_pretrained(
                 "bert-base-uncased",
                 num_labels=num_labels,
+                local_files_only=True,
             )
-            self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                "bert-base-uncased",
+                local_files_only=True,
+            )
         elif self.model_name == "distilbert":
             print(f"use Model {self.model_name}")
             self.model = AutoModelForSequenceClassification.from_pretrained(
