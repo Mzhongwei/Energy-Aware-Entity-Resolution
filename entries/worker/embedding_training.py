@@ -9,8 +9,12 @@ from utils.pipeline_io import (
     get_earliest_window_index,
     get_incremental_wait_config,
     get_model_directory,
+    is_window_published,
+    latest_embedding_checkpoint,
     load_config,
     load_earliest_buffer,
+    mark_window_published,
+    prune_window_checkpoints,
     wait_for_buffer,
     write_buffer,
     write_eos,
@@ -51,7 +55,13 @@ def main():
     config = load_config(args.config)
     startup_timeout, poll_interval = get_incremental_wait_config(config)
     model_path = os.path.join(get_model_directory(config, "embedding"), MODEL_FILE_NAME)
-    model = load_or_create_model(config, model_path)  # seed from batch-trained model if present
+    checkpoint_dir = os.path.join(os.path.dirname(model_path), "incremental_checkpoints")
+    latest_checkpoint = latest_embedding_checkpoint(checkpoint_dir)
+    checkpoint_window = latest_checkpoint[0] if latest_checkpoint else -1
+    checkpoint_model_path = latest_checkpoint[1] if latest_checkpoint else model_path
+    model = load_or_create_model(config, checkpoint_model_path)
+    if latest_checkpoint:
+        model.save(model_path)
 
     seen_first_item = False
     while not stop_requested:
@@ -78,12 +88,25 @@ def main():
 
         window_index = get_earliest_window_index(INPUT_BUFFER)
 
+        if window_index <= checkpoint_window:
+            if window_index == checkpoint_window and not is_window_published(checkpoint_dir, window_index):
+                write_buffer(model, OUTPUT_BUFFER, window_index, extension="emb")
+                mark_window_published(checkpoint_dir, window_index)
+            del sequences
+            delete_earliest_buffer_file(INPUT_BUFFER)
+            prune_window_checkpoints(checkpoint_dir, checkpoint_window)
+            continue
+
         model = train_embeddings(config, model, sequences)
         del sequences
         model.save(model_path)
 
+        write_buffer(model, checkpoint_dir, window_index, extension="emb")
         write_buffer(model, OUTPUT_BUFFER, window_index, extension="emb")
+        mark_window_published(checkpoint_dir, window_index)
         delete_earliest_buffer_file(INPUT_BUFFER)
+        checkpoint_window = window_index
+        prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
     print("[embedding_training] worker stopped without emitting EOS", file=sys.stderr)
 

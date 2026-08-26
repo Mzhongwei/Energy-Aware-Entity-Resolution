@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 from time import sleep, time, time_ns
 
@@ -166,6 +167,14 @@ def load_processed_data(processed_data_path: str):
 # =========================
 
 
+def _window_index_from_name(name: str) -> int | None:
+    token = name.split("_", 1)[0].split(".", 1)[0]
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
 def _find_earliest(buffer_dir: str, predicate, missing_dir_msg: str | None = None, not_found_msg: str | None = None) -> str | None:
     if not os.path.isdir(buffer_dir):
         if missing_dir_msg:
@@ -176,7 +185,13 @@ def _find_earliest(buffer_dir: str, predicate, missing_dir_msg: str | None = Non
         if not_found_msg:
             print(not_found_msg, file=sys.stderr, flush=True)
         return None
-    entries.sort(key=lambda name: os.path.getmtime(os.path.join(buffer_dir, name)), reverse=False)
+    entries.sort(
+        key=lambda name: (
+            _window_index_from_name(name) is None,
+            _window_index_from_name(name) or 0,
+            os.path.getmtime(os.path.join(buffer_dir, name)),
+        )
+    )
     return os.path.join(buffer_dir, entries[0])
 
 
@@ -335,7 +350,11 @@ def load_earliest_buffer(buffer_dir: str):
 def get_cg_index_buffer_file(buffer_dir: str, window_index: int) -> str | None:
     return _find_earliest(
         buffer_dir,
-        lambda path, name: os.path.isdir(path) and name.startswith(f"{window_index}_"),
+        lambda path, name: (
+            os.path.isdir(path)
+            and name == str(window_index)
+            and os.path.isfile(os.path.join(path, ".complete"))
+        ),
         missing_dir_msg=f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve CG index buffer file.",
         not_found_msg=f"[WARNING] No CG index buffer directories found in '{buffer_dir}' for window index {window_index}.",
     )
@@ -370,8 +389,9 @@ def get_embedding_buffer_file(buffer_dir: str, window_index: int) -> str | None:
         buffer_dir,
         lambda path, name: (
             os.path.isdir(path)
-            and name.startswith(f"{window_index}_")
+            and name == str(window_index)
             and os.path.isfile(os.path.join(path, "embedding.emb"))
+            and os.path.isfile(os.path.join(path, ".complete"))
         ),
         missing_dir_msg=f"[WARNING] Buffer directory '{buffer_dir}' does not exist; cannot retrieve embedding buffer file.",
     )
@@ -401,18 +421,31 @@ def write_buffer(data_buffer, output_dir: str, prefix: str, extension: str = "js
 
 def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
-    index_dir = os.path.join(output_dir, f"{prefix}_{time_ns()}")
-    cg_index.index_dir = index_dir
-    cg_index.persist()
-    print(f"[INFO] Wrote CGIndex buffer to {index_dir}", flush=True)
-    return index_dir
+    final_dir = os.path.join(output_dir, str(prefix))
+    if os.path.isfile(os.path.join(final_dir, ".complete")):
+        return final_dir
+    if os.path.isdir(final_dir):
+        _delete_directory_if_exists(final_dir)
+    temp_dir = os.path.join(output_dir, f".{prefix}.{time_ns()}.tmp")
+    try:
+        os.makedirs(temp_dir)
+        cg_index.index_dir = temp_dir
+        cg_index.persist()
+        with open(os.path.join(temp_dir, ".complete"), "w", encoding="utf-8"):
+            pass
+        os.replace(temp_dir, final_dir)
+    except Exception:
+        _delete_directory_if_exists(temp_dir)
+        raise
+    print(f"[INFO] Wrote CGIndex buffer to {final_dir}", flush=True)
+    return final_dir
 
 
 def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(data_buffer)
-    output_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.csv")
-    temp_path = f"{output_path}.tmp"
+    output_path = os.path.join(output_dir, f"{prefix}.csv")
+    temp_path = os.path.join(output_dir, f".{prefix}.{time_ns()}.csv.tmp")
     df.to_csv(temp_path, index=False)
     os.replace(temp_path, output_path)
     print(f"[INFO] Wrote buffer with {len(data_buffer)} records to {output_path} as CSV.", flush=True)
@@ -421,8 +454,8 @@ def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
 
 def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{prefix}_{time_ns()}.json")
-    temp_path = f"{output_path}.tmp"
+    output_path = os.path.join(output_dir, f"{prefix}.json")
+    temp_path = os.path.join(output_dir, f".{prefix}.{time_ns()}.json.tmp")
     try:
         with open(temp_path, "w", encoding="utf-8") as json_file:
             json.dump({"value": data_buffer}, json_file, default=str)
@@ -437,14 +470,21 @@ def _write_json_buffer(data_buffer, output_dir: str, prefix: str):
 
 
 def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
-    buffer_name = f"{prefix}_{time_ns()}"
+    buffer_name = str(prefix)
     final_dir = os.path.join(output_dir, buffer_name)
-    temp_dir = os.path.join(output_dir, f".{buffer_name}.tmp")
+    final_emb_path = os.path.join(final_dir, "embedding.emb")
+    if os.path.isfile(final_emb_path) and os.path.isfile(os.path.join(final_dir, ".complete")):
+        return final_emb_path
+    if os.path.isdir(final_dir):
+        _delete_directory_if_exists(final_dir)
+    temp_dir = os.path.join(output_dir, f".{buffer_name}.{time_ns()}.tmp")
     temp_emb_path = os.path.join(temp_dir, "embedding.emb")
 
     try:
         os.makedirs(temp_dir)
         model.save(temp_emb_path)
+        with open(os.path.join(temp_dir, ".complete"), "w", encoding="utf-8"):
+            pass
         os.replace(temp_dir, final_dir)
     except Exception:
         _delete_directory_if_exists(temp_dir)
@@ -453,7 +493,10 @@ def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
 
 
 def _get_earliest_buffer_directory(buffer_dir: str) -> str | None:
-    return _find_earliest(buffer_dir, lambda path, name: os.path.isdir(path))
+    return _find_earliest(
+        buffer_dir,
+        lambda path, name: os.path.isdir(path) and _window_index_from_name(name) is not None,
+    )
 
 
 def get_earliest_window_index(buffer_dir: str) -> int:
@@ -463,17 +506,103 @@ def get_earliest_window_index(buffer_dir: str) -> int:
         if not earliest_dir:
             return 0
         dir_name = os.path.basename(earliest_dir)
-        prefix = dir_name.split("_")[0]
+        prefix = _window_index_from_name(dir_name)
         source_name = dir_name
     else:
         filename = os.path.basename(earliest_file)
-        prefix = filename.split("_")[0]
+        prefix = _window_index_from_name(filename)
         source_name = filename
-    try:
-        return int(prefix)
-    except ValueError:
+    if prefix is None:
         print(f"[WARNING] Failed to parse window index from '{source_name}'; defaulting to 0.", file=sys.stderr, flush=True)
         return 0
+    return prefix
+
+
+def copy_file_atomic(source_path: str, destination_path: str) -> None:
+    ensure_parent_dir(destination_path)
+    temp_path = f"{destination_path}.{time_ns()}.tmp"
+    try:
+        shutil.copyfile(source_path, temp_path)
+        os.replace(temp_path, destination_path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+
+def write_window_checkpoint(checkpoint_dir: str, window_index: int, value) -> str:
+    return _write_json_buffer(value, checkpoint_dir, window_index)
+
+
+def load_window_checkpoint(checkpoint_dir: str, window_index: int):
+    checkpoint_path = os.path.join(checkpoint_dir, f"{window_index}.json")
+    if not os.path.isfile(checkpoint_path):
+        return None
+    with open(checkpoint_path, "r", encoding="utf-8") as checkpoint_file:
+        payload = json.load(checkpoint_file)
+    return payload.get("value") if isinstance(payload, dict) else None
+
+
+def mark_window_published(checkpoint_dir: str, window_index: int) -> None:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    marker_path = os.path.join(checkpoint_dir, f"{window_index}.published")
+    temp_path = f"{marker_path}.{time_ns()}.tmp"
+    with open(temp_path, "w", encoding="utf-8"):
+        pass
+    os.replace(temp_path, marker_path)
+
+
+def is_window_published(checkpoint_dir: str, window_index: int) -> bool:
+    return os.path.isfile(os.path.join(checkpoint_dir, f"{window_index}.published"))
+
+
+def latest_graph_checkpoint(checkpoint_dir: str):
+    if not os.path.isdir(checkpoint_dir):
+        return None
+    indexes = [
+        index
+        for name in os.listdir(checkpoint_dir)
+        if name.endswith(".json")
+        for index in [_window_index_from_name(name)]
+        if index is not None
+        and os.path.isfile(os.path.join(checkpoint_dir, f"{index}.graphml"))
+    ]
+    if not indexes:
+        return None
+    window_index = max(indexes)
+    return window_index, os.path.join(checkpoint_dir, f"{window_index}.graphml")
+
+
+def latest_embedding_checkpoint(checkpoint_dir: str):
+    if not os.path.isdir(checkpoint_dir):
+        return None
+    indexes = [
+        index
+        for name in os.listdir(checkpoint_dir)
+        if os.path.isdir(os.path.join(checkpoint_dir, name))
+        for index in [_window_index_from_name(name)]
+        if index is not None
+        and os.path.isfile(os.path.join(checkpoint_dir, name, "embedding.emb"))
+        and os.path.isfile(os.path.join(checkpoint_dir, name, ".complete"))
+    ]
+    if not indexes:
+        return None
+    window_index = max(indexes)
+    return window_index, os.path.join(checkpoint_dir, str(window_index), "embedding.emb")
+
+
+def prune_window_checkpoints(checkpoint_dir: str, keep_window_index: int) -> None:
+    if not os.path.isdir(checkpoint_dir):
+        return
+    for name in os.listdir(checkpoint_dir):
+        window_index = _window_index_from_name(name)
+        if window_index is None or window_index >= keep_window_index:
+            continue
+        path = os.path.join(checkpoint_dir, name)
+        if os.path.isdir(path):
+            _delete_directory_if_exists(path)
+        elif os.path.isfile(path):
+            os.remove(path)
 
 
 def write_eos(output_dir: str, reason: str = "stream_completed"):
@@ -481,9 +610,11 @@ def write_eos(output_dir: str, reason: str = "stream_completed"):
         return
     os.makedirs(output_dir, exist_ok=True)
     eos_payload = {"reason": reason}
-    output_path = os.path.join(output_dir, f"eos_{time_ns()}.json")
-    with open(output_path, "w", encoding="utf-8") as eos_file:
+    output_path = os.path.join(output_dir, "eos_stream.json")
+    temp_path = f"{output_path}.{time_ns()}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as eos_file:
         json.dump(eos_payload, eos_file)
+    os.replace(temp_path, output_path)
     print(f"[INFO] Wrote EOS marker: {output_path} reason={reason}", file=sys.stderr, flush=True)
 
 

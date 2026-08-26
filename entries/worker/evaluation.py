@@ -87,8 +87,8 @@ def main():
         )
         del result
 
-        os.remove(snapshot_path)
         delete_earliest_buffer_file(INPUT_BUFFER)
+        os.remove(snapshot_path)
 
     print("[evaluation] worker stopped", file=sys.stderr)
 

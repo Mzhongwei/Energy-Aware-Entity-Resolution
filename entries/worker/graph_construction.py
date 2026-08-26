@@ -4,16 +4,23 @@ import signal
 import sys
 
 from utils.pipeline_io import (
+    copy_file_atomic,
     delete_earliest_buffer_file,
     get_buffer_directory,
     get_earliest_window_index,
     get_incremental_wait_config,
     get_model_directory,
+    is_window_published,
+    latest_graph_checkpoint,
     load_config,
     load_earliest_buffer,
+    load_window_checkpoint,
+    mark_window_published,
+    prune_window_checkpoints,
     wait_for_buffer,
     write_buffer,
     write_eos,
+    write_window_checkpoint,
 )
 from pipeline.graph_construction import (
     clear_dyn_roots,
@@ -57,7 +64,11 @@ def main():
     config = load_config(args.config)
     startup_timeout, poll_interval = get_incremental_wait_config(config)
     graph_path = os.path.join(get_model_directory(config, "graph"), GRAPH_FILE_NAME)
-    graph = load_or_create_graph(config, graph_path, enable_samplers=False)
+    checkpoint_dir = os.path.join(os.path.dirname(graph_path), "incremental_checkpoints")
+    latest_checkpoint = latest_graph_checkpoint(checkpoint_dir)
+    checkpoint_window = latest_checkpoint[0] if latest_checkpoint else -1
+    checkpoint_graph_path = latest_checkpoint[1] if latest_checkpoint else graph_path
+    graph = load_or_create_graph(config, checkpoint_graph_path, enable_samplers=False)
 
     seen_first_item = False
     while not stop_requested:
@@ -83,17 +94,44 @@ def main():
             continue
 
         window_index = get_earliest_window_index(INPUT_BUFFER)
+        snapshot_path = os.path.join(SNAPSHOT_DIR, f"graph_window_{window_index}.graphml")
+
+        if window_index <= checkpoint_window:
+            if window_index == checkpoint_window and not is_window_published(checkpoint_dir, window_index):
+                checkpoint = load_window_checkpoint(checkpoint_dir, window_index) or {}
+                copy_file_atomic(checkpoint_graph_path, snapshot_path)
+                write_buffer(
+                    {"graph_path": snapshot_path, "dyn_roots": checkpoint.get("dyn_roots", [])},
+                    OUTPUT_BUFFER,
+                    window_index,
+                    extension="json",
+                )
+                mark_window_published(checkpoint_dir, window_index)
+            delete_earliest_buffer_file(INPUT_BUFFER)
+            prune_window_checkpoints(checkpoint_dir, checkpoint_window)
+            continue
+
         graph.build_relation(processed_data)
         del processed_data
+        graph._tokenize_cached.cache_clear()
 
-        snapshot_path = os.path.join(SNAPSHOT_DIR, f"graph_window_{window_index}.graphml")
-        persist_graph(graph, snapshot_path)
-        handoff = {"graph_path": snapshot_path, "dyn_roots": serialize_dyn_roots(graph)}
+        dyn_roots = serialize_dyn_roots(graph)
+        checkpoint_graph_path = os.path.join(checkpoint_dir, f"{window_index}.graphml")
+        persist_graph(graph, checkpoint_graph_path)
+        write_window_checkpoint(checkpoint_dir, window_index, {"dyn_roots": dyn_roots})
+        copy_file_atomic(checkpoint_graph_path, snapshot_path)
 
-        write_buffer(handoff, OUTPUT_BUFFER, window_index, extension="json")
-        del handoff
+        write_buffer(
+            {"graph_path": snapshot_path, "dyn_roots": dyn_roots},
+            OUTPUT_BUFFER,
+            window_index,
+            extension="json",
+        )
+        mark_window_published(checkpoint_dir, window_index)
         clear_dyn_roots(graph)
         delete_earliest_buffer_file(INPUT_BUFFER)
+        checkpoint_window = window_index
+        prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
     print("[graph_construction] worker stopped without emitting EOS", file=sys.stderr)
 

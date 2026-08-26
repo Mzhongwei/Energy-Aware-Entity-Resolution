@@ -107,8 +107,8 @@ def main():
         write_buffer(matching_pairs, OUTPUT_BUFFER, window_index, extension="json")
         del matching_pairs
 
-        _delete_directory_if_exists(os.path.dirname(embedding_path))
         delete_earliest_buffer_file(INPUT_BUFFER)
+        _delete_directory_if_exists(os.path.dirname(embedding_path))
 
     print("[calculating_similarity] worker stopped without emitting EOS", file=sys.stderr)
 

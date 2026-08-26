@@ -87,9 +87,9 @@ def main():
         del sequences
         gc.collect()
 
+        delete_earliest_buffer_file(INPUT_BUFFER)
         if os.path.exists(graph_path):
             os.remove(graph_path)
-        delete_earliest_buffer_file(INPUT_BUFFER)
 
     print("[random_walk] worker stopped without emitting EOS", file=sys.stderr)
 
