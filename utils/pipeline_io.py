@@ -1,7 +1,8 @@
+import atexit
 import json
 import os
 import sys
-from time import sleep, time, time_ns
+from time import perf_counter, sleep, time, time_ns
 
 import pandas as pd
 from pandas.errors import EmptyDataError
@@ -9,6 +10,69 @@ from ruamel.yaml import YAML
 
 
 DATA_ROOT = "/app/data"
+STEP_METRICS_PREFIX = "[EAER_STEP_METRICS] "
+_STEP_METRICS_STARTED = perf_counter()
+_STEP_METRICS_EMITTED = False
+
+
+def _process_io_counters() -> dict[str, int]:
+    counters: dict[str, int] = {}
+    with open("/proc/self/io", "r", encoding="utf-8") as stream:
+        for line in stream:
+            key, _, value = line.partition(":")
+            if key in {"rchar", "wchar", "read_bytes", "write_bytes"}:
+                counters[key] = int(value.strip())
+    return counters
+
+
+def _cgroup_io_counters() -> dict[str, int]:
+    """Return container-cgroup block I/O, including subprocesses, when cgroup v2 exists."""
+    totals = {"read_bytes": 0, "write_bytes": 0}
+    with open("/sys/fs/cgroup/io.stat", "r", encoding="utf-8") as stream:
+        for line in stream:
+            values = dict(token.split("=", 1) for token in line.split()[1:] if "=" in token)
+            totals["read_bytes"] += int(values.get("rbytes", 0))
+            totals["write_bytes"] += int(values.get("wbytes", 0))
+    return totals
+
+
+try:
+    _STEP_METRICS_IO_START = _process_io_counters()
+except (OSError, ValueError):
+    _STEP_METRICS_IO_START = {}
+try:
+    _STEP_METRICS_CGROUP_START = _cgroup_io_counters()
+except (OSError, ValueError):
+    _STEP_METRICS_CGROUP_START = {}
+
+
+def emit_step_metrics() -> None:
+    """Emit one machine-readable process I/O and elapsed-time record at shutdown."""
+    global _STEP_METRICS_EMITTED
+    if _STEP_METRICS_EMITTED:
+        return
+    _STEP_METRICS_EMITTED = True
+    try:
+        current = _process_io_counters()
+        try:
+            cgroup_current = _cgroup_io_counters()
+        except (OSError, ValueError):
+            cgroup_current = {}
+        storage_start = _STEP_METRICS_CGROUP_START or _STEP_METRICS_IO_START
+        storage_current = cgroup_current or current
+        payload = {
+            "logical_read_bytes": max(0, current.get("rchar", 0) - _STEP_METRICS_IO_START.get("rchar", 0)),
+            "logical_write_bytes": max(0, current.get("wchar", 0) - _STEP_METRICS_IO_START.get("wchar", 0)),
+            "storage_read_bytes": max(0, storage_current.get("read_bytes", 0) - storage_start.get("read_bytes", 0)),
+            "storage_write_bytes": max(0, storage_current.get("write_bytes", 0) - storage_start.get("write_bytes", 0)),
+            "elapsed_seconds": round(max(0.0, perf_counter() - _STEP_METRICS_STARTED), 6),
+        }
+        print(STEP_METRICS_PREFIX + json.dumps(payload, separators=(",", ":")), flush=True)
+    except Exception as error:  # Metrics must never change the business-step exit status.
+        print(f"[EAER_STEP_METRICS_ERROR] {error}", file=sys.stderr, flush=True)
+
+
+atexit.register(emit_step_metrics)
 
 # =========================
 # Config I/O

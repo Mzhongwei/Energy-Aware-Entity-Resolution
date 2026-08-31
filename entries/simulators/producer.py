@@ -11,6 +11,7 @@ from ruamel.yaml import YAML
 import pandas as pd
 
 from utils.write_log import write_log
+from utils import pipeline_io as _pipeline_io  # Registers per-step I/O metrics at exit.
 
 ACTIVE_JAVA_PROC = None
 ACTIVE_CONSUMER = None
