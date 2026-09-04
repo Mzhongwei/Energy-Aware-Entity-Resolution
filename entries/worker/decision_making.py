@@ -20,6 +20,7 @@ from utils.pipeline_io import (
     write_eos,
 )
 from models.embedding_model import EmbeddingModel
+from pipeline.calculating_similarity import get_mutual_top_k
 from pipeline.decision_making import decide_matches
 from utils.utils import load_scored_pairs_from_graphml
 
@@ -68,6 +69,7 @@ def main():
     config = load_config(args.config)
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
     output_format = task_config.get("output_format", "graphml")
+    top_k = get_mutual_top_k(config)
     startup_timeout, poll_interval = get_incremental_wait_config(config)
     checkpoint_dir = os.path.join(get_model_directory(config, "embedding"), "incremental_checkpoints")
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
@@ -130,10 +132,11 @@ def main():
         reference = load_checkpoint_reference(reference_path)
         model = EmbeddingModel.load(reference["checkpoint_path"])
         previous_pairs, predicted_graph = decide_matches(
-            mutualtop_pairs=matching_pairs,
+            mutual_topk_pairs=matching_pairs,
             previous_pairs=previous_pairs,
             model=model,
             output_format=output_format,
+            top_k=top_k,
         )
         del model
         del matching_pairs

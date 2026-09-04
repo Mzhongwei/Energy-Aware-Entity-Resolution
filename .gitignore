@@ -9,7 +9,8 @@ config/config*
 .codex
 # pytest and other test files
 .pytest*
-tests/
+tests/*
+!tests/test_mutual_topk.py
 # Energy Conso Results
 emissions*.csv
 result*.csv

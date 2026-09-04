@@ -4,6 +4,7 @@ from typing import Dict, Iterable, Iterator, List, Tuple
 
 ScoredPair = Tuple[str, str, float]
 CandidatePair = Tuple[str, str]
+TopPairs = Dict[str, Dict[str, float]]
 
 
 def _resolve_keyed_vectors(model):
@@ -104,65 +105,96 @@ def score_candidate_pairs(model, candidate_pairs: List[Tuple[str, List[str]]], b
     return _score_pairs_iterative(kv, flattened_pairs)
 
 
-def _update_best_pairs(
+def validate_top_k(top_k: int) -> int:
+    top_k = int(top_k)
+    if top_k <= 0:
+        raise ValueError("top_k must be greater than zero.")
+    return top_k
+
+
+def get_mutual_top_k(config: dict, default: int = 2) -> int:
+    if not isinstance(config, dict):
+        return validate_top_k(default)
+    section = config.get("decision_making")
+    if not isinstance(section, dict):
+        section = config.get("similarity")
+    if not isinstance(section, dict):
+        section = {}
+    return validate_top_k(section.get("top_k", default))
+
+
+def normalize_scored_pair(pair) -> ScoredPair:
+    if not isinstance(pair, (list, tuple)) or len(pair) != 3:
+        raise ValueError(
+            "Each matching_pairs item must be a list or tuple of "
+            "(left_id/indexed_id, right_id/query_id, score)."
+        )
+    return str(pair[0]), str(pair[1]), float(pair[2])
+
+
+def _update_top_pairs(
     matching_pairs: Iterable[ScoredPair],
-    best_for_indexed: Dict[str, Tuple[str, float]],
-    best_for_query: Dict[str, Tuple[str, float]],
+    top_for_indexed: TopPairs,
+    top_for_query: TopPairs,
+    top_k: int,
 ) -> None:
+    top_k = validate_top_k(top_k)
+
+    def update(store: TopPairs, node_id: str, other_id: str, score: float) -> None:
+        candidates = store.setdefault(node_id, {})
+        current = candidates.get(other_id)
+        if current is None or score > current:
+            candidates[other_id] = score
+        if len(candidates) > top_k:
+            ranked = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
+            store[node_id] = dict(ranked[:top_k])
+
     for pair in matching_pairs:
-        if not isinstance(pair, tuple) or len(pair) != 3:
-            raise ValueError("Each matching_pairs item must be a tuple of (left_id/indexed_id, right_id/query_id, score).")
-        indexed_id, query_id, score = str(pair[0]), str(pair[1]), float(pair[2])
-
-        current_indexed = best_for_indexed.get(indexed_id)
-        if current_indexed is None or score > current_indexed[1]:
-            best_for_indexed[indexed_id] = (query_id, score)
-
-        current_query = best_for_query.get(query_id)
-        if current_query is None or score > current_query[1]:
-            best_for_query[query_id] = (indexed_id, score)
+        indexed_id, query_id, score = normalize_scored_pair(pair)
+        update(top_for_indexed, indexed_id, query_id, score)
+        update(top_for_query, query_id, indexed_id, score)
 
 
-def _select_best_pairs(matching_pairs: List[ScoredPair]) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Tuple[str, float]]]:
-    best_for_indexed: Dict[str, Tuple[str, float]] = {}
-    best_for_query: Dict[str, Tuple[str, float]] = {}
-    _update_best_pairs(matching_pairs, best_for_indexed, best_for_query)
+def _select_top_pairs(matching_pairs: List[ScoredPair], top_k: int) -> Tuple[TopPairs, TopPairs]:
+    top_for_indexed: TopPairs = {}
+    top_for_query: TopPairs = {}
+    _update_top_pairs(matching_pairs, top_for_indexed, top_for_query, top_k)
 
-    return best_for_indexed, best_for_query
+    return top_for_indexed, top_for_query
 
 
-def _mutual_top1_from_best(
-    best_for_indexed: Dict[str, Tuple[str, float]],
-    best_for_query: Dict[str, Tuple[str, float]],
+def _mutual_topk_from_top_pairs(
+    top_for_indexed: TopPairs,
+    top_for_query: TopPairs,
 ) -> List[ScoredPair]:
     final_pairs: List[ScoredPair] = []
-    for indexed_id, (query_id, score) in best_for_indexed.items():
-        reverse_best = best_for_query.get(query_id)
-        if reverse_best is None:
-            continue
-        if reverse_best[0] == indexed_id:
-            final_pairs.append((indexed_id, query_id, score))
+    for indexed_id, query_candidates in top_for_indexed.items():
+        for query_id, score in query_candidates.items():
+            if indexed_id in top_for_query.get(query_id, {}):
+                final_pairs.append((indexed_id, query_id, score))
 
-    return final_pairs
+    return sorted(final_pairs, key=lambda pair: (pair[0], -pair[2], pair[1]))
 
 
-def select_mutual_top1_pairs(matching_pairs: List[ScoredPair]) -> List[ScoredPair]:
+def select_mutual_topk_pairs(matching_pairs: List[ScoredPair], top_k: int = 2) -> List[ScoredPair]:
     if not isinstance(matching_pairs, list):
         raise ValueError("matching_pairs must be a list of scored tuples.")
     if not matching_pairs:
-        raise ValueError("matching_pairs is empty; cannot perform mutual top1 selection.")
+        raise ValueError("matching_pairs is empty; cannot perform mutual top-k selection.")
 
-    return _mutual_top1_from_best(*_select_best_pairs(matching_pairs))
+    top_k = validate_top_k(top_k)
+    return _mutual_topk_from_top_pairs(*_select_top_pairs(matching_pairs, top_k))
 
 
-def score_mutual_top1_candidate_pairs(
+def score_mutual_topk_candidate_pairs(
     model,
     candidate_pairs: List[Tuple[str, List[str]]],
+    top_k: int = 2,
     batch_threshold: int = 2048,
     chunk_size: int = 4096,
 ) -> List[ScoredPair]:
     """
-    Compute local mutual top1 pairs with unified semantics:
+    Compute local mutual top-k pairs with unified semantics:
 
     - left_id == indexed_id == training-side id
     - right_id == query_id == incremental-side id
@@ -171,16 +203,24 @@ def score_mutual_top1_candidate_pairs(
     if pair_count == 0:
         raise ValueError("candidate_pairs is empty; cannot calculate similarity.")
 
+    top_k = validate_top_k(top_k)
     kv = _resolve_keyed_vectors(model)
     use_batch = pair_count >= int(batch_threshold)
-    best_for_indexed: Dict[str, Tuple[str, float]] = {}
-    best_for_query: Dict[str, Tuple[str, float]] = {}
+    top_for_indexed: TopPairs = {}
+    top_for_query: TopPairs = {}
 
     for chunk in _chunk_pairs(_iter_candidate_pairs(candidate_pairs), int(chunk_size)):
         scored_chunk = _score_pairs_batch(kv, chunk) if use_batch else _score_pairs_iterative(kv, chunk)
-        _update_best_pairs(scored_chunk, best_for_indexed, best_for_query)
+        _update_top_pairs(scored_chunk, top_for_indexed, top_for_query, top_k)
 
-    return _mutual_top1_from_best(best_for_indexed, best_for_query)
+    return _mutual_topk_from_top_pairs(top_for_indexed, top_for_query)
 
 
-__all__ = ["score_candidate_pairs", "select_mutual_top1_pairs", "score_mutual_top1_candidate_pairs"]
+__all__ = [
+    "score_candidate_pairs",
+    "get_mutual_top_k",
+    "normalize_scored_pair",
+    "validate_top_k",
+    "select_mutual_topk_pairs",
+    "score_mutual_topk_candidate_pairs",
+]

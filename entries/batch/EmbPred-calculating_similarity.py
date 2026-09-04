@@ -3,7 +3,7 @@ import os
 
 from utils.pipeline_io import load_config, get_model_directory, get_transfer_data_directory, load_processed_data, write_step_output
 from models.embedding_model import EmbeddingModel
-from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
+from pipeline.calculating_similarity import get_mutual_top_k, score_mutual_topk_candidate_pairs
 
 """
 task: similarity calculation
@@ -33,11 +33,13 @@ def main():
     model = EmbeddingModel.load(model_path)
 
     task_config = config.get("calculating_similarity", {}) or {}
+    top_k = get_mutual_top_k(config)
     batch_threshold = int(task_config.get("batch_threshold", 2048))
     chunk_size = int(task_config.get("chunk_size", 4096))
-    matching_pairs = score_mutual_top1_candidate_pairs(
+    matching_pairs = score_mutual_topk_candidate_pairs(
         model,
         candidate_pairs,
+        top_k=top_k,
         batch_threshold=batch_threshold,
         chunk_size=chunk_size,
     ) if candidate_pairs else []

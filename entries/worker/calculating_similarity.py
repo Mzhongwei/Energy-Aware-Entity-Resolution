@@ -17,7 +17,7 @@ from utils.pipeline_io import (
     write_eos,
 )
 from models.embedding_model import EmbeddingModel
-from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
+from pipeline.calculating_similarity import get_mutual_top_k, score_mutual_topk_candidate_pairs
 
 """
 task: similarity calculation
@@ -53,6 +53,7 @@ def main():
 
     config = load_config(args.config)
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
+    top_k = get_mutual_top_k(config)
     batch_threshold = int(task_config.get("batch_threshold", 2048))
     chunk_size = int(task_config.get("chunk_size", 4096))
     startup_timeout, poll_interval = get_incremental_wait_config(config)
@@ -95,9 +96,10 @@ def main():
 
         if candidate_pairs:
             model = EmbeddingModel.load(embedding_path)
-            matching_pairs = score_mutual_top1_candidate_pairs(
+            matching_pairs = score_mutual_topk_candidate_pairs(
                 model,
                 candidate_pairs,
+                top_k=top_k,
                 batch_threshold=batch_threshold,
                 chunk_size=chunk_size,
             )

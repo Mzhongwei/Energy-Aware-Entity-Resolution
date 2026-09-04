@@ -27,7 +27,7 @@ from pipeline import (
     compute_features,
 )
 from pipeline.candidate_enumeration import enumerate_candidates, fetch_candidates
-from pipeline.calculating_similarity import score_mutual_top1_candidate_pairs
+from pipeline.calculating_similarity import get_mutual_top_k, score_mutual_topk_candidate_pairs
 from pipeline.decision_making import decide_matches
 from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.graph_construction import dyn_graph_generation
@@ -231,29 +231,33 @@ def calculating_similarity(config, candidate_pairs, state_manager: StateManager)
     if embedding_model is None:
         raise ValueError("embedding_model must be initialized before calculating_similarity.")
     sim_cfg = _config_section(config, "calculating_similarity", "similarity")
+    top_k = get_mutual_top_k(config)
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
     chunk_size = int(sim_cfg.get("chunk_size", 4096))
-    return score_mutual_top1_candidate_pairs(
+    return score_mutual_topk_candidate_pairs(
         embedding_model,
         candidate_pairs,
+        top_k=top_k,
         batch_threshold=batch_threshold,
         chunk_size=chunk_size,
     )
 
 
-def decision_making(config, mutualtop_pairs, state_manager: StateManager):
+def decision_making(config, mutual_topk_pairs, state_manager: StateManager):
     print("[decision_making]")
     decision_cfg = _config_section(config, "decision_making", "similarity")
     output_format = decision_cfg.get("output_format", config.get("output_format", "graphml"))
-    previous_pairs = state_manager.get("mutualtop_pairs")
+    top_k = get_mutual_top_k(config)
+    previous_pairs = state_manager.get("mutual_topk_pairs")
     embedding_model = state_manager.get("embedding_model")
     final_pairs, predicted_matching = decide_matches(
-        mutualtop_pairs,
+        mutual_topk_pairs,
         previous_pairs=previous_pairs,
         model=embedding_model,
         output_format=output_format,
+        top_k=top_k,
     )
-    state_manager.update("mutualtop_pairs", final_pairs)
+    state_manager.update("mutual_topk_pairs", final_pairs)
     state_manager.update("predicted_matching", predicted_matching)
     return None
 
@@ -335,12 +339,12 @@ TASKS = {
     "calculating_similarity": {
         "deps": ["candidate_enumeration"],
         "input": ["candidate_pairs", "state_manager"],
-        "output": ["mutualtop_pairs"],
+        "output": ["mutual_topk_pairs"],
         "func": calculating_similarity
     },
     "decision_making": {
         "deps": ["calculating_similarity"],
-        "input": ["mutualtop_pairs", "state_manager"],
+        "input": ["mutual_topk_pairs", "state_manager"],
         "output": [],
         "func": decision_making
     },
