@@ -163,27 +163,3 @@ class EmbeddingModel:
 
     def __getattr__(self, item):
         return getattr(self.model, item)
-
-
-# def initialize_embeddings(
-#     dimensions,
-#     window_size,
-#     negative,
-#     epochs,
-#     min_count,
-#     training_algorithm="word2vec",
-#     learning_method="skipgram",
-#     workers=mp.cpu_count(),
-#     sampling_factor=0.001,
-# ):
-#     return EmbeddingModel(
-#         dimensions=dimensions,
-#         window_size=window_size,
-#         negative=negative,
-#         epochs=epochs,
-#         min_count=min_count,
-#         training_algorithm=training_algorithm,
-#         learning_method=learning_method,
-#         workers=workers,
-#         sampling_factor=sampling_factor,
-#     )

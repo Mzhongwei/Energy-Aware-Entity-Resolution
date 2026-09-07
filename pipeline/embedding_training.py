@@ -21,10 +21,10 @@ def _embedding_config(config) -> dict:
 def initialize_embeddings(config) -> EmbeddingModel:
     emb_cfg = _embedding_config(config)
     return EmbeddingModel(
-        dimensions=int(emb_cfg.get("n_dimensions", 300)),
+        dimensions=int(emb_cfg.get("n_dimensions", 128)),
         window_size=int(emb_cfg.get("window_size", 3)),
         negative=int(emb_cfg.get("negative", 5)),
-        epochs=int(emb_cfg.get("epochs", 5)),
+        epochs=int(emb_cfg.get("epochs", 1)),
         min_count=int(emb_cfg.get("min_count", 0)),
         training_algorithm=str(emb_cfg.get("training_algorithm", "word2vec")),
         learning_method=str(emb_cfg.get("learning_method", "skipgram")),
