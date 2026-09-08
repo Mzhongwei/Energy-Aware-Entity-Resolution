@@ -26,15 +26,19 @@ def _blocking_spec_for_method(method: str, config: Optional[Dict[str, Any]]) -> 
     return []
 
 
-def create_cg_index(method: str, config: Optional[Dict[str, Any]]) -> CGIndex:
+def create_cg_index(
+    method: str,
+    config: Optional[Dict[str, Any]],
+    index_dir: Optional[str] = None,
+) -> CGIndex:
     cg_cfg = _cg_block(config)
-    index_dir = cg_cfg.get("index_dir") or tempfile.mkdtemp(prefix="cg_index_")
+    resolved_index_dir = index_dir or cg_cfg.get("index_dir") or tempfile.mkdtemp(prefix="cg_index_")
     build_id = str(cg_cfg.get("build_id", f"cg_{method}"))
     dataset_fp = str(cg_cfg.get("dataset_fp", ""))
     blocking_spec = _blocking_spec_for_method(method, config)
     return CGIndex.from_config(
         config or {},
-        index_dir=index_dir,
+        index_dir=resolved_index_dir,
         build_id=build_id,
         dataset_fp=dataset_fp,
         blocking_spec=blocking_spec,

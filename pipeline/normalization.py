@@ -101,6 +101,21 @@ def _drop_source_id_columns(raw_data):
     return raw_data
 
 
+def _source_record_ids(config, raw_data):
+    record_id_config = config.get("record_ids", {}) if isinstance(config, dict) else {}
+    source_field = str(record_id_config.get("source_field", "")).strip()
+    if not source_field:
+        return None
+    if source_field not in raw_data.columns:
+        raise ValueError(f"Configured record_ids.source_field '{source_field}' is missing from the input.")
+    source_ids = raw_data[source_field]
+    if source_ids.isna().any() or source_ids.astype(str).str.strip().eq("").any():
+        raise ValueError(f"Configured record_ids.source_field '{source_field}' contains empty values.")
+    if source_ids.astype(str).duplicated().any():
+        raise ValueError(f"Configured record_ids.source_field '{source_field}' contains duplicate values in a batch.")
+    return source_field, source_ids.astype(str)
+
+
 
 def index_normalization(config, raw_data=None, raw_data_path=None, is_training=False):
     """
@@ -118,16 +133,23 @@ def index_normalization(config, raw_data=None, raw_data_path=None, is_training=F
     else:
         raw_data = raw_data.copy()
 
+    source_record_ids = _source_record_ids(config, raw_data)
     raw_data = _drop_source_id_columns(raw_data)
 
-    os.makedirs(IDS_DIR, exist_ok=True)
-    id_config = _resolve_id_config(config, is_training)
-    counter_path = id_config["counter_path"]
-    prefix = id_config["prefix"]
-    current_counter = _load_counter(counter_path)
-    print(f'# current counter {current_counter}, raw data len {len(raw_data)}, prefix {prefix}')
-    raw_data["rid"] = _generate_incremental_rids(len(raw_data), current_counter, prefix)
-    _save_counter(counter_path, current_counter + len(raw_data))
+    if source_record_ids is not None:
+        source_field, source_ids = source_record_ids
+        raw_data["rid"] = source_ids.to_numpy()
+        if source_field != "rid":
+            raw_data = raw_data.drop(columns=[source_field])
+    else:
+        os.makedirs(IDS_DIR, exist_ok=True)
+        id_config = _resolve_id_config(config, is_training)
+        counter_path = id_config["counter_path"]
+        prefix = id_config["prefix"]
+        current_counter = _load_counter(counter_path)
+        print(f'# current counter {current_counter}, raw data len {len(raw_data)}, prefix {prefix}')
+        raw_data["rid"] = _generate_incremental_rids(len(raw_data), current_counter, prefix)
+        _save_counter(counter_path, current_counter + len(raw_data))
 
     if "rid" not in raw_data.columns:
         raise ValueError("Failed to generate 'rid' column during normalization.")

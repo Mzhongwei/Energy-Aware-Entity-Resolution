@@ -11,6 +11,7 @@ config/config*
 .pytest*
 tests/*
 !tests/test_mutual_topk.py
+!tests/test_record_batches.py
 # Energy Conso Results
 emissions*.csv
 result*.csv

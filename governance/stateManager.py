@@ -1,7 +1,10 @@
 import os
 import json
 
-from models import SimilarityGraph, CGIndex, RepresentationGraph, EmbeddingModel
+from models.cg_index import CGIndex
+from models.embedding_model import EmbeddingModel
+from models.representation_graph import RepresentationGraph
+from models.similarity_graph import SimilarityGraph
 from models.bert_model import Model
 
 def _has_stage(*names, stages):

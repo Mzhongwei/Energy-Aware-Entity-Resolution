@@ -5,9 +5,6 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,6 +14,7 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
@@ -37,60 +35,97 @@ public class readCSV implements CommandLineRunner{
     private KafkaProducerService kafkaProducerService;
 
     @Override
-    public void run(String... args){
-        checkPath(pathCSV);
+    public void run(String... args) throws Exception {
+        processPath(pathCSV);
     }
 
-    private void readData(String pathCSV) throws FileNotFoundException, IOException, CsvValidationException{
+    private void readCsvData(String pathCSV) throws FileNotFoundException, IOException, CsvValidationException{
 
         try (CSVReader reader = new CSVReaderBuilder(new FileReader(pathCSV)).build()) {
             String [] nextLine;
             String[] headersValues = reader.readNext();
+            if (headersValues == null) {
+                return;
+            }
+            long recordCount = 0;
             while ((nextLine = reader.readNext()) != null) {
-                logger.info("[stream] put data into kafka producer...");
                 ObjectNode jsonvalue = objectMapper.createObjectNode();
                 int len = Math.min(headersValues.length, nextLine.length);
                 for(int j=0; j<len; j++){
                     jsonvalue.put(headersValues[j], nextLine[j]);
                 }
-                logger.info("[sent] json object to kafka producer: " + jsonvalue);
                 kafkaProducerService.sendMessage(jsonvalue);
-                
-                // ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-                // scheduler.scheduleAtFixedRate(() -> {
-                //     kafkaProducerService.sendMessage(jsonvalue);
-                // }, 0, 1, TimeUnit.SECONDS);c
-
-                try {
-                    Thread.sleep(timeout);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    logger.error("Thread sleep interrupted!", e);
-                }
-
+                recordCount++;
+                pauseBetweenRecords();
             }
-            logger.info("[finished] CSV file reading: " + pathCSV + " !");
+            logger.info("[finished] CSV records sent: " + recordCount + " from " + pathCSV);
         }
     }
 
-    private void checkPath(String pathCSV){
-        try{
-            File f = new File(pathCSV);
-            if(f.isFile()){
-                readData(pathCSV);
-            }else if(f.isDirectory()){
-                File[] files = f.listFiles(File::isFile);
-                if(files != null){
-                    for(File file: files){
-                        String path = file.getAbsolutePath();
-                        readData(path);
-                    }
+    private void readJsonLinesData(String path) throws IOException {
+        long recordCount = 0;
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            String line;
+            long lineNumber = 0;
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
+                if (line.trim().isEmpty()) {
+                    continue;
                 }
+                JsonNode parsed = objectMapper.readTree(line);
+                if (!parsed.isObject()) {
+                    throw new IOException("JSONL record must be an object at " + path + ":" + lineNumber);
+                }
+                kafkaProducerService.sendMessage((ObjectNode) parsed);
+                recordCount++;
+                pauseBetweenRecords();
             }
-        }catch(Exception e){
-            e.printStackTrace();
-            logger.error("Error occured for file " + pathCSV + ": ", e);
         }
+        logger.info("[finished] JSONL records sent: " + recordCount + " from " + path);
+    }
+
+    private void pauseBetweenRecords() throws IOException {
+        if (timeout <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(timeout);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Record streaming interrupted", e);
+        }
+    }
+
+    private void readData(String path) throws IOException, CsvValidationException {
+        String lowerPath = path.toLowerCase();
+        if (lowerPath.endsWith(".jsonl") || lowerPath.endsWith(".ndjson")) {
+            readJsonLinesData(path);
+            return;
+        }
+        if (lowerPath.endsWith(".csv")) {
+            readCsvData(path);
+            return;
+        }
+        throw new IOException("Unsupported input format for " + path + "; expected .csv, .jsonl, or .ndjson");
+    }
+
+    private void processPath(String pathCSV) throws IOException, CsvValidationException {
+        File source = new File(pathCSV);
+        if (source.isFile()) {
+            readData(pathCSV);
+            return;
+        }
+        if (source.isDirectory()) {
+            File[] files = source.listFiles(File::isFile);
+            if (files == null) {
+                throw new IOException("Unable to list input directory: " + pathCSV);
+            }
+            for (File file : files) {
+                readData(file.getAbsolutePath());
+            }
+            return;
+        }
+        throw new FileNotFoundException("Input path does not exist: " + pathCSV);
     }
 
 

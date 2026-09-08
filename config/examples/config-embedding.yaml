@@ -53,6 +53,12 @@ incremental:
   startup_timeout_seconds: 1800
   poll_interval_seconds: 2
 
+# File-backed training is processed in bounded windows. Kafka inference continues to use
+# kafka.window_count below.
+batch_processing:
+  rows_per_batch: 10000
+  max_bytes_per_batch: 134217728
+
 normalization: {}
 
 candidate_generation:

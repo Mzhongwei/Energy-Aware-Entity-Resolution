@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import argparse
 import shlex
 import signal
 import subprocess
@@ -15,22 +14,18 @@ from confluent_kafka import Consumer, KafkaException, KafkaError
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from governance import StateManager
-from pipeline import (
-    sequence_generating_m1,
-    index_normalization,
-    clear_id_counters,
-    train_model,
-    evaluate_from_saved_model,
-    compare_ground_truth,
-    process_inference,
-    train_embeddings,
-    compute_features,
-)
+from pipeline.bert_evaluation import evaluate_from_saved_model
+from pipeline.bert_inference import process_inference
+from pipeline.bert_training import train_model
 from pipeline.candidate_enumeration import enumerate_candidates, fetch_candidates
 from pipeline.calculating_similarity import get_mutual_top_k, score_mutual_topk_candidate_pairs
+from pipeline.cg_feature_extraction import compute_features
 from pipeline.decision_making import decide_matches
+from pipeline.embedding_training import train_embeddings
+from pipeline.evaluation import compare_ground_truth
 from pipeline.feature_index_construction import build_index as build_cg_index
 from pipeline.graph_construction import dyn_graph_generation
+from pipeline.normalization import clear_id_counters, index_normalization, sequence_generating_m1
 from pipeline.random_walk import dynrandom_walks_generation
 from utils.write_log import write_log
 

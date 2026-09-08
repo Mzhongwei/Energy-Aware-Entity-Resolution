@@ -9,7 +9,7 @@ The project supports two execution families:
 - `embedding-*` - graph-based entity resolution with normalization, graph construction, random walks, embedding training, candidate generation, similarity, and decision stages.
 - `bert-*` - sequence-pair classification with normalization, BERT training, inference, and evaluation stages.
 
-The main orchestrator is [main_distribution.py](main_distribution.py), while the files under [distributions](distributions) are the Argo/Kubernetes entrypoints that wrap the same pipeline logic for each stage.
+Batch embedding training uses one windowed entry, while Kafka inference keeps its distributed workers. Both paths call the same functions under [pipeline](pipeline); only input delivery and lifecycle differ.
 
 ## Layout
 
@@ -20,7 +20,8 @@ The main orchestrator is [main_distribution.py](main_distribution.py), while the
 - [scripts](scripts) - helper scripts used by ConfigMap generation and runtime wiring.
 - [config](config) - example runtime configuration files.
 - [requirements/](requirements/) - dependency sets for entry images and legacy deployment profiles.
-- [distributions](distributions) - per-stage wrappers used by the container images.
+- [entries/batch/EmbTrai-training.py](entries/batch/EmbTrai-training.py) - bounded-window CSV/JSONL embedding training entry.
+- [entries/worker](entries/worker) - long-running Kafka window workers.
 
 ## Modes
 
@@ -38,6 +39,21 @@ The active mode is read from the runtime config and determines which pipeline br
 - `bert-inference` - normalization -> BERT inference.
 - `bert-b_evaluation` - normalization -> BERT evaluation.
 
+## Windowed Embedding Training
+
+`EmbTrai-training.py` reads `data_source_A` incrementally and runs normalization, graph update, random walk, embedding update, feature extraction, and index update for each window. Configure it with:
+
+```yaml
+batch_processing:
+  rows_per_batch: 10000
+  max_bytes_per_batch: 134217728  # JSONL input-byte limit
+  # input_format: jsonl           # optional when the extension is unambiguous
+```
+
+Supported file types are `.csv`, `.jsonl`, and `.ndjson`. CSV is bounded by row count; JSONL is bounded by both row count and input bytes. The graph, embedding vocabulary, and candidate index intentionally accumulate across windows, so windowing bounds transient DataFrames/walks/features rather than total model-state memory.
+
+For JSONL with stable source IDs, set `record_ids.source_field`; otherwise training IDs are generated from the configured left prefix. Kafka simulation accepts the same three file types through the existing `csv.file.path` property and continues feeding the existing worker pipeline.
+
 ## Runtime Data Flow
 
 The pipeline passes a shared runtime dictionary through the stages. Typical values include:
@@ -53,20 +69,9 @@ The pipeline passes a shared runtime dictionary through the stages. Typical valu
 
 Stateful stages use the in-memory objects in [models](models) and [pipeline](pipeline), then persist or reuse them as needed across runs.
 
-## Useful Entry Points
-
-- [distributions/normalization_distribution.py](distributions/normalization_distribution.py)
-- [distributions/graph_randomwalk.py](distributions/graph_randomwalk.py)
-- [distributions/embedding_training_entry.py](distributions/embedding_training_entry.py)
-- [distributions/calculating_similarity_entry.py](distributions/calculating_similarity_entry.py)
-- [distributions/featureindex_candidate.py](distributions/featureindex_candidate.py)
-- [distributions/decision_evaluation.py](distributions/decision_evaluation.py)
-- [distributions/bert_distribution.py](distributions/bert_distribution.py)
-- [distributions/cg_feature_distribution.py](distributions/cg_feature_distribution.py)
-
 ## Local Hints
 
-For the Kubernetes-backed pipeline, regenerate the ConfigMaps from the repository root after changing any of the distribution scripts:
+For the Kubernetes-backed pipeline, regenerate the ConfigMaps from the repository root after changing an entry script:
 
 ```bash
 bash k8s/scripts/erctl.sh configmaps embedding
