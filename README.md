@@ -9,7 +9,7 @@ The project supports two execution families:
 - `embedding-*` - graph-based entity resolution with normalization, graph construction, random walks, embedding training, candidate generation, similarity, and decision stages.
 - `bert-*` - sequence-pair classification with normalization, BERT training, inference, and evaluation stages.
 
-Batch embedding training uses one windowed entry, while Kafka inference keeps its distributed workers. Both paths call the same functions under [pipeline](pipeline); only input delivery and lifecycle differ.
+Batch embedding training runs six persistent stage Pods, and Kafka inference runs its own distributed workers. Both paths call the same functions under [pipeline](pipeline). Training stages are selected with `EmbTrai-training.py --stage <task> --workload <workflow-name>`.
 
 ## Layout
 
@@ -41,12 +41,25 @@ The active mode is read from the runtime config and determines which pipeline br
 
 ## Windowed Embedding Training
 
-`EmbTrai-training.py` reads `data_source_A` incrementally and runs normalization, graph update, random walk, embedding update, feature extraction, and index update for each window. Configure it with:
+The Argo training DAG starts six Pods together, one per task. Each Pod handles all windows for its task; it does not create a Pod per window:
+
+```text
+normalization ──→ graph-construction → random-walk → embedding-training
+             └─→ cg-feature-extraction → feature-index-construction
+```
+
+Normalization reads `data_source_A` in bounded windows. Each window is published to both branches. The next window waits for embedding and index acknowledgments, bounding intermediate files to one window. Graph construction keeps its graph in memory and sends an atomic GraphML snapshot plus root names to random walk. Random walk loads the snapshot, prepares samplers, writes sequences, and removes the consumed snapshot. The model and index remain in their owning Pods across windows.
+
+Handoffs use the shared communication PVC under `<workflow-name>/communication/embedding-training`, including graph snapshots so readers can run on different nodes. The graph, model and index are saved to the existing model PVCs on EOS. Incremental Jobs start only after **all six** training Pods succeed.
+
+Stage exceptions publish a failure marker to stop waiting peers. Automatic stage retries are disabled: the handoff protocol is not a resumable checkpoint protocol. Restart a failed training run with a fresh run/version, rather than retrying an individual stage. A configurable handoff timeout catches workers lost without publishing an error (for example OOM or node loss). Configure it with:
 
 ```yaml
 batch_processing:
   rows_per_batch: 10000
   max_bytes_per_batch: 134217728  # JSONL input-byte limit
+  poll_interval_seconds: 0.5
+  handoff_timeout_seconds: 86400  # maximum wait for a peer; increase for very long windows
   # input_format: jsonl           # optional when the extension is unambiguous
 ```
 
@@ -56,7 +69,7 @@ For JSONL with stable source IDs, set `record_ids.source_field`; otherwise train
 
 ## Runtime Data Flow
 
-The pipeline passes a shared runtime dictionary through the stages. Typical values include:
+Distributed entries exchange window artifacts through shared storage; Python objects stay inside each process. The legacy `main_distribution.py` uses a shared runtime dictionary. Typical values include:
 
 - `raw_data`
 - `processed_data`
@@ -74,7 +87,7 @@ Stateful stages use the in-memory objects in [models](models) and [pipeline](pip
 For the Kubernetes-backed pipeline, regenerate the ConfigMaps from the repository root after changing an entry script:
 
 ```bash
-bash k8s/scripts/erctl.sh configmaps embedding
+bash k8s/pipeline/configmaps.sh code/Energy-Aware-Entity-Resolution/config/examples/config-embedding.yaml
 ```
 
 ## Notes

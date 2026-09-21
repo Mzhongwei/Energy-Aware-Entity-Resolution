@@ -58,6 +58,8 @@ incremental:
 batch_processing:
   rows_per_batch: 10000
   max_bytes_per_batch: 134217728
+  poll_interval_seconds: 0.5
+  handoff_timeout_seconds: 86400  # fail if a training peer produces no handoff within this time
 
 normalization: {}
 

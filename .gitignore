@@ -12,6 +12,7 @@ config/config*
 tests/*
 !tests/test_mutual_topk.py
 !tests/test_record_batches.py
+!tests/test_training_stages.py
 # Energy Conso Results
 emissions*.csv
 result*.csv
