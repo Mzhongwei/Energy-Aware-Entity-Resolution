@@ -1,25 +1,20 @@
 import argparse
 import os
-import signal
-import sys
 
 from utils.pipeline_io import (
-    delete_earliest_buffer_file,
-    get_buffer_directory,
-    get_earliest_window_index,
-    get_incremental_wait_config,
+    BufferIO,
+    StageStop,
+    StreamStage,
     get_model_directory,
+    is_empty_payload,
     is_window_published,
     latest_graph_checkpoint,
     load_config,
-    load_earliest_buffer,
     load_window_checkpoint,
     mark_window_published,
     prune_window_checkpoints,
-    wait_for_buffer,
     wait_for_window_checkpoint_ack,
     write_checkpoint_reference,
-    write_eos,
     write_window_checkpoint,
 )
 from pipeline.graph_construction import (
@@ -41,14 +36,7 @@ ships only its path and dyn_roots downstream.
 INPUT_DATA_TYPE = "processed_data_graph"
 OUTPUT_DATA_TYPE = "graph"
 GRAPH_FILE_NAME = "graph.graphml"
-stop_requested = False
 
-def handle_sigterm(signum, frame):
-    global stop_requested
-    stop_requested = True
-
-signal.signal(signal.SIGTERM, handle_sigterm)
-signal.signal(signal.SIGINT, handle_sigterm)
 
 def main():
     parser = argparse.ArgumentParser(description="Worker entry for incremental graph construction.")
@@ -56,11 +44,8 @@ def main():
     parser.add_argument("--workload", default="default")
     args = parser.parse_args()
 
-    INPUT_BUFFER = get_buffer_directory(args.workload, INPUT_DATA_TYPE)
-    OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
-
     config = load_config(args.config)
-    startup_timeout, poll_interval = get_incremental_wait_config(config)
+    io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     graph_path = os.path.join(get_model_directory(config, "graph"), GRAPH_FILE_NAME)
     checkpoint_dir = os.path.join(os.path.dirname(graph_path), "incremental_checkpoints")
     latest_checkpoint = latest_graph_checkpoint(checkpoint_dir)
@@ -68,66 +53,43 @@ def main():
     checkpoint_graph_path = latest_checkpoint[1] if latest_checkpoint else graph_path
     graph = load_or_create_graph(config, checkpoint_graph_path, enable_samplers=False)
     if latest_checkpoint:
-        write_checkpoint_reference(
-            os.path.dirname(graph_path),
-            "current",
-            checkpoint_graph_path,
-            checkpoint_window,
-        )
+        write_checkpoint_reference(os.path.dirname(graph_path), "current", checkpoint_graph_path, checkpoint_window)
         if os.path.isfile(graph_path):
             os.remove(graph_path)
         prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
-    seen_first_item = False
-    while not stop_requested:
-        timeout = None if seen_first_item else startup_timeout
-        ready = wait_for_buffer(
-            INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested,
-            poll_interval_seconds=poll_interval,
-        )
-        if ready is None:
-            if stop_requested:
-                return
-            raise TimeoutError(
-                f"[graph_construction] startup timed out after {startup_timeout}s waiting for {INPUT_BUFFER}"
-            )
+    def wait_for_previous_window_ack():
+        # Do not mutate the graph while the previous snapshot is still being read downstream.
         if (
             checkpoint_window >= 0
             and is_window_published(checkpoint_dir, checkpoint_window)
             and not wait_for_window_checkpoint_ack(
-                checkpoint_dir,
-                checkpoint_window,
-                should_stop=lambda: stop_requested,
-                poll_interval_seconds=poll_interval,
+                checkpoint_dir, checkpoint_window,
+                should_stop=stage.should_stop, poll_interval_seconds=io.poll_interval,
             )
         ):
-            return
-        seen_first_item = True
-        processed_data = load_earliest_buffer(INPUT_BUFFER)
-        if processed_data is None:
-            write_eos(OUTPUT_BUFFER)
-            print("[graph_construction] worker completed after upstream EOS", file=sys.stderr)
-            return
-        if processed_data.empty:
-            delete_earliest_buffer_file(INPUT_BUFFER)
-            continue
+            raise StageStop
 
-        window_index = get_earliest_window_index(INPUT_BUFFER)
+    stage = StreamStage(
+        "graph_construction", io, is_empty=is_empty_payload, before_load=wait_for_previous_window_ack,
+    )
+
+    def process(window):
+        nonlocal checkpoint_window, checkpoint_graph_path
+        processed_data = window.take()
+        window_index = window.index
 
         if window_index <= checkpoint_window:
+            # Replay after a restart: re-publish the checkpoint reference if it was lost.
             if window_index == checkpoint_window and not is_window_published(checkpoint_dir, window_index):
                 checkpoint = load_window_checkpoint(checkpoint_dir, window_index) or {}
                 write_checkpoint_reference(
-                    OUTPUT_BUFFER,
-                    window_index,
-                    checkpoint_graph_path,
-                    checkpoint_window,
+                    io.output_dir(), window_index, checkpoint_graph_path, checkpoint_window,
                     dyn_roots=checkpoint.get("dyn_roots", []),
                 )
                 mark_window_published(checkpoint_dir, window_index)
-            delete_earliest_buffer_file(INPUT_BUFFER)
             prune_window_checkpoints(checkpoint_dir, checkpoint_window)
-            continue
+            return
 
         graph.build_relation(processed_data)
         del processed_data
@@ -137,28 +99,19 @@ def main():
         checkpoint_graph_path = os.path.join(checkpoint_dir, f"{window_index}.graphml")
         persist_graph(graph, checkpoint_graph_path)
         write_window_checkpoint(checkpoint_dir, window_index, {"dyn_roots": dyn_roots})
+        write_checkpoint_reference(os.path.dirname(graph_path), "current", checkpoint_graph_path, window_index)
         write_checkpoint_reference(
-            os.path.dirname(graph_path),
-            "current",
-            checkpoint_graph_path,
-            window_index,
-        )
-        write_checkpoint_reference(
-            OUTPUT_BUFFER,
-            window_index,
-            checkpoint_graph_path,
-            window_index,
-            dyn_roots=dyn_roots,
+            io.output_dir(), window_index, checkpoint_graph_path, window_index, dyn_roots=dyn_roots,
         )
         mark_window_published(checkpoint_dir, window_index)
         if os.path.isfile(graph_path):
             os.remove(graph_path)
         clear_dyn_roots(graph)
-        delete_earliest_buffer_file(INPUT_BUFFER)
         checkpoint_window = window_index
         prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
-    print("[graph_construction] worker stopped without emitting EOS", file=sys.stderr)
+    stage.run(process)
+
 
 if __name__ == "__main__":
     main()

@@ -1,23 +1,19 @@
 import argparse
 import os
-import signal
-import sys
 
 from utils.pipeline_io import (
+    BufferIO,
+    StageStop,
+    StreamStage,
     acknowledge_window_checkpoint,
-    delete_earliest_buffer_file,
     get_buffer_directory,
-    get_earliest_window_index,
-    get_incremental_wait_config,
     get_model_directory,
+    is_empty_payload,
     is_window_checkpoint_acknowledged,
-    load_config,
     load_checkpoint_reference,
-    load_earliest_buffer,
-    wait_for_buffer,
+    load_config,
     wait_for_checkpoint_reference,
-    write_buffer,
-    write_eos,
+    waiting,
 )
 from models.embedding_model import EmbeddingModel
 from pipeline.calculating_similarity import get_mutual_top_k
@@ -45,14 +41,6 @@ PREDICTED_MATCH_FILE_NAME = "predicted_matching.graphml"
 SNAPSHOT_FILE_NAME_TEMPLATE = "predicted_matching_window_{window_index}.graphml"
 TASK_CONFIG_KEY = "decision_making"
 
-stop_requested = False
-
-def handle_sigterm(signum, frame):
-    global stop_requested
-    stop_requested = True
-
-signal.signal(signal.SIGTERM, handle_sigterm)
-signal.signal(signal.SIGINT, handle_sigterm)
 
 def main():
     parser = argparse.ArgumentParser(description="Worker entry for incremental decision making.")
@@ -60,17 +48,17 @@ def main():
     parser.add_argument("--workload", default="default")
     args = parser.parse_args()
 
-    INPUT_BUFFER = get_buffer_directory(args.workload, INPUT_DATA_TYPE)
-    EMBEDDING_BUFFER = get_buffer_directory(args.workload, EMBEDDING_INPUT_DATA_TYPE)
-    OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
-    SNAPSHOT_DIR = os.path.join(OUTPUT_BUFFER, "snapshots")
-    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-
     config = load_config(args.config)
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
     output_format = task_config.get("output_format", "graphml")
     top_k = get_mutual_top_k(config)
-    startup_timeout, poll_interval = get_incremental_wait_config(config)
+    io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
+    # An empty matching-pairs window is *not* skipped by the runner: it still has to
+    # acknowledge the embedding checkpoint so the trainer can move on.
+    stage = StreamStage("decision_making", io)
+    embedding_buffer = get_buffer_directory(args.workload, EMBEDDING_INPUT_DATA_TYPE)
+    snapshot_dir = os.path.join(io.output_dir(), "snapshots")
+    os.makedirs(snapshot_dir, exist_ok=True)
     checkpoint_dir = os.path.join(get_model_directory(config, "embedding"), "incremental_checkpoints")
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
     os.makedirs(os.path.dirname(predicted_match_path), exist_ok=True)
@@ -82,49 +70,29 @@ def main():
     )
     if previous_pairs:
         print(f"[decision_making] restored {len(previous_pairs)} previous pairs from {predicted_match_path}")
-    seen_first_item = False
-    while not stop_requested:
-        timeout = None if seen_first_item else startup_timeout
-        ready = wait_for_buffer(
-            INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested,
-            poll_interval_seconds=poll_interval,
-        )
-        if ready is None:
-            if stop_requested:
-                return
-            raise TimeoutError(
-                f"[decision_making] startup timed out after {startup_timeout}s waiting for {INPUT_BUFFER}"
-            )
-        seen_first_item = True
-        matching_pairs = load_earliest_buffer(INPUT_BUFFER)
-        if matching_pairs is None:
-            write_eos(OUTPUT_BUFFER)
-            print("[decision_making] worker completed after upstream EOS", file=sys.stderr)
-            return
 
-        window_index = get_earliest_window_index(INPUT_BUFFER)
-        reference_path = os.path.join(EMBEDDING_BUFFER, f"{window_index}.json")
-        if is_window_checkpoint_acknowledged(checkpoint_dir, window_index):
-            delete_earliest_buffer_file(INPUT_BUFFER)
-            if os.path.isfile(reference_path):
-                os.remove(reference_path)
-            continue
-        if not matching_pairs:
+    def process(window):
+        nonlocal previous_pairs
+        matching_pairs = window.take()
+        window_index = window.index
+        reference_path = os.path.join(embedding_buffer, f"{window_index}.json")
+
+        already_acknowledged = is_window_checkpoint_acknowledged(checkpoint_dir, window_index)
+        if not already_acknowledged and is_empty_payload(matching_pairs):
             acknowledge_window_checkpoint(checkpoint_dir, window_index)
-            delete_earliest_buffer_file(INPUT_BUFFER)
+            already_acknowledged = True
+        if already_acknowledged:
             if os.path.isfile(reference_path):
                 os.remove(reference_path)
-            continue
-
-        reference_path = wait_for_checkpoint_reference(
-            EMBEDDING_BUFFER,
-            window_index,
-            timeout_seconds=None,
-            should_stop=lambda: stop_requested,
-            poll_interval_seconds=poll_interval,
-        )
-        if reference_path is None:
             return
+
+        with waiting():
+            reference_path = wait_for_checkpoint_reference(
+                embedding_buffer, window_index, timeout_seconds=None,
+                should_stop=stage.should_stop, poll_interval_seconds=io.poll_interval,
+            )
+        if reference_path is None:
+            raise StageStop
         if os.path.basename(reference_path).startswith("eos_"):
             raise RuntimeError(
                 f"[decision_making] embedding stream ended before window {window_index} was produced"
@@ -143,22 +111,17 @@ def main():
         del reference
         predicted_graph.export_graphml(predicted_match_path)
 
-        snapshot_path = os.path.join(SNAPSHOT_DIR, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
+        snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
         predicted_graph.export_graphml(snapshot_path)
 
-        write_buffer(
-            {"pair_count": len(previous_pairs), "predicted_match_path": snapshot_path},
-            OUTPUT_BUFFER,
-            window_index,
-            extension="json",
-        )
+        stage.send(window_index, {"pair_count": len(previous_pairs), "predicted_match_path": snapshot_path})
         del predicted_graph
         acknowledge_window_checkpoint(checkpoint_dir, window_index)
-        delete_earliest_buffer_file(INPUT_BUFFER)
         if os.path.isfile(reference_path):
             os.remove(reference_path)
 
-    print("[decision_making] worker stopped without emitting EOS", file=sys.stderr)
+    stage.run(process)
+
 
 if __name__ == "__main__":
     main()

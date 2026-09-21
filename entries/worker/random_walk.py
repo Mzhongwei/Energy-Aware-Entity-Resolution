@@ -1,21 +1,14 @@
 import argparse
 import gc
-import signal
-import sys
 
 from utils.pipeline_io import (
+    BufferIO,
+    StreamStage,
     acknowledge_window_checkpoint,
-    delete_earliest_buffer_file,
-    get_buffer_directory,
-    get_earliest_window_index,
-    get_incremental_wait_config,
+    is_empty_payload,
     is_window_checkpoint_acknowledged,
     load_config,
-    load_earliest_buffer,
     resolve_checkpoint_reference,
-    wait_for_buffer,
-    write_buffer,
-    write_eos,
 )
 from pipeline.graph_construction import load_or_create_graph, restore_dyn_roots
 from pipeline.random_walk import dynrandom_walks_generation
@@ -31,14 +24,7 @@ no whole-graph traversal is needed since graph construction already carries the 
 
 INPUT_DATA_TYPE = "graph"
 OUTPUT_DATA_TYPE = "sequences"
-stop_requested = False
 
-def handle_sigterm(signum, frame):
-    global stop_requested
-    stop_requested = True
-
-signal.signal(signal.SIGTERM, handle_sigterm)
-signal.signal(signal.SIGINT, handle_sigterm)
 
 def main():
     parser = argparse.ArgumentParser(description="Worker entry for incremental random walk.")
@@ -46,44 +32,23 @@ def main():
     parser.add_argument("--workload", default="default")
     args = parser.parse_args()
 
-    INPUT_BUFFER = get_buffer_directory(args.workload, INPUT_DATA_TYPE)
-    OUTPUT_BUFFER = get_buffer_directory(args.workload, OUTPUT_DATA_TYPE)
-
     config = load_config(args.config)
-    startup_timeout, poll_interval = get_incremental_wait_config(config)
+    stage = StreamStage(
+        "random_walk",
+        BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config),
+        is_empty=is_empty_payload,
+    )
 
-    seen_first_item = False
-    while not stop_requested:
-        timeout = None if seen_first_item else startup_timeout
-        ready = wait_for_buffer(
-            INPUT_BUFFER, timeout_seconds=timeout, should_stop=lambda: stop_requested,
-            poll_interval_seconds=poll_interval,
-        )
-        if ready is None:
-            if stop_requested:
-                return
-            raise TimeoutError(f"[random_walk] startup timed out after {startup_timeout}s waiting for {INPUT_BUFFER}")
-        seen_first_item = True
-        handoff = load_earliest_buffer(INPUT_BUFFER)
-        if handoff is None:
-            write_eos(OUTPUT_BUFFER)
-            print("[random_walk] worker completed after upstream EOS", file=sys.stderr)
-            return
-        if not handoff:
-            delete_earliest_buffer_file(INPUT_BUFFER)
-            continue
-
-        window_index = get_earliest_window_index(INPUT_BUFFER)
+    def process(window):
+        handoff = window.take()
         checkpoint_dir = handoff.get("checkpoint_dir", "")
-        checkpoint_window = int(handoff.get("checkpoint_window", window_index))
+        checkpoint_window = int(handoff.get("checkpoint_window", window.index))
         if not checkpoint_dir:
-            raise ValueError(f"[random_walk] missing checkpoint_dir for window {window_index}")
+            raise ValueError(f"[random_walk] missing checkpoint_dir for window {window.index}")
         if is_window_checkpoint_acknowledged(checkpoint_dir, checkpoint_window):
-            delete_earliest_buffer_file(INPUT_BUFFER)
-            continue
+            return
         handoff = resolve_checkpoint_reference(handoff)
-        graph_path = handoff["checkpoint_path"]
-        graph = load_or_create_graph(config, graph_path)
+        graph = load_or_create_graph(config, handoff["checkpoint_path"])
         restore_dyn_roots(graph, handoff.get("dyn_roots"))
         del handoff
 
@@ -93,14 +58,14 @@ def main():
         del graph
         gc.collect()
 
-        write_buffer(sequences, OUTPUT_BUFFER, window_index, extension="json")
+        stage.send(window.index, sequences)
         del sequences
         gc.collect()
 
         acknowledge_window_checkpoint(checkpoint_dir, checkpoint_window)
-        delete_earliest_buffer_file(INPUT_BUFFER)
 
-    print("[random_walk] worker stopped without emitting EOS", file=sys.stderr)
+    stage.run(process)
+
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,11 @@
 import atexit
+from contextlib import contextmanager
 import json
 import os
+import pickle
+import signal
 import sys
+from pathlib import Path
 from time import perf_counter, sleep, time, time_ns
 
 import pandas as pd
@@ -46,6 +50,113 @@ except (OSError, ValueError):
     _STEP_METRICS_CGROUP_START = {}
 
 
+
+# =========================
+# Per-window timing: waiting vs. computing
+# =========================
+#
+# A streaming stage spends most of its Pod lifetime polling for upstream data, so the Pod's
+# wall time (and the energy attributed to it) is not the work it actually did. Every stage
+# window is therefore split into ``wait_seconds`` (blocked on a peer: input buffer, checkpoint
+# acknowledgement, downstream ack) and ``compute_seconds`` (everything else). One
+# ``[EAER_WINDOW_METRICS]`` line is printed per window and the totals are appended to the
+# ``[EAER_STEP_METRICS]`` line at exit, where k8s/monitoring/results.py collects both.
+
+WINDOW_METRICS_PREFIX = "[EAER_WINDOW_METRICS] "
+
+
+def _iso(epoch: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="microseconds")
+
+
+class StageClock:
+    """Accumulate wait/compute time per window for the single stage running in this process."""
+
+    def __init__(self):
+        self.stage = ""
+        self.used = False
+        self._wait_total = 0.0
+        self._compute_total = 0.0
+        self._windows = 0
+        self._depth = 0
+        self._wait_started = 0.0
+        self._wait = 0.0
+        self._started = None
+        self._started_wall = 0.0
+
+    def totals(self) -> dict:
+        if not self.used:
+            return {}
+        return {
+            "wait_seconds": round(self._wait_total, 6),
+            "compute_seconds": round(self._compute_total, 6),
+            "windows": self._windows,
+        }
+
+    @contextmanager
+    def waiting(self):
+        """Mark the enclosed block as blocked on a peer. Nested use counts once."""
+        outermost = self._depth == 0
+        if outermost:
+            self._wait_started = perf_counter()
+        self._depth += 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
+            if outermost:
+                self._wait += perf_counter() - self._wait_started
+
+    def _emit(self, window, wait: float, compute: float, started_wall: float, ended_wall: float):
+        self._wait_total += wait
+        self._compute_total += compute
+        if isinstance(window, int):
+            self._windows += 1
+        record = {
+            "stage": self.stage, "window": window,
+            "wait_seconds": round(wait, 6), "compute_seconds": round(compute, 6),
+            "started_at": _iso(started_wall), "ended_at": _iso(ended_wall),
+        }
+        print(WINDOW_METRICS_PREFIX + json.dumps(record, separators=(",", ":")), flush=True)
+
+    def begin(self, stage: str) -> None:
+        """Open the first window. Time since process start is reported as ``setup``."""
+        now, wall = perf_counter(), time()
+        if self._started is None:
+            self.stage = stage
+            self.used = True
+            setup = max(0.0, now - _STEP_METRICS_STARTED)
+            self._emit("setup", 0.0, setup, wall - setup, wall)
+        self._started, self._started_wall, self._wait = now, wall, 0.0
+
+    def end(self, window) -> None:
+        """Close the current window and immediately open the next one."""
+        if self._started is None:
+            return
+        now, wall = perf_counter(), time()
+        elapsed = max(0.0, now - self._started)
+        wait = min(self._wait, elapsed)
+        self._emit(window, wait, elapsed - wait, self._started_wall, wall)
+        self._started, self._started_wall, self._wait = now, wall, 0.0
+
+
+_STAGE_CLOCK = StageClock()
+
+
+def waiting():
+    """Context manager: time spent inside counts as waiting on a peer, not computing."""
+    return _STAGE_CLOCK.waiting()
+
+
+def begin_window(stage: str) -> None:
+    _STAGE_CLOCK.begin(stage)
+
+
+def end_window(window) -> None:
+    _STAGE_CLOCK.end(window)
+
+
 def emit_step_metrics() -> None:
     """Emit one machine-readable process I/O and elapsed-time record at shutdown."""
     global _STEP_METRICS_EMITTED
@@ -67,6 +178,7 @@ def emit_step_metrics() -> None:
             "storage_write_bytes": max(0, storage_current.get("write_bytes", 0) - storage_start.get("write_bytes", 0)),
             "elapsed_seconds": round(max(0.0, perf_counter() - _STEP_METRICS_STARTED), 6),
         }
+        payload.update(_STAGE_CLOCK.totals())
         print(STEP_METRICS_PREFIX + json.dumps(payload, separators=(",", ":")), flush=True)
     except Exception as error:  # Metrics must never change the business-step exit status.
         print(f"[EAER_STEP_METRICS_ERROR] {error}", file=sys.stderr, flush=True)
@@ -754,3 +866,240 @@ def clear_buffer_directory(buffer_dir: str):
                 os.remove(file_path)
         except Exception as e:
             print(f"[WARNING] Failed to delete buffer file {file_path}: {e}", flush=True)
+
+
+# =========================
+# Stage runner shared by batch and incremental modes
+# =========================
+#
+# Every streaming stage has the same skeleton: wait for the next window, stop cleanly on
+# end-of-stream (EOS), skip empty windows, run the stage-specific handler, publish the result
+# and consume the input. StreamStage owns that skeleton and the per-window timing; the
+# transport object decides where windows come from and go to:
+#
+#   BufferIO   incremental mode: directory buffers + eos_stream.json marker files
+#   HandoffIO  batch training:   run-scoped pickle files on a shared volume, None = EOS
+#
+# A stage entry script is then only its handler plus a transport choice.
+
+
+class StageStop(Exception):
+    """Raise inside a stage to leave the loop cleanly without emitting EOS."""
+
+
+_TAKEN = object()
+
+
+class Window:
+    """One unit of input. ``take()`` hands over the payload and drops the runner's reference,
+    so the handler can free it early (stages ``del`` large frames before writing output)."""
+
+    def __init__(self, index: int, payload):
+        self.index = index
+        self._payload = payload
+
+    def take(self):
+        payload, self._payload = self._payload, _TAKEN
+        if payload is _TAKEN:
+            raise RuntimeError(f"Window {self.index} payload was already taken")
+        return payload
+
+
+def is_empty_payload(value) -> bool:
+    """True for empty DataFrames and empty containers; safe for both."""
+    empty = getattr(value, "empty", None)
+    if isinstance(empty, bool):
+        return empty
+    return not value
+
+
+class BufferIO:
+    """Incremental transport: one input buffer directory, named output buffer directories."""
+
+    def __init__(self, workload: str, input_type: str, outputs=None, config: dict | None = None):
+        self.input_dir = get_buffer_directory(workload, input_type)
+        if isinstance(outputs, str):
+            outputs = {"default": outputs}
+        self.output_dirs = {
+            name: get_buffer_directory(workload, data_type) for name, data_type in (outputs or {}).items()
+        }
+        self.startup_timeout, self.poll_interval = get_incremental_wait_config(config or {})
+        self._seen_first = False
+
+    def output_dir(self, output: str | None = None) -> str:
+        if output is None:
+            if len(self.output_dirs) != 1:
+                raise ValueError("output name is required when a stage has several outputs")
+            return next(iter(self.output_dirs.values()))
+        return self.output_dirs[output]
+
+    def wait(self, stage: "StreamStage") -> None:
+        # Only the very first window is bounded by the startup timeout; after that a stage
+        # waits indefinitely and ends solely on the EOS marker.
+        timeout = None if self._seen_first else self.startup_timeout
+        with waiting():
+            ready = wait_for_buffer(
+                self.input_dir, timeout_seconds=timeout, should_stop=stage.should_stop,
+                poll_interval_seconds=self.poll_interval,
+            )
+        if ready is None:
+            if stage.should_stop():
+                raise StageStop
+            raise TimeoutError(
+                f"[{stage.name}] startup timed out after {self.startup_timeout}s waiting for {self.input_dir}"
+            )
+        self._seen_first = True
+
+    def load(self):
+        payload = load_earliest_buffer(self.input_dir)
+        if payload is None:
+            return None
+        return get_earliest_window_index(self.input_dir), payload
+
+    def consume(self) -> None:
+        delete_earliest_buffer_file(self.input_dir)
+
+    def send(self, window_index: int, value, output: str | None = None, extension: str = "json"):
+        return write_buffer(value, self.output_dir(output), window_index, extension=extension)
+
+    def send_eos(self) -> None:
+        for directory in self.output_dirs.values():
+            write_eos(directory)
+
+
+class Handoff:
+    """Run-scoped file channels between the training stage Pods; a stored ``None`` is EOS."""
+
+    def __init__(self, root, poll_seconds=0.5, timeout_seconds=86400):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.poll_seconds = float(poll_seconds)
+        self.timeout_seconds = float(timeout_seconds)
+        if self.poll_seconds <= 0 or self.timeout_seconds <= 0:
+            raise ValueError("Training handoff poll and timeout must be positive")
+
+    def path(self, channel, window):
+        return self.root / f"{channel}-{window}.pkl"
+
+    def put(self, channel, window, value):
+        path = self.path(channel, window)
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        with temporary.open("wb") as stream:
+            pickle.dump(value, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temporary, path)
+
+    def wait(self, channel, window):
+        """Block until the artifact exists; raise if a peer failed or the timeout expires."""
+        path = self.path(channel, window)
+        start = perf_counter()
+        with waiting():
+            while True:
+                failures = list(self.root.glob("failed-*.pkl"))
+                if failures:
+                    with failures[0].open("rb") as stream:
+                        raise RuntimeError(f"Training peer failed: {pickle.load(stream)}")
+                if path.exists():
+                    return
+                if perf_counter() - start > self.timeout_seconds:
+                    raise TimeoutError(f"Timed out waiting for training {channel}, window={window}")
+                sleep(self.poll_seconds)
+
+    def take(self, channel, window):
+        self.wait(channel, window)
+        path = self.path(channel, window)
+        # Only internally produced, run-scoped artifacts are accepted here.
+        with path.open("rb") as stream:
+            value = pickle.load(stream)
+        path.unlink()
+        return value
+
+
+class HandoffIO:
+    """Batch-training transport over a Handoff: windows are numbered 1, 2, ... per channel."""
+
+    def __init__(self, bus: Handoff, input_channel: str, outputs=None):
+        self.bus = bus
+        self.input_channel = input_channel
+        if isinstance(outputs, str):
+            outputs = {"default": outputs}
+        self.output_channels = dict(outputs or {})
+        self._window = 0
+
+    def wait(self, stage: "StreamStage") -> None:
+        self._window += 1
+        self.bus.wait(self.input_channel, self._window)
+
+    def load(self):
+        value = self.bus.take(self.input_channel, self._window)
+        return None if value is None else (self._window, value)
+
+    def consume(self) -> None:
+        pass  # take() already removed the artifact
+
+    def send(self, window_index: int, value, output: str | None = None, extension: str = ""):
+        if output is None:
+            if len(self.output_channels) != 1:
+                raise ValueError("output name is required when a stage has several outputs")
+            output = next(iter(self.output_channels))
+        self.bus.put(self.output_channels[output], window_index, value)
+
+    def send_eos(self) -> None:
+        for channel in self.output_channels.values():
+            self.bus.put(channel, self._window, None)
+
+
+class StreamStage:
+    """The shared wait -> load -> (EOS | skip | handle) -> consume loop with window timing."""
+
+    def __init__(self, name: str, io, *, is_empty=None, before_load=None, handle_signals: bool = True):
+        self.name = name
+        self.io = io
+        self.is_empty = is_empty
+        self.before_load = before_load
+        self._stop_requested = False
+        if handle_signals:
+            signal.signal(signal.SIGTERM, self._request_stop)
+            signal.signal(signal.SIGINT, self._request_stop)
+
+    def _request_stop(self, signum, frame):
+        self._stop_requested = True
+
+    def should_stop(self) -> bool:
+        return self._stop_requested
+
+    def send(self, window_index: int, value, output: str | None = None, extension: str = "json"):
+        return self.io.send(window_index, value, output, extension)
+
+    def run(self, handler, finalize=None) -> None:
+        """Run ``handler(window)`` for each window until EOS.
+
+        ``before_load`` runs (counted as waiting) once input is available and may raise
+        StageStop; ``finalize`` runs on EOS before EOS is forwarded downstream. Handlers
+        raise StageStop to abandon the current window without consuming it.
+        """
+        begin_window(self.name)
+        try:
+            while not self._stop_requested:
+                self.io.wait(self)
+                if self.before_load is not None:
+                    with waiting():
+                        self.before_load()
+                item = self.io.load()
+                if item is None:
+                    if finalize is not None:
+                        finalize()
+                    self.io.send_eos()
+                    end_window("eos")
+                    print(f"[{self.name}] worker completed after upstream EOS", file=sys.stderr, flush=True)
+                    return
+                window = Window(*item)
+                if self.is_empty is not None and self.is_empty(window._payload):
+                    self.io.consume()
+                    continue
+                handler(window)
+                self.io.consume()
+                end_window(window.index)
+        except StageStop:
+            pass
+        end_window("stopped")
+        print(f"[{self.name}] worker stopped without emitting EOS", file=sys.stderr, flush=True)

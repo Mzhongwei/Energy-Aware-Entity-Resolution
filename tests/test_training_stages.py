@@ -88,6 +88,21 @@ class TrainingStagesTests(unittest.TestCase):
             self.assertEqual(set(index.query(None)), ids)
             for stage in TRAINING.STAGES:
                 self.assertEqual(output[stage].count("operation=compute start"), 3, output[stage])
+            # Every stage Pod reports per-window wait/compute time and totals for results.py.
+            for stage in TRAINING.STAGES:
+                windows = [json.loads(line.split("[EAER_WINDOW_METRICS] ", 1)[1])
+                           for line in output[stage].splitlines() if "[EAER_WINDOW_METRICS] " in line]
+                self.assertEqual([w["window"] for w in windows if isinstance(w["window"], int)], [1, 2, 3], stage)
+                self.assertEqual([w["window"] for w in windows if isinstance(w["window"], str)], ["setup", "eos"], stage)
+                step = json.loads(output[stage].rsplit("[EAER_STEP_METRICS] ", 1)[1].splitlines()[0])
+                self.assertEqual(step["windows"], 3, stage)
+                self.assertAlmostEqual(step["wait_seconds"] + step["compute_seconds"],
+                                       sum(w["wait_seconds"] + w["compute_seconds"] for w in windows), delta=0.01)
+                self.assertGreater(step["compute_seconds"], 0, stage)
+            # Consumers start before the producer, so they must have spent time waiting on it.
+            for stage in ("embedding-training", "feature-index-construction"):
+                step = json.loads(output[stage].rsplit("[EAER_STEP_METRICS] ", 1)[1].splitlines()[0])
+                self.assertGreater(step["wait_seconds"], 0, stage)
             # No history of DataFrames, graphs or sequences accumulates on the handoff volume.
             self.assertEqual(list((directory / "run/communication/embedding-training").iterdir()), [])
 
