@@ -80,7 +80,7 @@ def graph_stage(config, bus):
     from pipeline.graph_construction import clear_dyn_roots, load_or_create_graph, persist_graph
 
     final_path = os.path.join(get_model_directory(config, "graph"), "graph.graphml")
-    graph = load_or_create_graph(config, final_path, enable_samplers=False)
+    graph = load_or_create_graph(config, final_path)
     stage = StreamStage("graph-construction", HandoffIO(bus, "processed-graph", "graph"), handle_signals=False)
 
     def process(window):
@@ -115,7 +115,7 @@ def walk_stage(config, bus):
 
     def process(window):
         handoff = window.take()
-        with timed("random-walk", window.index, "load-and-prepare-samplers"):
+        with timed("random-walk", window.index, "load-graph"):
             graph = load_or_create_graph(config, handoff["path"])
             restore = lambda names: {graph.name2idx[name] for name in names}
             roots = handoff["roots"]

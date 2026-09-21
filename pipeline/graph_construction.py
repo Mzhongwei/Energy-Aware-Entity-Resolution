@@ -62,7 +62,6 @@ class DynGraphIgraph(RepresentationGraph):
         rare_alpha: float = 1.0,
         undirected_weighted: bool = True,
         cache_ngram_size: int = 200_000,
-        enable_samplers: bool = True,
     ) -> None:
         super().__init__(directed=directed)
 
@@ -79,8 +78,10 @@ class DynGraphIgraph(RepresentationGraph):
         self._init_meta_path(meta_path)
         self._check_flatten()
 
-        self.samplers = []
-        self.enable_samplers = enable_samplers
+        # Neighbor samplers are never built by graph construction. The random walk asks for a
+        # node's sampler through get_sampler(), which builds it on first use and keeps it here
+        # until clear_samplers() (end of a walk batch) or a change to the graph drops it.
+        self._samplers: dict = {}
         self.ngram_config = ngram_config if isinstance(ngram_config, dict) else None
         self._cache_ngram_size = cache_ngram_size
         self.rare_bias = rare_bias
@@ -153,20 +154,13 @@ class DynGraphIgraph(RepresentationGraph):
                 node_class = v["node_class"] if "node_class" in v.attributes() else None
                 if (not isinstance(node_class, dict)) and v["type"] in self.node_classes:
                     v["node_class"] = self._update_node_class(v["type"])
-        self.samplers = [None] * self.graph.vcount() if self.enable_samplers else []
+        self.clear_samplers()
         for v in self.graph.vs:
-            if self.enable_samplers:
-                self._update_neighbors(int(v.index))
             v["test_pretraining"] = True
             v["test_neighbors_freq"] = {}
 
     def _after_topology_changed(self) -> None:
-        if not self.enable_samplers:
-            self.samplers = []
-            return
-        self.samplers = [None] * self.graph.vcount()
-        for v in self.graph.vs:
-            self._update_neighbors(int(v.index))
+        self.clear_samplers()
 
     def _add_vertex(self, node_name: str, node_prefix: str):
         attrs = {}
@@ -372,11 +366,7 @@ class DynGraphIgraph(RepresentationGraph):
     # ------------------------
     # Neighbor Sampler Cache
     # ------------------------
-    def _extend_sampler(self, size: int):
-        if len(self.samplers) < size:
-            self.samplers.extend([None] * (size - len(self.samplers)))
-
-    def _update_neighbors(self, index: int):
+    def _build_sampler(self, index: int):
         v = self.graph.vs[index]
         neighbors = self.graph.neighbors(index, mode='OUT')  # same thing for directed and undirected graph
         graph = self.graph
@@ -416,25 +406,35 @@ class DynGraphIgraph(RepresentationGraph):
                         threshold=1000
                     )
 
-            # Make sure the samplers are long enough, assign the values
-            self.samplers[index] = sampler_for_index
+            return sampler_for_index
 
         else:
             # Weighted paths in undirected graphs
             use_w = bool(graph["weighted"])
             if not use_w:
-                self.samplers[index] = NodeSampler(neighbors=neighbors, weighted=False, threshold=1000)
+                sampler = NodeSampler(neighbors=neighbors, weighted=False, threshold=1000)
             else:
                 weights = [self._edge_weight_for_sampling(index, el) for el in neighbors]
-                self.samplers[index] = NodeSampler(neighbors=neighbors, weighted=True, threshold=50, weights=weights)
+                sampler = NodeSampler(neighbors=neighbors, weighted=True, threshold=50, weights=weights)
 
             if 'node_class' in v.attributes() and not v["node_class"].get("isfirst", True):
-                self.samplers[index].update_firstnode_list([vs[idx]["node_class"].get("isfirst", False) for idx in neighbors])
+                sampler.update_firstnode_list([vs[idx]["node_class"].get("isfirst", False) for idx in neighbors])
+            return sampler
 
     def get_sampler(self, index: int):
-        if index < len(self.samplers):
-            return self.samplers[index]
-        return None
+        """Return the sampler of vertex ``index``, building and caching it on first use."""
+        index = int(index)
+        sampler = self._samplers.get(index)
+        if sampler is None:
+            if not 0 <= index < self.graph.vcount():
+                return None
+            sampler = self._build_sampler(index)
+            self._samplers[index] = sampler
+        return sampler
+
+    def clear_samplers(self) -> None:
+        """Drop every cached sampler (between walk batches, or when the graph changed)."""
+        self._samplers = {}
 
     # ------------------------
     # Update a cell value in the graph.
@@ -457,7 +457,8 @@ class DynGraphIgraph(RepresentationGraph):
     # Construct graph (meta-path + simple mode + optional n-gram)
     # ------------------------
     def build_relation(self, df):
-        affected_nodes = set()
+        # Any cached sampler describes the graph as it was before this batch of edges.
+        self.clear_samplers()
         columns = list(df.columns)
         col_positions = {col: idx for idx, col in enumerate(columns)}
         row_iter = df.itertuples(index=False, name=None)
@@ -482,12 +483,10 @@ class DynGraphIgraph(RepresentationGraph):
                                 for index in index_set:
                                     if index not in values[col]:
                                         values[col].append(index)
-                                    affected_nodes.add(index)
                         else:
                             index = update_node("nan", col)
                             if index not in values[col]:
                                 values[col].append(index)
-                            affected_nodes.add(index)
                 # app_debug.info(values)
                 for a, b in getattr(self, 'meta_link', []):
                     if a in values and b in values:
@@ -515,7 +514,6 @@ class DynGraphIgraph(RepresentationGraph):
                     raise ValueError("Missing rid token during graph construction.")
                 rid_node = rid_tokens[0]
                 rid_index = update_node(rid_node, "idx")
-                affected_nodes.add(rid_index)
 
                 for cid_node, pos in data_columns:
                     og_value = row_values[pos]
@@ -523,7 +521,6 @@ class DynGraphIgraph(RepresentationGraph):
                         continue
 
                     cid_index = update_node(f'cid__{cid_node}', "cid")
-                    affected_nodes.add(cid_index)
 
                     token_list, is_numeric = convert_token_value(og_value)
                     if token_list is not None:
@@ -537,32 +534,14 @@ class DynGraphIgraph(RepresentationGraph):
                                 else:
                                     add_edge(index, cid_index)
                                     add_edge(index, rid_index)
-                            affected_nodes.update(instance_index)
 
                         if not is_numeric:
                             if use_batch_edges:
-                                index_list = add_ngrams_for_token_list(token_list, cid_index, rid_index, pending_edges)
+                                add_ngrams_for_token_list(token_list, cid_index, rid_index, pending_edges)
                             else:
-                                index_list = add_ngrams_for_token_list(token_list, cid_index, rid_index)
-                            affected_nodes.update(index_list)
+                                add_ngrams_for_token_list(token_list, cid_index, rid_index)
 
         self._flush_pending_edges(pending_edges)
-
-        if not self.enable_samplers:
-            return
-
-        # extend & update samplers
-        self._extend_sampler(self.graph.vcount())
-        neighbor_updated = set()
-        for index in affected_nodes:
-            self._update_neighbors(index)
-            neighbor_updated.add(index)
-
-            neighbors = self.graph.neighbors(index, mode='OUT')
-            for neigh in neighbors:
-                if neigh not in neighbor_updated:
-                    self._update_neighbors(neigh)
-                    neighbor_updated.add(neigh)
 
     def _add_ngrams_for_token_list(
         self,
@@ -592,7 +571,7 @@ class DynGraphIgraph(RepresentationGraph):
             index_list.add(ng_index)
         return index_list
 
-def dyn_graph_generation(configuration, enable_samplers: bool = True):
+def dyn_graph_generation(configuration):
     """
     Generate the graph for the given dataframe following the specifications in configuration.
     :param df: dataframe to transform in graph.
@@ -637,7 +616,6 @@ def dyn_graph_generation(configuration, enable_samplers: bool = True):
         rare_alpha=0.7,
         undirected_weighted=False,
         meta_path=meta_path,
-        enable_samplers=enable_samplers,
     )
 
     t_end = datetime.now()
@@ -648,7 +626,7 @@ def dyn_graph_generation(configuration, enable_samplers: bool = True):
     return g
 
 
-def load_or_create_graph(configuration, graph_path: str, enable_samplers: bool = True) -> DynGraphIgraph:
+def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
     """
     Load a persisted representation graph if present, else build a fresh one.
 
@@ -657,10 +635,10 @@ def load_or_create_graph(configuration, graph_path: str, enable_samplers: bool =
     using the dyn_roots produced alongside this graph by graph construction.
     """
     if os.path.isfile(graph_path) and os.path.getsize(graph_path) > 0:
-        graph = dyn_graph_generation(configuration, enable_samplers=enable_samplers)
+        graph = dyn_graph_generation(configuration)
         graph.load_graph(graph_path)
         return graph
-    return dyn_graph_generation(configuration, enable_samplers=enable_samplers)
+    return dyn_graph_generation(configuration)
 
 
 def persist_graph(graph: DynGraphIgraph, graph_path: str) -> None:

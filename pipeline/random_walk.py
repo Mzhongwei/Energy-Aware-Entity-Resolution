@@ -251,6 +251,19 @@ def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_
 
 
 def dynrandom_walks_generation(configuration, graph):
+    """Generate the walks of one batch (window).
+
+    Samplers are built lazily by graph.get_sampler() for the nodes the walks actually reach and
+    are reused for the rest of this call; they are released when it returns so a sampler never
+    outlives the batch (and the graph state) it was built from.
+    """
+    try:
+        return _generate_walks(configuration, graph)
+    finally:
+        graph.clear_samplers()
+
+
+def _generate_walks(configuration, graph):
     walk_cfg = _random_walk_config(configuration)
     walk_nums = int(walk_cfg.get("walks_number", 0))
     walk_length = int(walk_cfg.get("walk_length", 60))

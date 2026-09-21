@@ -51,7 +51,7 @@ def main():
     latest_checkpoint = latest_graph_checkpoint(checkpoint_dir)
     checkpoint_window = latest_checkpoint[0] if latest_checkpoint else -1
     checkpoint_graph_path = latest_checkpoint[1] if latest_checkpoint else graph_path
-    graph = load_or_create_graph(config, checkpoint_graph_path, enable_samplers=False)
+    graph = load_or_create_graph(config, checkpoint_graph_path)
     if latest_checkpoint:
         write_checkpoint_reference(os.path.dirname(graph_path), "current", checkpoint_graph_path, checkpoint_window)
         if os.path.isfile(graph_path):
