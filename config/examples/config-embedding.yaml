@@ -94,7 +94,7 @@ random_walk:
   walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
   rw_stat: false                 # statistical result of random walk
-  min_count : 5
+  
 
 graph_snapshot:
   format: "csr"
@@ -108,6 +108,7 @@ embeddings_training:
   n_dimensions: 128
   training_algorithm: "word2vec" # word2vec / fasttext
   sampling_factor: 0.001
+  min_count : 5
 
 candidate_enumeration: {}
 
