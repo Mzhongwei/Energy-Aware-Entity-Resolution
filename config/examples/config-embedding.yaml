@@ -69,6 +69,7 @@ candidate_generation:
   data_pairs_fixed: ""
 
 graph_construction:
+  backend: "compact_adjacency"  # compact CSR backend; use "igraph" during migration if needed
   # node types explained in README
   node_types:
     - "5#__tn"                   # numerical instance
@@ -86,11 +87,17 @@ graph_construction:
 
 
 random_walk:
+  mode: "uniform"
+  sequence_format: "text"       # "text" preserves existing embedding tokens; "id" emits stable IDs
   write_walks: false
   walk_length: 30                # step size
   walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
   rw_stat: false                 # statistical result of random walk
+
+graph_snapshot:
+  format: "csr"
+  mmap: true
 
 cg_feature_extraction: {}
 

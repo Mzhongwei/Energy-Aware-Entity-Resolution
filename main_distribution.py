@@ -151,7 +151,7 @@ def graph_construction(config, processed_data, state_manager: StateManager):
 def random_walk(config, state_manager: StateManager):
     graph = state_manager.get("representation_graph")
     print("[random_walk]")
-    if hasattr(graph, "get_graph") and hasattr(graph, "dyn_roots"):
+    if hasattr(graph, "neighbors") and hasattr(graph, "dyn_roots"):
         return dynrandom_walks_generation(config, graph)
     return "sequences"
 

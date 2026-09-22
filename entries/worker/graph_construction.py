@@ -45,6 +45,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    compact = config.get("graph_construction", {}).get("backend") == "compact_adjacency"
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     graph_path = os.path.join(get_model_directory(config, "graph"), GRAPH_FILE_NAME)
     checkpoint_dir = os.path.join(os.path.dirname(graph_path), "incremental_checkpoints")
@@ -53,6 +54,9 @@ def main():
     checkpoint_graph_path = latest_checkpoint[1] if latest_checkpoint else graph_path
     graph = load_or_create_graph(config, checkpoint_graph_path)
     if latest_checkpoint:
+        # Roots are also stored in CSR for the read-only consumer. The mutable
+        # builder starts the next window with an empty delta after a restart.
+        clear_dyn_roots(graph)
         write_checkpoint_reference(os.path.dirname(graph_path), "current", checkpoint_graph_path, checkpoint_window)
         if os.path.isfile(graph_path):
             os.remove(graph_path)
@@ -96,7 +100,10 @@ def main():
         graph._tokenize_cached.cache_clear()
 
         dyn_roots = serialize_dyn_roots(graph)
-        checkpoint_graph_path = os.path.join(checkpoint_dir, f"{window_index}.graphml")
+        checkpoint_graph_path = (
+            os.path.join(checkpoint_dir, f"graph_snapshot_{window_index:06d}")
+            if compact else os.path.join(checkpoint_dir, f"{window_index}.graphml")
+        )
         persist_graph(graph, checkpoint_graph_path)
         write_window_checkpoint(checkpoint_dir, window_index, {"dyn_roots": dyn_roots})
         write_checkpoint_reference(os.path.dirname(graph_path), "current", checkpoint_graph_path, window_index)

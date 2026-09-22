@@ -10,7 +10,7 @@ from utils.pipeline_io import (
     load_config,
     resolve_checkpoint_reference,
 )
-from pipeline.graph_construction import load_or_create_graph, restore_dyn_roots
+from pipeline.graph_construction import load_graph_reader, restore_dyn_roots
 from pipeline.random_walk import dynrandom_walks_generation
 
 """
@@ -48,7 +48,7 @@ def main():
         if is_window_checkpoint_acknowledged(checkpoint_dir, checkpoint_window):
             return
         handoff = resolve_checkpoint_reference(handoff)
-        graph = load_or_create_graph(config, handoff["checkpoint_path"])
+        graph = load_graph_reader(config, handoff["checkpoint_path"])
         restore_dyn_roots(graph, handoff.get("dyn_roots"))
         del handoff
 

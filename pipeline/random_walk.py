@@ -1,6 +1,16 @@
 import traceback
+import time
 
-from tqdm import tqdm
+import numpy as np
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    class tqdm:
+        def __init__(self, iterable=None, **_kwargs): self.iterable = iterable
+        def __iter__(self): return iter(self.iterable)
+        def update(self, _count): pass
+        def close(self): pass
 
 from utils.write_log import write_log
 
@@ -35,23 +45,33 @@ def _graph_meta_path(configuration):
     return []
 
 
+def _format_walk(graph, walk_ids, sequence_format):
+    if sequence_format == "id":
+        return [str(int(node_id)) for node_id in walk_ids]
+    if sequence_format == "text":
+        return [graph.get_node_name(int(node_id)) for node_id in walk_ids]
+    raise ValueError("random_walk.sequence_format must be 'id' or 'text'")
+
+
+def _sample_neighbor(graph, node_id):
+    neighbors = graph.neighbors(node_id)
+    if len(neighbors) == 0:
+        return None
+    return int(neighbors[np.random.randint(0, len(neighbors))])
+
+
 class RamdomRow:
-    def __init__(self, graph, row_id_index, sentence_len):
-        i_graph = graph.get_graph()
+    def __init__(self, graph, row_id_index, sentence_len, sequence_format="text"):
         self.walk = []
-        row_id = i_graph.vs[row_id_index]["name"]
-        sampler = graph.get_sampler(row_id_index)
-        # app_debug.info(f"neighbors of {row_id}: {i_graph.neighbors(row_id_index, mode='OUT') }")
-        while len(self.walk) < sentence_len:
-            # app_debug.info(f"{row_id}, {row_id_index}")
-            node_index = sampler.sample()
+        walk_ids = []
+        while len(walk_ids) < sentence_len:
+            node_index = _sample_neighbor(graph, row_id_index)
             if node_index is None:
                 raise ValueError("No neighbors")
-
-            node = i_graph.vs[node_index]["name"]
-            self.walk.append(node)
-            if len(self.walk) < sentence_len:
-                self.walk.append(row_id)
+            walk_ids.append(node_index)
+            if len(walk_ids) < sentence_len:
+                walk_ids.append(int(row_id_index))
+        self.walk = _format_walk(graph, walk_ids, sequence_format)
 
     def get_walk(self):
         return self.walk
@@ -61,21 +81,20 @@ class RamdomRow:
 
 
 class RandomWalk:
-    def __init__(self, graph, starting_node_index, sentence_len, backtrack, update_stats=True):
-        i_graph = graph.get_graph()
-        self.walk = []
-
-        starting_node = i_graph.vs[starting_node_index]
-        starting_node_name = starting_node["name"]
-        if starting_node["node_class"]["isfirst"]:
-            self.walk = [starting_node_name]
+    def __init__(self, graph, starting_node_index, sentence_len, backtrack,
+                 update_stats=True, sequence_format="text"):
+        walk_ids = []
+        starting_node_index = int(starting_node_index)
+        starting_node_name = graph.get_node_name(starting_node_index)
+        if graph.is_first(starting_node_index):
+            walk_ids = [starting_node_index]
         else:
             try:
-                sampler = graph.get_sampler(starting_node_index)
-                first_node_indice = sampler.sample_firstnode()
-                if first_node_indice is not None:
-                    first_node_name = i_graph.vs[first_node_indice]["name"]
-                    self.walk = [first_node_name, starting_node_name]
+                candidates = [int(node_id) for node_id in graph.neighbors(starting_node_index)
+                              if graph.is_first(int(node_id))]
+                if candidates:
+                    first_node_indice = candidates[np.random.randint(0, len(candidates))]
+                    walk_ids = [first_node_indice, starting_node_index]
                 else:
                     raise ValueError("The first node of the sentence could not be found. Please check your node_types settings.")
             except Exception:
@@ -84,36 +103,27 @@ class RandomWalk:
                     f"The first node of the sentence could not be found. Please check node {starting_node_name}, index {starting_node_index}."
                 )
 
-        if self.walk == []:
+        if not walk_ids:
+            self.walk = []
             return
 
         current_node_indice = starting_node_index
-        current_node = starting_node
-        sentence_step = len(self.walk)
+        sentence_step = len(walk_ids)
 
         while sentence_step < sentence_len:
-            previous_node = current_node
             previous_node_index = current_node_indice
-            sampler = graph.get_sampler(previous_node_index)
-            current_node_indice = sampler.sample()
+            current_node_indice = _sample_neighbor(graph, previous_node_index)
             if current_node_indice is None:
                 raise ValueError("No neighbors")
-            current_node = i_graph.vs[current_node_indice]
-            current_node_name = current_node["name"]
 
-            if not backtrack and current_node_name == self.walk[-1]:
+            if not backtrack and current_node_indice == walk_ids[-1]:
                 continue
-            if not current_node["node_class"]["isappear"]:
+            if not graph.is_appear(current_node_indice):
                 continue
 
-            self.walk.append(current_node_name)
-            if update_stats:
-                previous_node["appearing_frequency"] = previous_node["appearing_frequency"] + 1
-                if current_node_name in previous_node["test_neighbors_freq"]:
-                    previous_node["test_neighbors_freq"][current_node_name] = previous_node["test_neighbors_freq"][current_node_name] + 1
-                else:
-                    previous_node["test_neighbors_freq"][current_node_name] = 1
+            walk_ids.append(current_node_indice)
             sentence_step += 1
+        self.walk = _format_walk(graph, walk_ids, sequence_format)
 
     def get_walk(self):
         return self.walk
@@ -195,7 +205,8 @@ def start_walk_multiscale(roots_index, graph, walks_number, walk_length, write_w
     return sentences
 
 
-def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_rules, row, update_stats=False):
+def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_rules, row,
+               update_stats=False, sequence_format="text"):
     sentences = []
     if roots_index == 0 or roots_index is None:
         return
@@ -205,19 +216,20 @@ def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_
     for root in roots_index:
         walks = []
 
-        root_id = graph.get_graph().vs[root]["name"]
+        root_id = graph.get_node_name(root)
         if row:
             walks_number_basic = int(walks_number * 0.2)
             walks_number_row = int(walks_number - walks_number_basic)
             if root_id.startswith("idx"):
                 for _r in range(walks_number_row):
-                    w = RamdomRow(graph, root, walk_length)
+                    w = RamdomRow(graph, root, walk_length, sequence_format)
                     if w.get_walk() != []:
                         walks.append(w.get_walk())
                         # app_debug.info(f"walks of token {w.get_walk()}")
             else:
                 for _r in range(walks_number_basic):
-                    w = RandomWalk(graph, root, walk_length, walk_rules, update_stats=update_stats)
+                    w = RandomWalk(graph, root, walk_length, walk_rules, update_stats=update_stats,
+                                   sequence_format=sequence_format)
                     if w.get_walk() != []:
                         walks.append(w.get_walk())
                         # app_debug.info(f"walks of token {w.get_walk()}")
@@ -225,7 +237,8 @@ def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_
             for _r in range(walks_number):
                 try:
                     if isinstance(walk_rules, bool):
-                        w = RandomWalk(graph, root, walk_length, walk_rules, update_stats=update_stats)
+                        w = RandomWalk(graph, root, walk_length, walk_rules, update_stats=update_stats,
+                                       sequence_format=sequence_format)
                     else:
                         w = RandomWalk_MetaPath(graph, root, walk_length, walk_rules)
                 except Exception as e:
@@ -251,16 +264,14 @@ def start_walk(roots_index, graph, walks_number, walk_length, write_walks, walk_
 
 
 def dynrandom_walks_generation(configuration, graph):
-    """Generate the walks of one batch (window).
-
-    Samplers are built lazily by graph.get_sampler() for the nodes the walks actually reach and
-    are reused for the rest of this call; they are released when it returns so a sampler never
-    outlives the batch (and the graph state) it was built from.
-    """
+    """Generate one window of walks through the backend-neutral reader interface."""
+    started = time.perf_counter()
     try:
         return _generate_walks(configuration, graph)
     finally:
-        graph.clear_samplers()
+        if hasattr(graph, "clear_samplers"):
+            graph.clear_samplers()
+        print(f"[random-walk] seconds={time.perf_counter() - started:.6f} num_nodes={graph.vertex_count()}")
 
 
 def _generate_walks(configuration, graph):
@@ -271,12 +282,22 @@ def _generate_walks(configuration, graph):
     update_stats = bool(walk_cfg.get("rw_stat", False))
     meta_path = _graph_meta_path(configuration)
     write_walks = walk_cfg.get("write_walks", True)
+    sequence_format = walk_cfg.get("sequence_format", "text")
+    if sequence_format not in {"id", "text"}:
+        raise ValueError("random_walk.sequence_format must be 'id' or 'text'")
+    compact = configuration.get("graph_construction", {}).get("backend") == "compact_adjacency"
+    if compact and meta_path:
+        raise NotImplementedError("compact_adjacency backend V1 does not support meta_path")
+    if compact and update_stats:
+        raise NotImplementedError("compact_adjacency backend V1 does not support rw_stat")
 
     sentences = []
     if walk_nums > 0:
         if not meta_path:
             roots_index = graph.dyn_roots
-            sentences = start_walk(roots_index, graph, walk_nums, walk_length, write_walks, backtrack, row=False, update_stats=update_stats)
+            sentences = start_walk(roots_index, graph, walk_nums, walk_length, write_walks,
+                                   backtrack, row=False, update_stats=update_stats,
+                                   sequence_format=sequence_format)
             graph.dyn_roots.clear()
         else:
             if isinstance(meta_path, list):

@@ -6,12 +6,23 @@ from typing import Dict, List, Tuple, Iterable, Optional, Set
 
 import math
 import os
+import re
 import numpy as np
 import pandas as pd
 import ast
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, **_kwargs):
+        return iterable
 
 from models.representation_graph import RepresentationGraph
+from models.compact_adjacency_graph import CompactAdjacencyGraph, CSRGraphReader
+from models.graph_backend import (
+    is_appear as flag_is_appear,
+    is_first as flag_is_first,
+    is_root as flag_is_root,
+)
 from pipeline.sampler import NodeSampler
 from utils.write_log import write_log
 from utils.utils import OUTPUT_FORMAT, TIME_FORMAT, convert_token_value
@@ -95,6 +106,26 @@ class DynGraphIgraph(RepresentationGraph):
         if flatten == "no":
             return []
         return flatten
+
+    def get_or_create_node(self, name, node_type, node_class_flags=0):
+        existing = self.get_vertex_index(name)
+        if existing is not None:
+            return existing
+        node = RepresentationGraph._add_vertex(
+            self, name, node_type,
+            numeric=self.node_is_numeric.get(node_type, False),
+            node_class={"isfirst": flag_is_first(node_class_flags),
+                        "isroot": flag_is_root(node_class_flags),
+                        "isappear": flag_is_appear(node_class_flags)},
+        )
+        return int(node.index)
+
+    def add_edge(self, src_id, dst_id):
+        self._add_edge(int(src_id), int(dst_id))
+
+    def export_snapshot(self, path, version=0):
+        persist_graph(self, path)
+        return path
 
     def _extract_node_types(self, node_types: Iterable[str]) -> None:
         for node_type in node_types:
@@ -579,6 +610,7 @@ def dyn_graph_generation(configuration):
     :return: the generated graph
     """
     graph_cfg = _graph_config(configuration)
+    backend = graph_cfg.get("backend", "igraph")
     meta_path = configuration.get("meta_path", graph_cfg.get("meta_path", []))
     if not meta_path:
         flatten_cfg = graph_cfg.get("flatten", [])
@@ -605,8 +637,33 @@ def dyn_graph_generation(configuration):
     ngram_config = graph_cfg.get("ngram")
     if not isinstance(ngram_config, dict):
         ngram_config = None
-    # convert_token_value() --> token_list
-    g = DynGraphIgraph(
+    if backend == "compact_adjacency":
+        walk_cfg = configuration.get("random_walk", {})
+        unsupported = []
+        if meta_path:
+            unsupported.append("meta_path")
+        if smooth not in (None, "", "no", False):
+            unsupported.append("smoothing_method/weighted sampling")
+        if graph_cfg.get("rare_bias"):
+            unsupported.append("rare_bias")
+        if graph_cfg.get("weighted") or graph_cfg.get("undirected_weighted"):
+            unsupported.append("weighted graph")
+        if walk_cfg.get("mode", "uniform") != "uniform":
+            unsupported.append(f"random_walk.mode={walk_cfg.get('mode')}")
+        if walk_cfg.get("weighted") or walk_cfg.get("rare_bias") or walk_cfg.get("smoothing_method"):
+            unsupported.append("weighted random walk")
+        if walk_cfg.get("rw_stat"):
+            unsupported.append("rw_stat")
+        if unsupported:
+            raise NotImplementedError(
+                "compact_adjacency backend V1 does not support " + ", ".join(unsupported)
+            )
+        g = CompactAdjacencyGraph(
+            node_types=node_types, flatten=flatten, directed=directed,
+            ngram_config=ngram_config,
+        )
+    elif backend == "igraph":
+        g = DynGraphIgraph(
         node_types=node_types,
         flatten=flatten,
         directed=directed,
@@ -616,7 +673,9 @@ def dyn_graph_generation(configuration):
         rare_alpha=0.7,
         undirected_weighted=False,
         meta_path=meta_path,
-    )
+        )
+    else:
+        raise ValueError(f"Unknown graph_construction.backend: {backend}")
 
     t_end = datetime.now()
     dt = t_end - t_start
@@ -626,7 +685,7 @@ def dyn_graph_generation(configuration):
     return g
 
 
-def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
+def load_or_create_graph(configuration, graph_path: str):
     """
     Load a persisted representation graph if present, else build a fresh one.
 
@@ -634,6 +693,16 @@ def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
     survive) -- callers must restore roots afterward via restore_dyn_roots,
     using the dyn_roots produced alongside this graph by graph construction.
     """
+    graph_cfg = _graph_config(configuration)
+    if graph_cfg.get("backend", "igraph") == "compact_adjacency":
+        if os.path.isdir(graph_path) and os.path.isfile(os.path.join(graph_path, "manifest.json")):
+            return CompactAdjacencyGraph.load_snapshot(
+                graph_path,
+                node_types=graph_cfg.get("node_types", []),
+                flatten=graph_cfg.get("flatten", []),
+                ngram_config=graph_cfg.get("ngram"),
+            )
+        return dyn_graph_generation(configuration)
     if os.path.isfile(graph_path) and os.path.getsize(graph_path) > 0:
         graph = dyn_graph_generation(configuration)
         graph.load_graph(graph_path)
@@ -643,6 +712,10 @@ def load_or_create_graph(configuration, graph_path: str) -> DynGraphIgraph:
 
 def persist_graph(graph: DynGraphIgraph, graph_path: str) -> None:
     """Atomically write a GraphML snapshot from a stripped copy of the graph."""
+    if isinstance(graph, CompactAdjacencyGraph):
+        match = re.search(r"(\d+)$", os.path.basename(graph_path))
+        graph.export_snapshot(graph_path, int(match.group(1)) if match else 0)
+        return
     graph_dir = os.path.dirname(graph_path)
     if graph_dir:
         os.makedirs(graph_dir, exist_ok=True)
@@ -652,7 +725,7 @@ def persist_graph(graph: DynGraphIgraph, graph_path: str) -> None:
     os.replace(temp_path, graph_path)
 
 
-def serialize_dyn_roots(graph: DynGraphIgraph) -> list:
+def serialize_dyn_roots(graph) -> list:
     """
     Serialize dyn_roots (a set of vertex indices, per this project's meta_path-less
     configuration) as vertex names, to be carried as transfer/buffer data directly
@@ -661,6 +734,8 @@ def serialize_dyn_roots(graph: DynGraphIgraph) -> list:
     Vertex indices do not survive a GraphML round-trip, so names are the only
     stable identifier a downstream consumer can restore from.
     """
+    if isinstance(graph, CompactAdjacencyGraph):
+        return sorted(map(int, graph.dyn_roots))
     i_graph = graph.get_graph()
     names = []
     for idx in graph.dyn_roots or []:
@@ -683,11 +758,23 @@ def clear_dyn_roots(graph: DynGraphIgraph) -> None:
         roots.clear()
 
 
-def restore_dyn_roots(graph: DynGraphIgraph, root_names) -> None:
+def restore_dyn_roots(graph, root_names) -> None:
     """Restore dyn_roots on a freshly loaded graph from a serialize_dyn_roots payload."""
+    if isinstance(graph, (CompactAdjacencyGraph, CSRGraphReader)):
+        graph.dyn_roots = {int(node_id) for node_id in (root_names or [])
+                           if 0 <= int(node_id) < graph.vertex_count()}
+        return
     i_graph = graph.get_graph()
     name_to_index = {v["name"]: int(v.index) for v in i_graph.vs if "name" in v.attributes()}
     graph.dyn_roots = {name_to_index[n] for n in (root_names or []) if n in name_to_index}
+
+
+def load_graph_reader(configuration, graph_path: str):
+    """Open an immutable handoff using the configured backend."""
+    if _graph_config(configuration).get("backend", "igraph") == "compact_adjacency":
+        mmap = configuration.get("graph_snapshot", {}).get("mmap", True)
+        return CSRGraphReader(graph_path, mmap=bool(mmap))
+    return load_or_create_graph(configuration, graph_path)
 
 
 # ------------------------

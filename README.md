@@ -48,7 +48,7 @@ normalization ──→ graph-construction → random-walk → embedding-trainin
              └─→ cg-feature-extraction → feature-index-construction
 ```
 
-Normalization reads `data_source_A` in bounded windows. Each window is published to both branches. The next window waits for embedding and index acknowledgments, bounding intermediate files to one window. Graph construction keeps its graph in memory and sends an atomic GraphML snapshot plus root names to random walk. Random walk loads the snapshot, prepares samplers, writes sequences, and removes the consumed snapshot. The model and index remain in their owning Pods across windows.
+Normalization reads `data_source_A` in bounded windows. Each window is published to both branches. The next window waits for embedding and index acknowledgments, bounding intermediate files to one window. With `graph_construction.backend: compact_adjacency`, graph construction sends an immutable CSR snapshot and stable root IDs to random walk; the reader memory-maps that snapshot and samples adjacency directly. `random_walk.sequence_format` selects backward-compatible text tokens or stable integer IDs encoded as strings. The legacy `igraph`/GraphML backend remains available by setting `backend: igraph`. The model and index remain in their owning Pods across windows.
 
 Handoffs use the shared communication PVC under `<workflow-name>/communication/embedding-training`, including graph snapshots so readers can run on different nodes. The graph, model and index are saved to the existing model PVCs on EOS. Incremental Jobs start only after **all six** training Pods succeed.
 

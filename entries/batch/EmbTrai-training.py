@@ -77,9 +77,12 @@ def normalize(config, bus):
 
 
 def graph_stage(config, bus):
-    from pipeline.graph_construction import clear_dyn_roots, load_or_create_graph, persist_graph
+    from pipeline.graph_construction import (clear_dyn_roots, load_or_create_graph,
+                                               persist_graph, serialize_dyn_roots)
 
-    final_path = os.path.join(get_model_directory(config, "graph"), "graph.graphml")
+    compact = config.get("graph_construction", {}).get("backend") == "compact_adjacency"
+    final_path = os.path.join(get_model_directory(config, "graph"),
+                              "graph_snapshot_current" if compact else "graph.graphml")
     graph = load_or_create_graph(config, final_path)
     stage = StreamStage("graph-construction", HandoffIO(bus, "processed-graph", "graph"), handle_signals=False)
 
@@ -89,10 +92,9 @@ def graph_stage(config, bus):
             graph.build_relation(data)
         del data
         graph._tokenize_cached.cache_clear()
-        roots = graph.dyn_roots
-        names = lambda indices: [graph.graph.vs[int(i)]["name"] for i in indices]
-        root_names = {key: names(value) for key, value in roots.items()} if isinstance(roots, dict) else names(roots)
-        snapshot = str(bus.root / f"graph-{window.index}.graphml")
+        root_names = serialize_dyn_roots(graph)
+        snapshot = str(bus.root / (f"graph_snapshot_{window.index:06d}" if compact
+                                   else f"graph-{window.index}.graphml"))
         with timed("graph-construction", window.index, "write-snapshot"):
             persist_graph(graph, snapshot)
             stage.send(window.index, {"path": snapshot, "roots": root_names})
@@ -108,7 +110,7 @@ def graph_stage(config, bus):
 
 
 def walk_stage(config, bus):
-    from pipeline.graph_construction import load_or_create_graph
+    from pipeline.graph_construction import load_graph_reader, restore_dyn_roots
     from pipeline.random_walk import dynrandom_walks_generation
 
     stage = StreamStage("random-walk", HandoffIO(bus, "graph", "sequences"), handle_signals=False)
@@ -116,10 +118,8 @@ def walk_stage(config, bus):
     def process(window):
         handoff = window.take()
         with timed("random-walk", window.index, "load-graph"):
-            graph = load_or_create_graph(config, handoff["path"])
-            restore = lambda names: {graph.name2idx[name] for name in names}
-            roots = handoff["roots"]
-            graph.dyn_roots = {key: restore(value) for key, value in roots.items()} if isinstance(roots, dict) else restore(roots)
+            graph = load_graph_reader(config, handoff["path"])
+            restore_dyn_roots(graph, handoff["roots"])
         with timed("random-walk", window.index, "compute"):
             sequences = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
         del graph
@@ -127,7 +127,11 @@ def walk_stage(config, bus):
         with timed("random-walk", window.index, "write"):
             stage.send(window.index, sequences)
         del sequences
-        os.unlink(handoff["path"])
+        if os.path.isdir(handoff["path"]):
+            import shutil
+            shutil.rmtree(handoff["path"])
+        else:
+            os.unlink(handoff["path"])
         bus.put("graph-done", window.index, True)
 
     stage.run(process)

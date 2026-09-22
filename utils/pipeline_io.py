@@ -343,6 +343,12 @@ def load_processed_data(processed_data_path: str):
 
 
 def _window_index_from_name(name: str) -> int | None:
+    if name.startswith("graph_snapshot_"):
+        token = name.removeprefix("graph_snapshot_").split(".", 1)[0]
+        try:
+            return int(token)
+        except ValueError:
+            return None
     token = name.split("_", 1)[0].split(".", 1)[0]
     try:
         return int(token)
@@ -570,8 +576,10 @@ def resolve_checkpoint_reference(reference, source: str = "checkpoint reference"
     if not isinstance(reference, dict):
         raise ValueError(f"Invalid checkpoint reference: {source}")
     checkpoint_path = reference.get("checkpoint_path")
-    if not checkpoint_path or not os.path.isfile(checkpoint_path):
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint target does not exist: {checkpoint_path}")
+    if os.path.isdir(checkpoint_path) and not os.path.isfile(os.path.join(checkpoint_path, "manifest.json")):
+        raise RuntimeError(f"CSR graph checkpoint is incomplete: {checkpoint_path}")
     if checkpoint_path.endswith(".emb") and not os.path.isfile(
         os.path.join(os.path.dirname(checkpoint_path), ".complete")
     ):
@@ -790,12 +798,17 @@ def latest_graph_checkpoint(checkpoint_dir: str):
         if name.endswith(".json")
         for index in [_window_index_from_name(name)]
         if index is not None
-        and os.path.isfile(os.path.join(checkpoint_dir, f"{index}.graphml"))
+        and (
+            os.path.isfile(os.path.join(checkpoint_dir, f"{index}.graphml"))
+            or os.path.isfile(os.path.join(checkpoint_dir, f"graph_snapshot_{index:06d}", "manifest.json"))
+        )
     ]
     if not indexes:
         return None
     window_index = max(indexes)
-    return window_index, os.path.join(checkpoint_dir, f"{window_index}.graphml")
+    csr_path = os.path.join(checkpoint_dir, f"graph_snapshot_{window_index:06d}")
+    path = csr_path if os.path.isdir(csr_path) else os.path.join(checkpoint_dir, f"{window_index}.graphml")
+    return window_index, path
 
 
 def latest_embedding_checkpoint(checkpoint_dir: str):

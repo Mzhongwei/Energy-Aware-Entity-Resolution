@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-import igraph as ig
-from igraph import Graph
+try:
+    import igraph as ig
+    from igraph import Graph
+except ImportError:  # compact_adjacency deliberately has no igraph dependency
+    ig = None
+    Graph = object
+
+from models.graph_backend import encode_node_class, is_appear, is_first, is_root
 
 
 class RepresentationGraph:
     def __init__(self, directed: bool = False) -> None:
+        if ig is None:
+            raise ImportError("The igraph backend requires the optional 'igraph' package")
         self.graph: Graph = ig.Graph(directed=directed)
         self.name2idx: Dict[str, int] = {}
         self.edge2eid: Dict[Tuple[int, int], int] = {}
@@ -147,6 +155,37 @@ class RepresentationGraph:
 
     def get_vertex_index(self, name: str) -> Optional[int]:
         return self.name2idx.get(name)
+
+    @property
+    def directed(self) -> bool:
+        return bool(self.graph.is_directed())
+
+    def vertex_count(self) -> int:
+        return int(self.graph.vcount())
+
+    def get_node_name(self, node_id: int) -> str:
+        return str(self.graph.vs[int(node_id)]["name"])
+
+    def get_node_class_flags(self, node_id: int) -> int:
+        node = self.graph.vs[int(node_id)]
+        value = node["node_class"] if "node_class" in node.attributes() else {}
+        return encode_node_class(
+            bool(value.get("isfirst", False)),
+            bool(value.get("isroot", False)),
+            bool(value.get("isappear", False)),
+        ) if isinstance(value, dict) else int(value or 0)
+
+    def is_first(self, node_id: int) -> bool:
+        return is_first(self.get_node_class_flags(node_id))
+
+    def is_root(self, node_id: int) -> bool:
+        return is_root(self.get_node_class_flags(node_id))
+
+    def is_appear(self, node_id: int) -> bool:
+        return is_appear(self.get_node_class_flags(node_id))
+
+    def neighbors(self, node_id: int):
+        return self.graph.neighbors(int(node_id), mode="OUT")
 
     def delete_vertices(self, names: List[str]) -> None:
         idxs = [self.name2idx[n] for n in names if n in self.name2idx]
