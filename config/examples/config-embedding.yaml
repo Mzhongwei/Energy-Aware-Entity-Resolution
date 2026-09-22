@@ -94,6 +94,7 @@ random_walk:
   walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
   rw_stat: false                 # statistical result of random walk
+  min_count : 5
 
 graph_snapshot:
   format: "csr"
