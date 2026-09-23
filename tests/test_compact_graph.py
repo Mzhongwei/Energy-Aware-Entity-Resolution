@@ -19,14 +19,14 @@ from pipeline.random_walk import RandomWalk, dynrandom_walks_generation
 NODE_TYPES = ["5#__tn", "5$__tt", "5$__st", "3$__idx", "1$__cid"]
 
 
-def config(sequence_format="text", directed=False):
+def config(directed=False):
     return {
         "graph_construction": {
             "backend": "compact_adjacency", "node_types": NODE_TYPES,
             "flatten": "tt", "directed": directed,
         },
         "random_walk": {
-            "mode": "uniform", "sequence_format": sequence_format,
+            "mode": "uniform",
             "walks_number": 2, "walk_length": 5, "write_walks": False,
         },
         "graph_snapshot": {"format": "csr", "mmap": True},
@@ -87,17 +87,16 @@ class CompactGraphTests(unittest.TestCase):
             for name, node_id in original_ids.items():
                 self.assertEqual(restored.get_vertex_index(name), node_id)
 
-    def test_uniform_walk_transitions_and_formats(self):
+    def test_uniform_walk_transitions(self):
         graph = CompactAdjacencyGraph()
         a = graph.get_or_create_node("a", "x", ISFIRST | ISROOT | ISAPPEAR)
         b = graph.get_or_create_node("b", "x", ISAPPEAR)
         graph.add_edge(a, b)
         graph.dyn_roots.add(a)
-        id_walk = RandomWalk(graph, a, 5, True, sequence_format="id").get_walk()
-        self.assertEqual(id_walk, [str(a), str(b), str(a), str(b), str(a)])
-        text_walk = RandomWalk(graph, a, 3, True, sequence_format="text").get_walk()
-        self.assertEqual(text_walk, ["a", "b", "a"])
-        for left, right in zip(map(int, id_walk), map(int, id_walk[1:])):
+        walk = RandomWalk(graph, a, 5, True).get_walk()
+        self.assertEqual(walk, ["a", "b", "a", "b", "a"])
+        walk_ids = [graph.get_vertex_index(name) for name in walk]
+        for left, right in zip(walk_ids, walk_ids[1:]):
             self.assertIn(right, graph.neighbors(left))
         self.assertFalse(hasattr(graph, "get_sampler"))
 
@@ -108,24 +107,25 @@ class CompactGraphTests(unittest.TestCase):
         hidden = graph.get_or_create_node("hidden", "x", 0)
         graph.add_edge(start, first)
         graph.add_edge(start, hidden)
-        walk = RandomWalk(graph, start, 2, True, sequence_format="text").get_walk()
+        walk = RandomWalk(graph, start, 2, True).get_walk()
         self.assertEqual(walk, ["first", "start"])
 
-    def test_pipeline_sequence_formats_and_reopen(self):
-        graph = dyn_graph_generation(config("id"))
+    def test_pipeline_walk_sequences_after_reopen(self):
+        graph = dyn_graph_generation(config())
         graph.build_relation(pd.DataFrame({"rid": ["A_1"], "title": ["honey basil"]}))
         roots = serialize_dyn_roots(graph)
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "graph_snapshot_000001")
             persist_graph(graph, path)
-            reader = load_graph_reader(config("id"), path)
+            reader = load_graph_reader(config(), path)
             restore_dyn_roots(reader, roots)
-            ids = dynrandom_walks_generation(config("id"), reader)
-            self.assertTrue(all(token.isdigit() for walk in ids for token in walk))
-            reader = load_graph_reader(config("text"), path)
-            restore_dyn_roots(reader, roots)
-            text = dynrandom_walks_generation(config("text"), reader)
-            self.assertTrue(any(not token.isdigit() for walk in text for token in walk))
+            sequences = dynrandom_walks_generation(config(), reader)
+            self.assertTrue(sequences)
+            # Every emitted token is a real node name resolvable back through the mmap
+            # reader -- never the graph's internal integer node id.
+            for walk in sequences:
+                for token in walk:
+                    self.assertIsNotNone(reader.get_vertex_index(token), token)
 
     def test_unsupported_configuration_fails(self):
         bad = config()

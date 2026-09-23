@@ -109,11 +109,14 @@ def _source_record_ids(config, raw_data):
     if source_field not in raw_data.columns:
         raise ValueError(f"Configured record_ids.source_field '{source_field}' is missing from the input.")
     source_ids = raw_data[source_field]
-    if source_ids.isna().any() or source_ids.astype(str).str.strip().eq("").any():
+    if source_ids.isna().any():
         raise ValueError(f"Configured record_ids.source_field '{source_field}' contains empty values.")
-    if source_ids.astype(str).duplicated().any():
+    source_ids = source_ids.astype(str).str.strip()
+    if source_ids.eq("").any():
+        raise ValueError(f"Configured record_ids.source_field '{source_field}' contains empty values.")
+    if source_ids.duplicated().any():
         raise ValueError(f"Configured record_ids.source_field '{source_field}' contains duplicate values in a batch.")
-    return source_field, source_ids.astype(str)
+    return source_field, source_ids
 
 
 

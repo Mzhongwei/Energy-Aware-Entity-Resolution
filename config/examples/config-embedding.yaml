@@ -87,8 +87,6 @@ graph_construction:
 
 
 random_walk:
-  mode: "uniform"
-  sequence_format: "text"       # "text" preserves existing embedding tokens; "id" emits stable IDs
   write_walks: false
   walk_length: 30                # step size
   walks_number: 10               # number of sentences per root

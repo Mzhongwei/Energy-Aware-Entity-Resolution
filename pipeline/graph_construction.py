@@ -648,8 +648,6 @@ def dyn_graph_generation(configuration):
             unsupported.append("rare_bias")
         if graph_cfg.get("weighted") or graph_cfg.get("undirected_weighted"):
             unsupported.append("weighted graph")
-        if walk_cfg.get("mode", "uniform") != "uniform":
-            unsupported.append(f"random_walk.mode={walk_cfg.get('mode')}")
         if walk_cfg.get("weighted") or walk_cfg.get("rare_bias") or walk_cfg.get("smoothing_method"):
             unsupported.append("weighted random walk")
         if walk_cfg.get("rw_stat"):
