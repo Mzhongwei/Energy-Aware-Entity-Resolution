@@ -24,10 +24,7 @@ from models.graph_backend import (
     is_root as flag_is_root,
 )
 from pipeline.sampler import NodeSampler
-from utils.write_log import write_log
 from utils.utils import OUTPUT_FORMAT, TIME_FORMAT, convert_token_value
-
-app_debug = write_log("logs", "debug", "dynamic_graph")
 
 
 def _is_missing_cell_value(value) -> bool:
@@ -518,7 +515,6 @@ class DynGraphIgraph(RepresentationGraph):
                             index = update_node("nan", col)
                             if index not in values[col]:
                                 values[col].append(index)
-                # app_debug.info(values)
                 for a, b in getattr(self, 'meta_link', []):
                     if a in values and b in values:
                         for v1 in values[a]:
@@ -773,34 +769,3 @@ def load_graph_reader(configuration, graph_path: str):
         mmap = configuration.get("graph_snapshot", {}).get("mmap", True)
         return CSRGraphReader(graph_path, mmap=bool(mmap))
     return load_or_create_graph(configuration, graph_path)
-
-
-# ------------------------
-# test
-# ------------------------
-if __name__ == "__main__":
-    import pandas as pd
-
-    data = [
-        {"rid": 1, "name": "Honey Basil Amber", "cat": "A"},
-        {"rid": 2, "name": "Rude Hippo Honey Basil Amber", "cat": "A"},
-        {"rid": 3, "name": "Mint Lemon", "cat": "B"},
-    ]
-    df = pd.DataFrame(data)
-
-    g = DynGraphIgraph(
-        node_types=["5#__idx", "0#__cid", "0#__tt", "0#__tn", "0#__ng"],
-        flatten=['tt'],
-        directed=False,
-        smooth='IDF',
-        ngram_config={'token_n': [2, 3], 'char_n': [], 'skip': 0},
-        rare_bias='idf',
-        rare_alpha=0.7,
-        undirected_weighted=True,
-    )
-
-    g.build_relation(df)
-    # check name2idx
-    print("Vertex count:", g.graph.vcount())
-    print("Edge count:", g.graph.ecount())
-    print("Index of 'ng::3::Honey␟Basil␟Amber':", g.get_vertex_index("ng::3::Honey␟Basil␟Amber"))

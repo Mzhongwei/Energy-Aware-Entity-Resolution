@@ -1,7 +1,6 @@
-import os
 from igraph import Graph
 from datetime import datetime
-from utils.utils import *
+from utils.utils import OUTPUT_FORMAT, TIME_FORMAT
 
 class SimilarityGraph:
     def __init__(self, most_similar_num, output_format):
@@ -10,11 +9,6 @@ class SimilarityGraph:
         self.vertex_map = {}  # group name -> vertex id
         self.most_similar_num = most_similar_num
         self.output_format = output_format
-        self.name = ""
-        self.app_logger = None
-    
-    def set_logger(self, logger):
-        self.app_logger = logger
 
     def _find_or_create_group(self, name):
         group = self.group_map.get(name, name)
@@ -112,25 +106,6 @@ class SimilarityGraph:
             v["members"] = ",".join(members)
 
 
-    def display(self):
-        for v in self.graph.vs:
-            name = v["name"]
-            members = self.get_group_members(name)
-            neighbors = self.graph.neighbors(v.index, mode="OUT")
-            neighbor_names = [self.graph.vs[n]["name"] for n in neighbors]
-            print(f"Group {name}: members={members}, connected to={neighbor_names}")
-
-    
-    def check_output_path(self, name):
-        self.name = name
-
-    def update_file(self):
-        filepath = ""
-        if self.output_format == "graphml":
-            filepath = f"pipeline/similarity/{self.name}.graphml"
-            self.export_graphml(f"pipeline/similarity/{self.name}.graphml")
-        return filepath
-
     def export_graphml(self, path):
         """
         Export graph to GraphML format (with weights)
@@ -138,34 +113,3 @@ class SimilarityGraph:
         self.add_vertex_members()
         self.graph.write_graphml(path)
         print(OUTPUT_FORMAT.format(f'[OK] Graph exported to GraphML: {path}.', datetime.now().strftime(TIME_FORMAT)))
-        
-
-    def export_edgelist(self, path):
-        """
-        Export edge list: node1 node2 weight
-        """
-        with open(path, "w") as f:
-            for e in self.graph.es:
-                source = self.graph.vs[e.source]["name"]
-                target = self.graph.vs[e.target]["name"]
-                weight = e["weight"]
-                f.write(f"{source} {target} {weight}\n")
-        print(f"[OK] Graph exported to edge list: {path}")
-
-    def export_pickle(self, path):
-        """
-        Save entire igraph.Graph object as pickle
-        """
-        import pickle
-        with open(path, "wb") as f:
-            pickle.dump(self.graph, f)
-        print(f"[OK] Graph saved as pickle: {path}")
-
-
-if __name__ == '__main__':
-    sim = SimilarityGraph(3, 'graphml')
-    sim.add_similarity("apple", [("banana", 0.8), ("cherry", 0.9), ("grape", 0.85)])
-    sim.add_similarity("apple", [("orange", 0.7), ("pear", 0.95), ("watermelon", 0.92)])
-    sim.add_similarity("apple", [("pomme", 1)])
-
-    print(sim.display())  

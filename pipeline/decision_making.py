@@ -65,10 +65,16 @@ def decide_matches(
     model=None,
     output_format: str = "graphml",
     top_k: int = 2,
+    min_similarity: float | None = None,
 ) -> Tuple[List[ScoredPair], SimilarityGraph]:
     if model is None:
         raise ValueError("embedding model is required for decision making.")
     final_pairs = merge_mutual_topk_pairs(previous_pairs, mutual_topk_pairs, model, top_k=top_k)
+    if min_similarity is not None:
+        threshold = float(min_similarity)
+        if not -1.0 <= threshold <= 1.0:
+            raise ValueError("decision_making.min_similarity must be between -1 and 1.")
+        final_pairs = [pair for pair in final_pairs if pair[2] >= threshold]
     return final_pairs, build_similarity_graph(final_pairs, output_format=output_format, top_k=top_k)
 
 

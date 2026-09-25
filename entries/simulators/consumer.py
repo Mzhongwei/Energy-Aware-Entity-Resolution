@@ -1,21 +1,17 @@
-import argparse
 import json
 import os
 import signal
-import subprocess
 import sys
 import time
 
 from ruamel.yaml import YAML
-import pandas as pd
-from confluent_kafka import Consumer, KafkaException, KafkaError, Producer as KafkaProducer
+from confluent_kafka import Consumer, KafkaException, KafkaError
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from utils.write_log import write_log
 from utils.pipeline_io import clear_buffer_directory, write_buffer, write_eos
 
 
-ACTIVE_JAVA_PROC = None
 ACTIVE_CONSUMER = None
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 BUFFER_DIR = "/app/data/buffers/raw_data"
@@ -23,15 +19,6 @@ BUFFER_DIR = "/app/data/buffers/raw_data"
 # =========================
 # endpoints
 # =========================
-
-def _as_bool(value, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "y"}
-    return default
 
 def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_seconds: float = 10.0) -> None:
     kafka_config = config["kafka"]
@@ -102,24 +89,6 @@ def _ensure_kafka_topic_ready(config: dict, timeout: float = 10.0, ready_wait_se
 # Driver
 # =========================
 
-def safe_read_csv(path):
-    if not path:
-        return pd.DataFrame()
-
-    if not os.path.exists(path):
-        return pd.DataFrame()
-
-    return pd.read_csv(path)
-
-def _serialize_for_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return {"__dataframe__": True, "data": obj.to_dict(orient="records")}
-    if isinstance(obj, dict):
-        return {k: _serialize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_serialize_for_json(item) for item in obj]
-    return obj
-
 def kafka_driver(config):
     try:
         _ensure_kafka_topic_ready(config)
@@ -148,43 +117,15 @@ def kafka_driver(config):
     return consumer
 
 
-def _stop_process_group(proc, interrupt_first=False, wait_seconds=5):
-    if proc is None:
-        return
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
-
-    signals = []
-    if interrupt_first:
-        signals.append(signal.SIGINT)
-    signals.extend([signal.SIGTERM, signal.SIGKILL])
-
-    for sig in signals:
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return
-
-        try:
-            proc.wait(timeout=wait_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-
-
 def _handle_sigint(signum, frame):
-    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
-    print("\n[INFO] Termination signal received. Closing Kafka consumer and Java process now.", flush=True)
+    global ACTIVE_CONSUMER
+    print("\n[INFO] Termination signal received. Closing Kafka consumer now.", flush=True)
     if ACTIVE_CONSUMER is not None:
         try:
             ACTIVE_CONSUMER.close()
         except Exception:
             pass
         ACTIVE_CONSUMER = None
-    _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
-    ACTIVE_JAVA_PROC = None
     # Exit with code 0: this is a deliberate shutdown, not a failure. Without this, closing
     # ACTIVE_CONSUMER here makes the next consumer.poll() in the main loop raise, which the
     # top-level except now (correctly) turns into exit(1) -- misreporting a graceful stop.
@@ -211,7 +152,7 @@ def _flush_buffer_if_any(consumer: Consumer, data_buffer: list, window_index: in
 
 
 def start_consumer(config):
-    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
+    global ACTIVE_CONSUMER
 
     # start kafka
     poll_timeout = 5
@@ -222,8 +163,6 @@ def start_consumer(config):
     consumer = kafka_driver(config)
     if consumer is None:
         raise RuntimeError("Kafka consumer initialization failed.")
-    producer = None
-    
     ACTIVE_CONSUMER = consumer
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
@@ -345,17 +284,6 @@ def start_consumer(config):
             except Exception:
                 pass
             ACTIVE_CONSUMER = None
-        if producer is not None:
-            try:
-                producer.flush()
-            except Exception:
-                pass
-        ACTIVE_JAVA_PROC = None
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-f', '--config_file', type=str, required=True)
-    return parser.parse_args()
 
 
 # =========================

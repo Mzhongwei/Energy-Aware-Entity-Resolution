@@ -6,30 +6,17 @@ import subprocess
 import sys
 import time
 
-from confluent_kafka import Producer as KafkaProducer
 from ruamel.yaml import YAML
-import pandas as pd
 
 from utils.write_log import write_log
 from utils import pipeline_io as _pipeline_io  # Registers per-step I/O metrics at exit.
 
 ACTIVE_JAVA_PROC = None
-ACTIVE_CONSUMER = None
 CONFIG_PATH = os.environ.get("EAER_CONFIG_PATH", "/app/config/examples/config-embedding.yaml")
 
 # =========================
 # Driver
 # =========================
-
-def safe_read_csv(path):
-    if not path:
-        return pd.DataFrame()
-
-    if not os.path.exists(path):
-        return pd.DataFrame()
-
-    return pd.read_csv(path)
-
 
 def _stop_process_group(proc, interrupt_first=False, wait_seconds=5):
     if proc is None:
@@ -58,14 +45,8 @@ def _stop_process_group(proc, interrupt_first=False, wait_seconds=5):
 
 
 def _handle_sigint(signum, frame):
-    global ACTIVE_JAVA_PROC, ACTIVE_CONSUMER
+    global ACTIVE_JAVA_PROC
     print("\n[INFO] Ctrl+C received. Terminating Python and Java processes now.")
-    if ACTIVE_CONSUMER is not None:
-        try:
-            ACTIVE_CONSUMER.close()
-        except Exception:
-            pass
-        ACTIVE_CONSUMER = None
     _stop_process_group(ACTIVE_JAVA_PROC, interrupt_first=True, wait_seconds=1)
     ACTIVE_JAVA_PROC = None
     # Exit with code 0 to indicate graceful shutdown

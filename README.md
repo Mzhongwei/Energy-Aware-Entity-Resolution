@@ -13,11 +13,9 @@ Batch embedding training runs six persistent stage Pods, and Kafka inference run
 
 ## Layout
 
-- [main_distribution.py](main_distribution.py) - pipeline entrypoint and mode dispatcher. It will not work with the current Kubernetes setup.
 - [pipeline](pipeline) - reusable pipeline stages and task helpers.
 - [models](models) - runtime model wrappers and graph/index data structures.
 - [services](services) - producer, consumer, and simulator utilities.
-- [scripts](scripts) - helper scripts used by ConfigMap generation and runtime wiring.
 - [config](config) - example runtime configuration files.
 - [requirements/](requirements/) - dependency sets for entry images and legacy deployment profiles.
 - [entries/batch/EmbTrai-training.py](entries/batch/EmbTrai-training.py) - bounded-window CSV/JSONL embedding training entry.
@@ -52,6 +50,14 @@ Normalization reads `data_source_A` in bounded windows. Each window is published
 
 Handoffs use the shared communication PVC under `<workflow-name>/communication/embedding-training`, including graph snapshots so readers can run on different nodes. The graph, model and index are saved to the existing model PVCs on EOS. Incremental Jobs start only after **all six** training Pods succeed.
 
+When `random_walk.processes` is greater than one, both batch training and incremental
+inference partition the current roots across a process pool. Workers publish JSONL walk
+shards plus a manifest on the shared PVC; embedding training reads that re-iterable corpus
+and removes the shards after a successful window. Kubernetes exposes the random-walk
+container's CPU limit in millicores, and the effective process count is capped to the whole
+CPUs available to the Pod. With the supplied `limits.cpu: "2"` and `processes: 2`, two
+random-walk processes are used.
+
 Stage exceptions publish a failure marker to stop waiting peers. Automatic stage retries are disabled: the handoff protocol is not a resumable checkpoint protocol. Restart a failed training run with a fresh run/version, rather than retrying an individual stage. A configurable handoff timeout catches workers lost without publishing an error (for example OOM or node loss). Configure it with:
 
 ```yaml
@@ -69,7 +75,7 @@ For JSONL with stable source IDs, set `record_ids.source_field`; otherwise train
 
 ## Runtime Data Flow
 
-Distributed entries exchange window artifacts through shared storage; Python objects stay inside each process. The legacy `main_distribution.py` uses a shared runtime dictionary. Typical values include:
+Distributed entries exchange window artifacts through shared storage; Python objects stay inside each process. Typical values include:
 
 - `raw_data`
 - `processed_data`

@@ -1,5 +1,7 @@
 import argparse
 import gc
+import os
+from concurrent.futures import ProcessPoolExecutor
 
 from utils.pipeline_io import (
     BufferIO,
@@ -11,7 +13,7 @@ from utils.pipeline_io import (
     resolve_checkpoint_reference,
 )
 from pipeline.graph_construction import load_graph_reader, restore_dyn_roots
-from pipeline.random_walk import dynrandom_walks_generation
+from pipeline.random_walk import dynrandom_walks_generation, resolve_walk_process_count
 
 """
 task: random walk sequence generation
@@ -33,11 +35,11 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    stage = StreamStage(
-        "random_walk",
-        BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config),
-        is_empty=is_empty_payload,
-    )
+    process_count = resolve_walk_process_count(config)
+    print(f"[random-walk] process_count={process_count}", flush=True)
+    executor = ProcessPoolExecutor(max_workers=process_count) if process_count > 1 else None
+    io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
+    stage = StreamStage("random_walk", io, is_empty=is_empty_payload)
 
     def process(window):
         handoff = window.take()
@@ -48,23 +50,45 @@ def main():
         if is_window_checkpoint_acknowledged(checkpoint_dir, checkpoint_window):
             return
         handoff = resolve_checkpoint_reference(handoff)
-        graph = load_graph_reader(config, handoff["checkpoint_path"])
-        restore_dyn_roots(graph, handoff.get("dyn_roots"))
+        roots = handoff.get("dyn_roots")
+        if executor is None or isinstance(roots, dict):
+            graph = load_graph_reader(config, handoff["checkpoint_path"])
+            restore_dyn_roots(graph, roots)
+            walk_output = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
+            # The next window loads a complete graph snapshot. Release this window's graph
+            # before serializing walks so the old and new snapshots never overlap in memory.
+            del graph
+            gc.collect()
+        else:
+            # Lazy import keeps the original single-process worker contract intact (and
+            # avoids importing multiprocessing-only helpers in lightweight deployments).
+            from pipeline.random_walk import parallel_walks_to_shards
+            shard_directory = os.path.join(
+                io.output_dir(), ".walk_shards", f"window-{window.index:06d}",
+            )
+            walk_output = parallel_walks_to_shards(
+                config,
+                handoff["checkpoint_path"],
+                roots,
+                executor,
+                process_count,
+                shard_directory,
+            )
         del handoff
 
-        sequences = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
-        # The next window loads a complete graph snapshot. Release this window's graph
-        # before serializing walks so the old and new snapshots never overlap in memory.
-        del graph
-        gc.collect()
-
-        stage.send(window.index, sequences)
-        del sequences
+        # This send and the checkpoint acknowledgement occur only after every future above
+        # succeeded: parallel_walks_to_shards is the parent-process window barrier.
+        stage.send(window.index, walk_output)
+        del walk_output
         gc.collect()
 
         acknowledge_window_checkpoint(checkpoint_dir, checkpoint_window)
 
-    stage.run(process)
+    try:
+        stage.run(process)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 if __name__ == "__main__":

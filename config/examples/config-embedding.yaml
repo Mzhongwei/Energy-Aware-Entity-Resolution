@@ -1,6 +1,6 @@
 ### Mandatory
 mode: "embedding-training-inference-evaluation"
-version_name: "dblp-scholar-top2"
+version_name: "test"
 
 # Prefixes identify the indexed (left) and incremental/query (right) datasets.
 record_ids:
@@ -9,9 +9,9 @@ record_ids:
 
 # incremental mode
 # The static NFS dataset volume is mounted at /data.
-data_source_A: "/data/exp_datasets/5-dblp_scholar/tableA.csv"
-data_source_B: "/data/exp_datasets/5-dblp_scholar/tableB.csv"
-ground_truth: "/data/exp_datasets/5-dblp_scholar/matches.txt"
+data_source_A: "/data/exp_datasets/2-fordors_zagats/tableA.csv"
+data_source_B: "/data/exp_datasets/2-fordors_zagats/tableB.csv"
+ground_truth: "/data/exp_datasets/2-fordors_zagats/matches.txt"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
@@ -23,7 +23,7 @@ kafka:
 
   # sliding window strategy
   window_strategy: "count"       # "count" or "time"
-  window_count: 1381             # used if strategy is "count"
+  window_count: 408             # used if strategy is "count"
   update_frequency: 0            # "csv" (file windows) or "kafka" (poll broker per iteration)
 
 ## meta_path:list or list of list (several paths), * 'rid' should appear in meta_path if it is setted
@@ -69,7 +69,7 @@ candidate_generation:
   data_pairs_fixed: ""
 
 graph_construction:
-  backend: "compact_adjacency"  # compact CSR backend; use "igraph" during migration if needed
+  backend: "compact_adjacency"  # compact CSR snapshots; random-walk readers use mmap
   # node types explained in README
   node_types:
     - "5#__tn"                   # numerical instance
@@ -87,7 +87,8 @@ graph_construction:
 
 
 random_walk:
-  write_walks: false
+  processes: 2                  # processes inside one Pod; 1 preserves serial execution
+  sampling_method: "uniform"   # required by compact_adjacency
   walk_length: 30                # step size
   walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
@@ -100,13 +101,22 @@ graph_snapshot:
 
 cg_feature_extraction: {}
 
-embeddings_training:
-  learning_method: "skipgram"    # skipgram / CBOW
-  window_size: 3
+embeddings_training:            # PyTorch skip-gram with negative sampling
+  device: "auto"                 # auto (CUDA if available, else CPU) / cpu / cuda / cuda:<index>
   n_dimensions: 128
-  training_algorithm: "word2vec" # word2vec / fasttext
-  sampling_factor: 0.001
-  min_count : 5
+  window_size: 3                 # maximum context radius
+  dynamic_window: true           # sample the radius per token in [1, window_size]
+  min_count: 10                  # tokens seen fewer times get no vector; keep <= random_walk.walks_number
+  sampling_factor: 0.001         # frequent-token subsampling threshold
+  use_subsampling: true
+  negative: 5                    # negative samples per positive pair
+  epochs: 5                      # epochs per window when inc_epochs is not set
+  inc_epochs: 5                  # epochs per window (every window, including the first); overrides epochs
+  batch_size: 4096
+  optimizer: "adam"              # adam / sgd
+  learning_rate: 0.00215         # decays linearly to min_learning_rate within each window
+  min_learning_rate: 0.0001
+  seed: 1729                     # training randomness; per-window streams are derived from it
 
 candidate_enumeration: {}
 
@@ -114,7 +124,7 @@ calculating_similarity:
   chunk_size: 4096              # candidate pairs scored per in-memory chunk
 
 decision_making:
-  top_k: 2                       # mutual top K matches to keep for each record
+  top_k: 1                       # mutual top K matches to keep for each record
   output_format: "graphml"            # db / json / parquet / graphml
 
 bert_training:

@@ -1,18 +1,17 @@
 test_ignore*
 generative_files
+exp_results/
 tmp/
 logs/
 storage/
 data/
+config/examples/configs-test
 config/config*
 .DS_Store
 .codex
 # pytest and other test files
 .pytest*
-tests/*
-!tests/test_mutual_topk.py
-!tests/test_record_batches.py
-!tests/test_training_stages.py
+tests/
 # Energy Conso Results
 emissions*.csv
 result*.csv

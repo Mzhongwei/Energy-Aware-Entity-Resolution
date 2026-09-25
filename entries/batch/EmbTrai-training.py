@@ -9,6 +9,7 @@ the incremental workers use); this file only supplies each stage's handler and t
 run-scoped Handoff transport.
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 import gc
 import os
@@ -111,22 +112,42 @@ def graph_stage(config, bus):
 
 def walk_stage(config, bus):
     from pipeline.graph_construction import load_graph_reader, restore_dyn_roots
-    from pipeline.random_walk import dynrandom_walks_generation
+    from pipeline.random_walk import (
+        dynrandom_walks_generation,
+        parallel_walks_to_shards,
+        resolve_walk_process_count,
+    )
 
+    process_count = resolve_walk_process_count(config)
+    print(f"[random-walk] process_count={process_count}", flush=True)
+    executor = ProcessPoolExecutor(max_workers=process_count) if process_count > 1 else None
     stage = StreamStage("random-walk", HandoffIO(bus, "graph", "sequences"), handle_signals=False)
 
     def process(window):
         handoff = window.take()
-        with timed("random-walk", window.index, "load-graph"):
-            graph = load_graph_reader(config, handoff["path"])
-            restore_dyn_roots(graph, handoff["roots"])
-        with timed("random-walk", window.index, "compute"):
-            sequences = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
-        del graph
-        gc.collect()
+        roots = handoff["roots"]
+        if executor is None or isinstance(roots, dict):
+            with timed("random-walk", window.index, "load-graph"):
+                graph = load_graph_reader(config, handoff["path"])
+                restore_dyn_roots(graph, roots)
+            with timed("random-walk", window.index, "compute"):
+                walk_output = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
+            del graph
+            gc.collect()
+        else:
+            shard_directory = str(bus.root / ".walk_shards" / f"window-{window.index:06d}")
+            with timed("random-walk", window.index, "compute"):
+                walk_output = parallel_walks_to_shards(
+                    config,
+                    handoff["path"],
+                    roots,
+                    executor,
+                    process_count,
+                    shard_directory,
+                )
         with timed("random-walk", window.index, "write"):
-            stage.send(window.index, sequences)
-        del sequences
+            stage.send(window.index, walk_output)
+        del walk_output
         if os.path.isdir(handoff["path"]):
             import shutil
             shutil.rmtree(handoff["path"])
@@ -134,11 +155,20 @@ def walk_stage(config, bus):
             os.unlink(handoff["path"])
         bus.put("graph-done", window.index, True)
 
-    stage.run(process)
+    try:
+        stage.run(process)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 def embedding_stage(config, bus):
-    from pipeline.embedding_training import load_or_create_model, train_embeddings
+    from pipeline.embedding_training import (
+        cleanup_walk_shards,
+        load_or_create_model,
+        open_walk_sequences,
+        train_embeddings,
+    )
 
     path = os.path.join(get_model_directory(config, "embedding"), "embedding.emb")
     model = load_or_create_model(config, path)
@@ -146,11 +176,14 @@ def embedding_stage(config, bus):
 
     def process(window):
         nonlocal model
-        sequences = window.take()
+        sequence_payload = window.take()
+        sequences = open_walk_sequences(sequence_payload)
         with timed("embedding-training", window.index, "compute"):
             if sequences:
                 model = train_embeddings(config, model, sequences)
         del sequences
+        cleanup_walk_shards(sequence_payload)
+        del sequence_payload
         gc.collect()
         bus.put("embedding-done", window.index, True)
 

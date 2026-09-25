@@ -132,13 +132,6 @@ def _verify_gwe(config):
     if config["graph"]["smoothing_method"] not in ["log", "no", "IDF", "ICF"]:
         raise ValueError("Unknown smoothing_method {}".format(config["smoothing_method"]))
 
-    if config["embeddings"]["training_algorithm"] not in ["word2vec", "fasttext"]:
-        raise ValueError(
-            "Unknown training algorithm {}.".format(config["training_algorithm"])
-        )
-    if config["embeddings"]["learning_method"] not in ["skipgram", "CBOW"]:
-        raise ValueError("Unknown learning method {}".format(config["learning_method"]))
-
     return config
                 
 def _verify_sk(config):            

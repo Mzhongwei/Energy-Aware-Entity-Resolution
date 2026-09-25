@@ -52,6 +52,7 @@ def main():
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
     output_format = task_config.get("output_format", "graphml")
     top_k = get_mutual_top_k(config)
+    min_similarity = task_config.get("min_similarity")
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     # An empty matching-pairs window is *not* skipped by the runner: it still has to
     # acknowledge the embedding checkpoint so the trainer can move on.
@@ -105,6 +106,7 @@ def main():
             model=model,
             output_format=output_format,
             top_k=top_k,
+            min_similarity=min_similarity,
         )
         del model
         del matching_pairs
