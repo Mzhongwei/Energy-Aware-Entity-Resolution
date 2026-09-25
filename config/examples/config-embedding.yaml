@@ -113,6 +113,8 @@ embeddings_training:            # PyTorch skip-gram with negative sampling
   epochs: 5                      # epochs per window when inc_epochs is not set
   inc_epochs: 5                  # epochs per window (every window, including the first); overrides epochs
   batch_size: 4096
+  pair_generation: "mmap_ordered" # chunk pairs to a temporary mmap, preserving the global shuffle order
+  pair_chunk_tokens: 65536       # source tokens processed per pair-generation chunk
   optimizer: "adam"              # adam / sgd
   learning_rate: 0.00215         # decays linearly to min_learning_rate within each window
   min_learning_rate: 0.0001

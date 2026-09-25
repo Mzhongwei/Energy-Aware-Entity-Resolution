@@ -131,6 +131,8 @@ _MODEL_ARGUMENTS = {
     "device": "device",
     "dynamic_window": "dynamic_window",
     "use_subsampling": "use_subsampling",
+    "pair_generation": "pair_generation",
+    "pair_chunk_tokens": "pair_chunk_tokens",
 }
 _TRAINING_KEYS = {"inc_epochs"}
 _REMOVED_KEYS = {"framework", "pytorch", "training_algorithm", "learning_method", "workers"}
@@ -158,6 +160,11 @@ def retrain_embeddings(config, model, sequences):
         model = initialize_embeddings(config)
 
     emb_cfg = _embedding_config(config)
+    if "pair_generation" in emb_cfg or "pair_chunk_tokens" in emb_cfg:
+        model.configure_pair_generation(
+            emb_cfg.get("pair_generation"),
+            emb_cfg.get("pair_chunk_tokens"),
+        )
     train_epochs = int(emb_cfg.get("inc_epochs", emb_cfg.get("epochs", getattr(model, "epochs", 5))))
 
     if len(model.wv.key_to_index) == 0:

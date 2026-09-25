@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 import json
 import os
+import tempfile
 
 import numpy as np
 import torch
@@ -72,6 +73,8 @@ class EmbeddingModel:
         dynamic_window=True,
         use_subsampling=True,
         optimizer="adam",
+        pair_generation="in_memory",
+        pair_chunk_tokens=65536,
         train_calls=0,
     ):
         self.dimensions = int(dimensions)
@@ -90,6 +93,9 @@ class EmbeddingModel:
         self.dynamic_window = bool(dynamic_window)
         self.use_subsampling = bool(use_subsampling)
         self.optimizer_name = str(optimizer).lower()
+        self.pair_generation = "in_memory"
+        self.pair_chunk_tokens = 65536
+        self.configure_pair_generation(pair_generation, pair_chunk_tokens)
         self.train_calls = int(train_calls)
         self.index_to_key: list[str] = []
         self.key_to_index: dict[str, int] = {}
@@ -97,6 +103,21 @@ class EmbeddingModel:
         self.corpus_count = 0
         self.input_embeddings, self.output_embeddings = self._initialize_rows(0)
         self.wv = KeyedVectors(self)
+
+    def configure_pair_generation(self, pair_generation=None, pair_chunk_tokens=None):
+        """Apply memory-layout settings without changing learned model parameters."""
+        if pair_generation is None:
+            pair_generation = self.pair_generation
+        if pair_chunk_tokens is None:
+            pair_chunk_tokens = self.pair_chunk_tokens
+        self.pair_generation = str(pair_generation).strip().lower()
+        if self.pair_generation not in {"in_memory", "mmap_ordered"}:
+            raise ValueError(
+                "embeddings_training.pair_generation must be in_memory or mmap_ordered"
+            )
+        self.pair_chunk_tokens = int(pair_chunk_tokens)
+        if self.pair_chunk_tokens < 1:
+            raise ValueError("embeddings_training.pair_chunk_tokens must be at least 1")
 
     def _resolve_device(self):
         if self.device == "auto":
@@ -209,6 +230,53 @@ class EmbeddingModel:
         order = rng.permutation(len(centers))
         return centers[order], contexts[order]
 
+    def _pair_inputs(self, ids, owners, keep_probabilities, epoch):
+        """Apply the same RNG draws as the in-memory implementation before pair ordering."""
+        rng = self._numpy_rng(self._PAIR_STREAM, epoch)
+        if keep_probabilities is not None:
+            kept = rng.random(len(ids)) < keep_probabilities[ids]
+            ids, owners = ids[kept], owners[kept]
+        if self.dynamic_window:
+            radius = rng.integers(1, self.window_size + 1, size=len(ids))
+        else:
+            radius = np.full(len(ids), self.window_size)
+        return ids, owners, radius, rng
+
+    def _raw_pair_chunks(self, ids, owners, radius):
+        """Yield pairs in exactly the pre-permutation order used by _training_pairs()."""
+        token_count = len(ids)
+        width = self.pair_chunk_tokens
+        for offset in range(1, self.window_size + 1):
+            limit = max(0, token_count - offset)
+            # All forward pairs precede all backward pairs for this offset, matching the
+            # existing list concatenation in _training_pairs().
+            for start in range(0, limit, width):
+                left = np.arange(start, min(limit, start + width), dtype=np.int64)
+                left = left[owners[left] == owners[left + offset]]
+                selected = left[radius[left] >= offset]
+                if len(selected):
+                    yield np.column_stack((ids[selected], ids[selected + offset])).astype(np.int32, copy=False)
+            for start in range(0, limit, width):
+                left = np.arange(start, min(limit, start + width), dtype=np.int64)
+                left = left[owners[left] == owners[left + offset]]
+                right = left + offset
+                selected = right[radius[right] >= offset]
+                if len(selected):
+                    yield np.column_stack((ids[selected], ids[selected - offset])).astype(np.int32, copy=False)
+
+    def _mmap_ordered_pairs(self, ids, owners, keep_probabilities, epoch, directory):
+        ids, owners, radius, rng = self._pair_inputs(ids, owners, keep_probabilities, epoch)
+        pair_path = os.path.join(directory, "pairs.int32")
+        pair_count = 0
+        with open(pair_path, "wb") as output:
+            for pairs in self._raw_pair_chunks(ids, owners, radius):
+                pairs.tofile(output)
+                pair_count += len(pairs)
+        if not pair_count:
+            return None, np.empty(0, dtype=np.int64)
+        pairs = np.memmap(pair_path, dtype=np.int32, mode="r", shape=(pair_count, 2))
+        return pairs, rng.permutation(pair_count)
+
     def _optimizer(self):
         parameters = list(self.input_embeddings.parameters()) + list(self.output_embeddings.parameters())
         if self.optimizer_name == "sgd":
@@ -232,23 +300,20 @@ class EmbeddingModel:
 
         for epoch in range(train_epochs):
             negative_generator = self._torch_generator(self._NEGATIVE_STREAM, epoch)
-            centers, contexts = self._training_pairs(ids, owners, keep_probabilities, epoch)
-            if not len(centers):
-                continue
             progress = epoch / max(1, train_epochs - 1)
             rate = self.learning_rate + progress * (self.min_learning_rate - self.learning_rate)
             for group in optimizer.param_groups:
                 group["lr"] = rate
-            for start in range(0, len(centers), self.batch_size):
-                stop = min(len(centers), start + self.batch_size)
-                center_ids = torch.as_tensor(centers[start:stop], device=device).long()
-                context_ids = torch.as_tensor(contexts[start:stop], device=device).long()
+
+            def train_pair_batch(center_batch, context_batch):
+                center_ids = torch.as_tensor(center_batch, device=device).long()
+                context_ids = torch.as_tensor(context_batch, device=device).long()
                 negative_ids = torch.multinomial(
                     negative_probabilities,
-                    num_samples=(stop - start) * self.negative,
+                    num_samples=len(center_batch) * self.negative,
                     replacement=True,
                     generator=negative_generator,
-                ).reshape(stop - start, self.negative).to(device)
+                ).reshape(len(center_batch), self.negative).to(device)
 
                 center_vectors = self.input_embeddings(center_ids)
                 context_vectors = self.output_embeddings(context_ids)
@@ -259,6 +324,21 @@ class EmbeddingModel:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
+
+            if self.pair_generation == "in_memory":
+                centers, contexts = self._training_pairs(ids, owners, keep_probabilities, epoch)
+                for start in range(0, len(centers), self.batch_size):
+                    stop = min(len(centers), start + self.batch_size)
+                    train_pair_batch(centers[start:stop], contexts[start:stop])
+            else:
+                with tempfile.TemporaryDirectory(prefix="eaer-pairs-") as pair_directory:
+                    pairs, order = self._mmap_ordered_pairs(
+                        ids, owners, keep_probabilities, epoch, pair_directory,
+                    )
+                    for start in range(0, len(order), self.batch_size):
+                        pair_batch = pairs[order[start:start + self.batch_size]]
+                        train_pair_batch(pair_batch[:, 0], pair_batch[:, 1])
+                    del pairs, order
 
         self.input_embeddings.cpu()
         self.output_embeddings.cpu()
@@ -306,6 +386,8 @@ class EmbeddingModel:
             "dynamic_window": self.dynamic_window,
             "use_subsampling": self.use_subsampling,
             "optimizer": self.optimizer_name,
+            "pair_generation": self.pair_generation,
+            "pair_chunk_tokens": self.pair_chunk_tokens,
             "train_calls": self.train_calls,
         }
 
