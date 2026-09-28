@@ -94,10 +94,15 @@ def _generate_incremental_rids(size, start_counter, prefix):
     return [f"{prefix}{counter}" for counter in range(start_counter, start_counter + size)]
 
 
+# Never turned into graph attributes: "id" is replaced by the minted rid, and "cluster_id" is
+# a ground-truth label (matching records share it), so keeping it would leak the answer.
+_EXCLUDED_COLUMNS = {"id", "cluster_id"}
+
+
 def _drop_source_id_columns(raw_data):
-    id_columns = [col for col in raw_data.columns if str(col).strip().lower() == "id"]
-    if id_columns:
-        raw_data = raw_data.drop(columns=id_columns)
+    excluded = [col for col in raw_data.columns if str(col).strip().lower() in _EXCLUDED_COLUMNS]
+    if excluded:
+        raw_data = raw_data.drop(columns=excluded)
     return raw_data
 
 
@@ -143,7 +148,8 @@ def index_normalization(config, raw_data=None, raw_data_path=None, is_training=F
         source_field, source_ids = source_record_ids
         raw_data["rid"] = source_ids.to_numpy()
         if source_field != "rid":
-            raw_data = raw_data.drop(columns=[source_field])
+            # The field may already be gone if it is itself an excluded column (e.g. "id").
+            raw_data = raw_data.drop(columns=[source_field], errors="ignore")
     else:
         os.makedirs(IDS_DIR, exist_ok=True)
         id_config = _resolve_id_config(config, is_training)
