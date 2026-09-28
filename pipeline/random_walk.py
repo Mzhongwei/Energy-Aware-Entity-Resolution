@@ -195,7 +195,7 @@ class RandomWalk_MetaPath:
         return self.walk[::-1]
 
 def start_walk(roots_index, graph, walks_number, walk_length, walk_rules,
-               update_stats=False, neighbor_cache=None, sampling_method="uniform"):
+               update_stats=False, neighbor_cache=None, sampling_method="uniform", seed=None):
     sentences = []
     if roots_index == 0 or roots_index is None:
         return
@@ -208,6 +208,11 @@ def start_walk(roots_index, graph, walks_number, walk_length, walk_rules,
     pbar = tqdm(desc="# Sentence generation progress: ", total=len(roots_index) * walks_number)
 
     for root in roots_index:
+        # Derive each root's stream independently so changing the number (and boundaries)
+        # of process shards does not change the generated walks or downstream F1.
+        if seed is not None:
+            root_seed = int(np.random.SeedSequence([int(seed), int(root)]).generate_state(1)[0])
+            np.random.seed(root_seed)
         walks = []
     
         for _r in range(walks_number):
@@ -374,6 +379,7 @@ def _generate_walks(configuration, graph):
     backtrack = walk_cfg.get("backtrack", False)
     update_stats = bool(walk_cfg.get("rw_stat", False))
     sampling_method = str(walk_cfg.get("sampling_method", "uniform")).strip().lower()
+    seed = walk_cfg.get("seed")
     if sampling_method not in {"uniform", "legacy_sampler"}:
         raise ValueError("random_walk.sampling_method must be uniform or legacy_sampler")
     meta_path = _graph_meta_path(configuration)
@@ -396,7 +402,8 @@ def _generate_walks(configuration, graph):
             roots_index = graph.dyn_roots
             sentences = start_walk(roots_index, graph, walk_nums, walk_length,
                                    backtrack, update_stats=update_stats,
-                                   neighbor_cache=neighbor_cache, sampling_method=sampling_method)
+                                   neighbor_cache=neighbor_cache, sampling_method=sampling_method,
+                                   seed=seed)
             graph.dyn_roots.clear()
         else:
             if isinstance(meta_path, list):
@@ -404,12 +411,14 @@ def _generate_walks(configuration, graph):
                     for path in meta_path:
                         roots_index = graph.dyn_roots[path[0]]
                         sentences += start_walk(roots_index, graph, walk_nums, walk_length, path,
-                                                update_stats=update_stats, neighbor_cache=neighbor_cache, sampling_method=sampling_method)
+                                                update_stats=update_stats, neighbor_cache=neighbor_cache,
+                                                sampling_method=sampling_method, seed=seed)
                         graph.dyn_roots[path[0]].clear()
                 else:
                     roots_index = graph.dyn_roots[meta_path[0]]
                     sentences = start_walk(roots_index, graph, walk_nums, walk_length, meta_path,
-                                           update_stats=update_stats, neighbor_cache=neighbor_cache, sampling_method=sampling_method)
+                                           update_stats=update_stats, neighbor_cache=neighbor_cache,
+                                           sampling_method=sampling_method, seed=seed)
                     graph.dyn_roots[meta_path[0]].clear()
 
     return sentences

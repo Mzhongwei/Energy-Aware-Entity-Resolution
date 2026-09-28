@@ -62,5 +62,5 @@ class Model:
             lora_alpha=32,
             lora_dropout=0.1,
         )
-        model = get_peft_model(model, peft_config)
+        model = get_peft_model(self.model, peft_config)
         return model

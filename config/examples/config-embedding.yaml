@@ -88,6 +88,7 @@ graph_construction:
 
 random_walk:
   processes: 2                  # processes inside one Pod; 1 preserves serial execution
+  seed: 1729                    # per-root deterministic streams; invariant to process count
   sampling_method: "uniform"   # required by compact_adjacency
   walk_length: 30                # step size
   walks_number: 10               # number of sentences per root
