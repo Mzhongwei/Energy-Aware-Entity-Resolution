@@ -102,24 +102,21 @@ graph_snapshot:
 
 cg_feature_extraction: {}
 
-embeddings_training:            # PyTorch skip-gram with negative sampling
-  device: "auto"                 # auto (CUDA if available, else CPU) / cpu / cuda / cuda:<index>
+embeddings_training:            # Gensim Word2Vec, optimized for multicore CPU training
+  training_algorithm: "word2vec" # word2vec / fasttext (doc2vec requires tagged input)
+  learning_method: "skipgram"    # skipgram / cbow
+  workers: 2                     # match the embedding-training Pod CPU request/limit
   n_dimensions: 128
-  window_size: 3                 # maximum context radius
-  dynamic_window: true           # sample the radius per token in [1, window_size]
+  window_size: 3
+  shrink_windows: true           # Gensim's dynamic effective context window
   min_count: 10                  # tokens seen fewer times get no vector; keep <= random_walk.walks_number
-  sampling_factor: 0.001         # frequent-token subsampling threshold
-  use_subsampling: true
+  sampling_factor: 0.001
   negative: 5                    # negative samples per positive pair
-  epochs: 5                      # epochs per window when inc_epochs is not set
-  inc_epochs: 5                  # epochs per window (every window, including the first); overrides epochs
-  batch_size: 4096
-  pair_generation: "mmap_ordered" # chunk pairs to a temporary mmap, preserving the global shuffle order
-  pair_chunk_tokens: 65536       # source tokens processed per pair-generation chunk
-  optimizer: "adam"              # adam / sgd
-  learning_rate: 0.00215         # decays linearly to min_learning_rate within each window
-  min_learning_rate: 0.0001
-  seed: 1729                     # training randomness; per-window streams are derived from it
+  epochs: 5
+  inc_epochs: 5                  # epochs for every initial/incremental window
+  alpha: 0.025
+  min_alpha: 0.0001
+  seed: 1729                     # exact reproducibility requires workers: 1
 
 candidate_enumeration: {}
 

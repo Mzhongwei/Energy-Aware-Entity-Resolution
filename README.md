@@ -58,6 +58,13 @@ container's CPU limit in millicores, and the effective process count is capped t
 CPUs available to the Pod. With the supplied `limits.cpu: "2"` and `processes: 2`, two
 random-walk processes are used.
 
+Embedding training uses Gensim Word2Vec on CPU. `embeddings_training.workers` controls both
+Gensim's worker threads and, after manifest compilation, the embedding-training Pod's CPU
+request/limit. Keep the value identical across nodes for resource-normalized comparisons;
+use `workers: 1` when exact repeatability is more important than throughput. Checkpoints
+created by the removed PyTorch implementation are intentionally rejected and must be
+retrained.
+
 Stage exceptions publish a failure marker to stop waiting peers. Automatic stage retries are disabled: the handoff protocol is not a resumable checkpoint protocol. Restart a failed training run with a fresh run/version, rather than retrying an individual stage. A configurable handoff timeout catches workers lost without publishing an error (for example OOM or node loss). Configure it with:
 
 ```yaml

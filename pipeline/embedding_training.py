@@ -114,38 +114,37 @@ def _embedding_config(config) -> dict:
     return {}
 
 
-# embeddings_training key -> EmbeddingModel argument. Keys left out of the config use the
-# EmbeddingModel defaults.
+# embeddings_training key -> Gensim EmbeddingModel argument. Keys left out use defaults.
 _MODEL_ARGUMENTS = {
     "n_dimensions": "dimensions",
     "window_size": "window_size",
     "negative": "negative",
     "epochs": "epochs",
     "min_count": "min_count",
+    "training_algorithm": "training_algorithm",
+    "learning_method": "learning_method",
+    "workers": "workers",
     "sampling_factor": "sampling_factor",
-    "batch_size": "batch_size",
-    "learning_rate": "learning_rate",
-    "min_learning_rate": "min_learning_rate",
-    "optimizer": "optimizer",
     "seed": "seed",
-    "device": "device",
-    "dynamic_window": "dynamic_window",
-    "use_subsampling": "use_subsampling",
-    "pair_generation": "pair_generation",
-    "pair_chunk_tokens": "pair_chunk_tokens",
+    "alpha": "alpha",
+    "min_alpha": "min_alpha",
+    "shrink_windows": "shrink_windows",
 }
 _TRAINING_KEYS = {"inc_epochs"}
-_REMOVED_KEYS = {"framework", "pytorch", "training_algorithm", "learning_method", "workers"}
+_PYTORCH_KEYS = {
+    "batch_size", "device", "dynamic_window", "framework", "learning_rate",
+    "min_learning_rate", "optimizer", "pair_chunk_tokens", "pair_generation",
+    "pytorch", "use_subsampling",
+}
 
 
 def initialize_embeddings(config):
     emb_cfg = _embedding_config(config)
-    removed = sorted(_REMOVED_KEYS & set(emb_cfg))
-    if removed:
+    pytorch_keys = sorted(_PYTORCH_KEYS & set(emb_cfg))
+    if pytorch_keys:
         raise ValueError(
-            f"embeddings_training keys {removed} belong to the removed Gensim/framework selection; "
-            "the embedding is always PyTorch skip-gram. Move the former 'pytorch:' settings "
-            "directly under embeddings_training."
+            f"embeddings_training keys {pytorch_keys} belong to the removed PyTorch "
+            "implementation; configure Gensim with workers/training_algorithm/learning_method"
         )
     unknown = sorted(set(emb_cfg) - set(_MODEL_ARGUMENTS) - _TRAINING_KEYS)
     if unknown:
@@ -160,11 +159,6 @@ def retrain_embeddings(config, model, sequences):
         model = initialize_embeddings(config)
 
     emb_cfg = _embedding_config(config)
-    if "pair_generation" in emb_cfg or "pair_chunk_tokens" in emb_cfg:
-        model.configure_pair_generation(
-            emb_cfg.get("pair_generation"),
-            emb_cfg.get("pair_chunk_tokens"),
-        )
     train_epochs = int(emb_cfg.get("inc_epochs", emb_cfg.get("epochs", getattr(model, "epochs", 5))))
 
     if len(model.wv.key_to_index) == 0:
