@@ -51,9 +51,15 @@ Normalization reads `data_source_A` in bounded windows. Each window is published
 Handoffs use the shared communication PVC under `<workflow-name>/communication/embedding-training`, including graph snapshots so readers can run on different nodes. The graph, model and index are saved to the existing model PVCs on EOS. Incremental Jobs start only after **all six** training Pods succeed.
 
 When `random_walk.processes` is greater than one, both batch training and incremental
-inference partition the current roots across a process pool. Workers publish JSONL walk
-shards plus a manifest on the shared PVC; embedding training reads that re-iterable corpus
-and removes the shards after a successful window. Kubernetes exposes the random-walk
+inference partition the current roots across a process pool. Workers publish walk shards
+plus a manifest on the shared PVC; embedding training reads that re-iterable corpus and
+removes the shards after a successful window. With `compact_adjacency` and uniform sampling,
+walks come from a batched NumPy kernel and each shard is a `uint32` `[walks, walk_length]`
+`.npy` matrix plus a JSON vocabulary (`walk-shards-v2`); other configurations use the Python
+walker and JSONL shards (`walk-shards-v1`). Kernel walks draw from per-walker streams keyed
+by `random_walk.seed`, root and walk number, so they do not depend on the process count.
+`random_walk.backtrack: false` resamples a step that would return to the previous node unless
+that node is the only neighbor. Kubernetes exposes the random-walk
 container's CPU limit in millicores, and the effective process count is capped to the whole
 CPUs available to the Pod. With the supplied `limits.cpu: "2"` and `processes: 2`, two
 random-walk processes are used.

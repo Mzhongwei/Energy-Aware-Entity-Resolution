@@ -16,7 +16,7 @@ from utils.pipeline_io import (
     write_buffer,
     write_checkpoint_reference,
 )
-from pipeline.embedding_training import load_or_create_model, train_embeddings
+from pipeline.embedding_training import is_walk_shard_manifest, load_or_create_model, train_embeddings
 
 """
 task: embedding model training
@@ -80,7 +80,7 @@ def main():
         window_index = window.index
 
         def cleanup_shards():
-            if isinstance(sequence_payload, dict) and sequence_payload.get("format") == "walk-shards-v1":
+            if is_walk_shard_manifest(sequence_payload):
                 from pipeline.embedding_training import cleanup_walk_shards
                 cleanup_walk_shards(sequence_payload)
 
@@ -93,7 +93,7 @@ def main():
             prune_window_checkpoints(checkpoint_dir, checkpoint_window)
             return
 
-        if isinstance(sequence_payload, dict) and sequence_payload.get("format") == "walk-shards-v1":
+        if is_walk_shard_manifest(sequence_payload):
             from pipeline.embedding_training import open_walk_sequences
             sequences = open_walk_sequences(sequence_payload)
         else:

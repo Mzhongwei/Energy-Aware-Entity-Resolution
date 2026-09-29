@@ -4,15 +4,30 @@ import json
 import os
 from typing import Iterable, List, Optional, Sequence
 
+import numpy as np
+
 from models.embedding_model import EmbeddingModel
+
+WALK_SHARD_FORMATS = ("walk-shards-v1", "walk-shards-v2")
+_MATRIX_ROWS_PER_READ = 4096
+
+
+def is_walk_shard_manifest(payload) -> bool:
+    return isinstance(payload, dict) and payload.get("format") in WALK_SHARD_FORMATS
 
 
 class WalkShardCorpus:
-    """Re-iterable JSONL corpus backed by a completed random-walk shard manifest."""
+    """Re-iterable corpus backed by a completed random-walk shard manifest.
+
+    v1 parts are JSONL walks. v2 parts are uint32 [walks, walk_length] .npy matrices of
+    positions into the part's JSON vocabulary; every occurrence of a token yields the same
+    str object, so Gensim's vocabulary lookups reuse its cached hash.
+    """
 
     def __init__(self, manifest):
-        if not isinstance(manifest, dict) or manifest.get("format") != "walk-shards-v1":
+        if not is_walk_shard_manifest(manifest):
             raise ValueError("Invalid random-walk shard manifest")
+        self.matrix = manifest["format"] == "walk-shards-v2"
         directory = manifest.get("directory")
         if not isinstance(directory, str) or not os.path.isabs(directory):
             raise ValueError("Random-walk shard directory must be an absolute path")
@@ -23,14 +38,10 @@ class WalkShardCorpus:
             raise ValueError("Invalid random-walk shard manifest metadata")
         counted_walks = 0
         for part in self.parts:
-            filename = part.get("file") if isinstance(part, dict) else None
-            if not filename or os.path.basename(filename) != filename:
-                raise ValueError(f"Invalid random-walk shard filename: {filename}")
-            path = os.path.abspath(os.path.join(self.directory, filename))
-            if os.path.commonpath((self.directory, path)) != self.directory:
-                raise ValueError(f"Random-walk shard escapes its directory: {filename}")
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"Random-walk shard does not exist: {path}")
+            for filename in _part_filenames(part, self.matrix):
+                path = _shard_path(self.directory, filename)
+                if not os.path.isfile(path):
+                    raise FileNotFoundError(f"Random-walk shard does not exist: {path}")
             counted_walks += int(part.get("walk_count", 0))
         if counted_walks != self.walk_count:
             raise ValueError(
@@ -44,30 +55,60 @@ class WalkShardCorpus:
         emitted = 0
         for part in self.parts:
             path = os.path.join(self.directory, part["file"])
-            with open(path, encoding="utf-8") as source:
-                for line_number, line in enumerate(source, start=1):
-                    if not line.strip():
-                        continue
-                    walk = json.loads(line)
-                    if not isinstance(walk, list):
-                        raise ValueError(f"Invalid walk in {path}:{line_number}")
-                    emitted += 1
-                    yield walk
+            walks = self._iter_matrix(part, path) if self.matrix else self._iter_jsonl(path)
+            for walk in walks:
+                emitted += 1
+                yield walk
         if emitted != self.walk_count:
             raise ValueError(
                 f"Random-walk shard contents changed: expected={self.walk_count}, actual={emitted}"
             )
 
+    def _iter_jsonl(self, path):
+        with open(path, encoding="utf-8") as source:
+            for line_number, line in enumerate(source, start=1):
+                if not line.strip():
+                    continue
+                walk = json.loads(line)
+                if not isinstance(walk, list):
+                    raise ValueError(f"Invalid walk in {path}:{line_number}")
+                yield walk
+
+    def _iter_matrix(self, part, path):
+        with open(os.path.join(self.directory, part["vocab"]), encoding="utf-8") as source:
+            names = json.load(source)
+        walks = np.load(path, mmap_mode="r", allow_pickle=False)
+        if walks.ndim != 2 or walks.dtype != np.uint32 or walks.shape[0] != int(part["walk_count"]):
+            raise ValueError(f"Random-walk shard matrix does not match its manifest: {path}")
+        for offset in range(0, walks.shape[0], _MATRIX_ROWS_PER_READ):
+            for row in walks[offset:offset + _MATRIX_ROWS_PER_READ].tolist():
+                yield [names[position] for position in row]
+
+
+def _shard_path(directory, filename):
+    if not filename or os.path.basename(filename) != filename:
+        raise ValueError(f"Invalid random-walk shard filename: {filename}")
+    path = os.path.abspath(os.path.join(directory, filename))
+    if os.path.commonpath((directory, path)) != directory:
+        raise ValueError(f"Random-walk shard escapes its directory: {filename}")
+    return path
+
+
+def _part_filenames(part, matrix):
+    if not isinstance(part, dict):
+        raise ValueError(f"Invalid random-walk shard part: {part}")
+    return (part.get("file"), part.get("vocab")) if matrix else (part.get("file"),)
+
 
 def open_walk_sequences(payload):
-    if isinstance(payload, dict) and payload.get("format") == "walk-shards-v1":
+    if is_walk_shard_manifest(payload):
         return WalkShardCorpus(payload)
     return payload
 
 
 def cleanup_walk_shards(payload):
     """Remove only files named by an internal manifest after training is durable."""
-    if not isinstance(payload, dict) or payload.get("format") != "walk-shards-v1":
+    if not is_walk_shard_manifest(payload):
         return
     directory = payload.get("directory")
     if not isinstance(directory, str) or not os.path.isabs(directory):
@@ -75,15 +116,12 @@ def cleanup_walk_shards(payload):
     directory = os.path.abspath(directory)
     if not os.path.isdir(directory):
         return
+    matrix = payload["format"] == "walk-shards-v2"
     for part in payload.get("parts", []):
-        filename = part.get("file") if isinstance(part, dict) else None
-        if not filename or os.path.basename(filename) != filename:
-            raise ValueError(f"Invalid random-walk shard filename: {filename}")
-        path = os.path.abspath(os.path.join(directory, filename))
-        if os.path.commonpath((directory, path)) != directory:
-            raise ValueError(f"Random-walk shard escapes its directory: {filename}")
-        if os.path.isfile(path):
-            os.remove(path)
+        for filename in _part_filenames(part, matrix):
+            path = _shard_path(directory, filename)
+            if os.path.isfile(path):
+                os.remove(path)
     manifest_path = os.path.join(directory, "manifest.json")
     if os.path.isfile(manifest_path):
         os.remove(manifest_path)
@@ -185,6 +223,7 @@ def load_or_create_model(config, model_path: str):
 __all__ = [
     "WalkShardCorpus",
     "cleanup_walk_shards",
+    "is_walk_shard_manifest",
     "initialize_embeddings",
     "open_walk_sequences",
     "retrain_embeddings",
