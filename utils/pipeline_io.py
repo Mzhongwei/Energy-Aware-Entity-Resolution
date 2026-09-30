@@ -224,7 +224,15 @@ MODEL_PATH_KEYS = {
     "embedding": ("embedding-dir", "embedding_model-name", "/app/data/models/embedding"),
     "bert": ("bert-dir", "bert-name", "/app/data/models/bert"),
     "predicted_match": ("predicted_match-dir", "predicted_match-name", "/app/data/models/predicted"),
+    # Record texts for BERT matching live next to the BERT model (same PVC by default).
+    "records": ("record-dir", "record-name", "/app/data/bert/records"),
 }
+
+
+def is_bert_matching_enabled(config: dict) -> bool:
+    """Whether BERT judges the embedding decision's pairs before evaluation."""
+    section = config.get("bert_matching") if isinstance(config, dict) else None
+    return isinstance(section, dict) and section.get("enabled") is True
 
 
 def get_transfer_data_directory(workload: str, data_type: str) -> str:

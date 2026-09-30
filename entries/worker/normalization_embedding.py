@@ -1,12 +1,13 @@
 import argparse
 import sys
 
-from utils.pipeline_io import BufferIO, StreamStage, is_empty_payload, load_config
+from utils.pipeline_io import BufferIO, StreamStage, is_bert_matching_enabled, is_empty_payload, load_config
 from pipeline.normalization import index_normalization
 """
 mode: incremental + embedding
 input: raw data[buffer]
-output: processed data for feature tasks[buffer], processed data for graph tasks[buffer]
+output: processed data for feature tasks[buffer], processed data for graph tasks[buffer];
+with bert_matching.enabled also the window's record texts [record store]
 We don't accept training in incremental embedding mode.
 """
 
@@ -33,6 +34,11 @@ def main():
             file=sys.stderr,
         )
         returned = index_normalization(config=config, raw_data=raw_data, raw_data_path=None, is_training=False)
+        if returned is not None and is_bert_matching_enabled(config):
+            # Written before the window is sent downstream, so BERT matching can always find
+            # the texts of the pairs this window produces.
+            from pipeline.record_store import write_window_records
+            write_window_records(config, "stream", window.index, raw_data, returned)
         del raw_data
         if returned is not None:
             stage.send(window.index, returned, "graph", "csv")

@@ -7,7 +7,8 @@ except ModuleNotFoundError:
     def tqdm(iterable, **kwargs):
         return iterable
     
-from utils.utils import convert_token_value, data_cleaning, get_record_id_prefixes
+from pipeline.record_store import serialize_record_text
+from utils.utils import convert_token_value, get_record_id_prefixes
 
 
 IDS_DIR = os.path.join("data", "ids")
@@ -23,8 +24,8 @@ def sequence_generating_m1(df):
     """
     df_result = pd.DataFrame(columns=["text1", "text2", "labels"])
     for _, df_row in tqdm(df.iterrows(), total=len(df), desc="# Reading data"):
-        text1 = ""
-        text2 = ""
+        left = []
+        right = []
         labels = 0
         for col in df.columns:
             col_name_list = col.split(".")
@@ -32,12 +33,11 @@ def sequence_generating_m1(df):
                 labels = df_row[col]
             elif len(col_name_list) > 1 and col_name_list[1] != "id":
                 if int(col_name_list[0][-1]) == 1:
-                    text1 = text1 + str(col_name_list[1]) + str(df_row[col])
+                    left.append((col_name_list[1], df_row[col]))
                 elif int(col_name_list[0][-1]) == 2:
-                    text2 = text2 + str(col_name_list[1]) + str(df_row[col])
-        text1 = data_cleaning(text1)
-        text2 = data_cleaning(text2)
-        df_result.loc[len(df_result)] = [text1, text2, labels]
+                    right.append((col_name_list[1], df_row[col]))
+        # Shared with streaming BERT matching so both sides serialize records identically.
+        df_result.loc[len(df_result)] = [serialize_record_text(left), serialize_record_text(right), labels]
     return df_result
 
 

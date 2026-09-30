@@ -71,6 +71,21 @@ use `workers: 1` when exact repeatability is more important than throughput. Che
 created by the removed PyTorch implementation are intentionally rejected and must be
 retrained.
 
+### Optional BERT matching after the embedding decision
+
+With `bert_matching.enabled: true`, the embedding pipeline acts as blocking and BERT as the
+matcher: decision making still emits its mutual top-k pairs, and a `bert-matching` worker
+keeps only the pairs a trained BERT classifier accepts (`bert_matching.threshold`) before
+evaluation. Each distinct pair is judged once; pair scores in the output stay the embedding
+similarities. The same switch makes the batch workflow train BERT on
+`trainset_path`/`evalset_path` alongside the embedding stages (the model goes to
+`state_management.bert-dir`), and makes normalization store each record's BERT text under
+`state_management.record-dir`, serialized exactly like the training pairs
+(`pipeline/record_store.py`). Training pairs must therefore use the same value formatting as
+`data_source_A`/`data_source_B`. The worker requests a GPU (`k8s/scheduling/workloads.yaml`,
+`bert-matching`); set `gpu_required: false` there and `bert_matching.device: cpu` to run on
+CPU. Data-locality strategies (`--data-locality`) do not support BERT matching.
+
 Stage exceptions publish a failure marker to stop waiting peers. Automatic stage retries are disabled: the handoff protocol is not a resumable checkpoint protocol. Restart a failed training run with a fresh run/version, rather than retrying an individual stage. A configurable handoff timeout catches workers lost without publishing an error (for example OOM or node loss). Configure it with:
 
 ```yaml

@@ -6,6 +6,7 @@ from utils.pipeline_io import (
     BufferIO,
     StreamStage,
     get_transfer_data_directory,
+    is_bert_matching_enabled,
     load_config,
     write_step_output,
 )
@@ -14,16 +15,18 @@ from pipeline.evaluation import compare_ground_truth
 """
 task: evaluation
 mode: incremental + embedding
-input: decision event [buffer]
+input: decision event [buffer] -- from bert_matching when bert_matching.enabled, else from
+decision_making
 output: evaluation report [transfer]
-description: triggered by every decision_making window; each event carries the path to that
-window's predicted-matching snapshot (see decision_making.py), so evaluation reads the exact
-graph produced for this window even when running concurrently with decision_making, then
-deletes the snapshot. The report itself is overwritten every time, so only the latest
+description: triggered by every upstream decision window; each event carries the path to that
+window's predicted-matching snapshot (see decision_making.py / bert_matching.py), so
+evaluation reads the exact graph produced for this window even when running concurrently with
+its producer, then deletes the snapshot. The report itself is overwritten every time, so only the latest
 evaluation is kept.
 """
 
 INPUT_DATA_TYPE = "predicted_matching"
+BERT_INPUT_DATA_TYPE = "bert_matching"
 REPORT_DATA_TYPE = "report"
 REPORT_FILE_NAME = "evaluation_report"
 REPORT_EXTENSION = "json"
@@ -38,7 +41,8 @@ def main():
     config = load_config(args.config)
     config["output_format"] = config.get("decision_making", {}).get("output_format", "graphml")
     # Evaluation is the end of the chain: it forwards no EOS, only writes the report.
-    stage = StreamStage("evaluation", BufferIO(args.workload, INPUT_DATA_TYPE, None, config))
+    input_type = BERT_INPUT_DATA_TYPE if is_bert_matching_enabled(config) else INPUT_DATA_TYPE
+    stage = StreamStage("evaluation", BufferIO(args.workload, input_type, None, config))
 
     def process(window):
         decision_event = window.take()

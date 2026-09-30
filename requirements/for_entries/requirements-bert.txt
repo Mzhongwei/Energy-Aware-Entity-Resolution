@@ -7,3 +7,6 @@ datasets==2.14.5
 transformers==4.30.2
 huggingface-hub==0.16.4
 tokenizers==0.13.3
+# bert-matching reads/writes similarity graphs (GraphML) like decision making.
+igraph==0.11.8
+tqdm==4.67.1

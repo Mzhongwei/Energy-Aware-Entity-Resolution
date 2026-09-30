@@ -48,6 +48,7 @@ def timed(stage, window, operation):
 def normalize(config, bus):
     """Source stage: reads dataset chunks itself, so it drives the window clock directly."""
     from pipeline.normalization import index_normalization
+    from utils.pipeline_io import is_bert_matching_enabled
     from utils.record_batches import iter_record_batches
 
     cfg = config.get("batch_processing", {})
@@ -61,6 +62,10 @@ def normalize(config, bus):
     ), start=1):
         with timed("normalization", count, "compute"):
             processed = index_normalization(config=config, raw_data=raw, is_training=True)
+        if is_bert_matching_enabled(config):
+            from pipeline.record_store import write_window_records
+            with timed("normalization", count, "write-records"):
+                write_window_records(config, "train", count, raw, processed)
         with timed("normalization", count, "write"):
             bus.put("processed-graph", count, processed)
             bus.put("processed-features", count, processed)

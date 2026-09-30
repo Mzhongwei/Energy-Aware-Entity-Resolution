@@ -12,6 +12,9 @@ record_ids:
 data_source_A: "/data/exp_datasets/2-fordors_zagats/tableA.csv"
 data_source_B: "/data/exp_datasets/2-fordors_zagats/tableB.csv"
 ground_truth: "/data/exp_datasets/2-fordors_zagats/matches.txt"
+# Labeled pairs for BERT training; used only when bert_matching.enabled is true.
+trainset_path: "/data/exp_datasets/2-fordors_zagats/train.csv"
+evalset_path: "/data/exp_datasets/2-fordors_zagats/valid.csv"
 simulator_path: "services/dataStreamSimulator"
 kafka:
   topicid: "entity_resolution_process"
@@ -33,6 +36,7 @@ kafka:
 state_management:
 # bert mode
   bert-dir: "/app/data/bert"
+  record-dir: "/app/data/bert/records"   # record texts for bert_matching (on the BERT PVC)
 # incremental mode. if execute several config files successively, the embedding_model-name (or version name) can not be the same
   graph-dir: "/app/data/graph"
   graph-name: ""
@@ -124,6 +128,17 @@ calculating_similarity:
 decision_making:
   top_k: 1                       # mutual top K matches to keep for each record
   output_format: "graphml"            # db / json / parquet / graphml
+
+# Embedding decision as blocking, BERT as matcher: when enabled, the batch workflow also
+# trains BERT on trainset_path/evalset_path, and an incremental bert-matching stage keeps
+# only the decision's pairs BERT classifies as matches before evaluation.
+bert_matching:
+  enabled: false
+  threshold: 0.5                 # minimum BERT match probability to keep a pair
+  batch_size: 64
+  max_length: 128                # tokens per pair, as in BERT training
+  device: auto                   # auto / cuda / cpu; GPU placement: k8s/scheduling/workloads.yaml
+  max_text_chars: 4096           # cap on stored record text
 
 bert_training:
 

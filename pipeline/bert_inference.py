@@ -8,12 +8,14 @@ from transformers import (
 )
 
 class InferenceService:
-    def __init__(self, save_dir=None, max_length=128):
+    def __init__(self, save_dir=None, max_length=128, device="auto"):
         if save_dir is None:
             save_dir = os.path.join("data", "bert", "test")
         save_dir = os.path.abspath(save_dir)
         _validate_local_checkpoint(save_dir)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device in (None, "auto"):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
         self.tokenizer = AutoTokenizer.from_pretrained(save_dir, local_files_only=True)
         self.model = AutoModelForSequenceClassification.from_pretrained(save_dir, local_files_only=True)
         self.model.to(self.device)
@@ -42,6 +44,28 @@ class InferenceService:
             "probabilities": probs,
             "similarity_degree": probs[1] if len(probs) > 1 else probs[0],
         }
+
+    def predict_batch(self, texts1, texts2, batch_size=64):
+        """Match probability (class 1) for each (texts1[i], texts2[i]) pair.
+
+        Pads each batch only to its longest pair: attention masks make the padded
+        positions irrelevant, so results match max_length padding at a fraction of the cost.
+        """
+        probabilities = []
+        for start in range(0, len(texts1), int(batch_size)):
+            inputs = self.tokenizer(
+                list(texts1[start:start + int(batch_size)]),
+                list(texts2[start:start + int(batch_size)]),
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.inference_mode():
+                probs = torch.softmax(self.model(**inputs).logits, dim=-1)
+            probabilities.extend(probs[:, 1 if probs.shape[1] > 1 else 0].tolist())
+        return probabilities
 
 
 def _validate_local_checkpoint(save_dir: str) -> None:
