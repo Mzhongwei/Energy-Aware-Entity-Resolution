@@ -79,7 +79,6 @@ graph_construction:
     - "1$__cid"
   flatten: "tt"                  # split prefix for nodes
   smoothing_method: "no"         # smooth method: log/no
-  directed: false                # whether the graph is directed
   ngram:                         # config node_type like ["5#__idx", "0#__cid", "0#__tt", "0#__tn", "0#__ng"] if ngram activated
     # token_n: [2, 3]
     # char_n: []
@@ -93,7 +92,6 @@ random_walk:
   walk_length: 30                # step size
   walks_number: 10               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
-  rw_stat: false                 # statistical result of random walk
   
 
 graph_snapshot:

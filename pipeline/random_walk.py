@@ -68,12 +68,23 @@ def _graph_meta_path(configuration):
 
 
 WALK_SHARD_FORMATS = ("walk-shards-v1", "walk-shards-v2")
+MIN_WALK_LENGTH = 2
 
 
 def _as_bool(value):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _validate_walk_parameters(walks_number=None, walk_length=None):
+    """Validate shared walk dimensions before selecting a backend or execution path."""
+    if walks_number is not None and int(walks_number) < 0:
+        raise ValueError("random_walk.walks_number must be at least 0")
+    if walk_length is not None and int(walk_length) < MIN_WALK_LENGTH:
+        raise ValueError(
+            f"random_walk.walk_length must be at least {MIN_WALK_LENGTH}"
+        )
 
 
 def _format_walk(graph, walk_ids):
@@ -119,6 +130,8 @@ class RandomWalk:
     def __init__(self, graph, starting_node_index, sentence_len, backtrack,
                  update_stats=True, neighbor_cache=None, sampling_method="uniform",
                  first_candidates=None):
+        sentence_len = int(sentence_len)
+        _validate_walk_parameters(walk_length=sentence_len)
         cache = {} if neighbor_cache is None else neighbor_cache
         # Neighbors of a non-first root that may open its sentence. start_walk passes the list
         # computed by the root's first walk back in, so it is filtered once per root.
@@ -165,6 +178,8 @@ class RandomWalk:
         # node), which may differ from walk_ids[-1] when non-appearing nodes are skipped.
         previous_node_index = walk_ids[0] if len(walk_ids) == 2 else None
         sentence_step = len(walk_ids)
+        stalled_steps = 0
+        max_stalled_steps = 100 * sentence_len
 
         while sentence_step < sentence_len:
             next_node_index = _sample_neighbor(
@@ -172,6 +187,13 @@ class RandomWalk:
             )
             if next_node_index is None:
                 raise ValueError("No neighbors")
+            stalled_steps += 1
+            if stalled_steps > max_stalled_steps:
+                raise RuntimeError(
+                    "Random walk made no progress after "
+                    f"{stalled_steps} sampling attempts from root {starting_node_name}; "
+                    "check backtrack and node_types appear settings"
+                )
 
             # Without backtracking, resample from the same node instead of stepping back,
             # unless going back is the only move available (otherwise the walk never ends).
@@ -184,6 +206,7 @@ class RandomWalk:
 
             walk_ids.append(current_node_indice)
             sentence_step += 1
+            stalled_steps = 0
         self.walk = _format_walk(graph, walk_ids)
 
     def get_walk(self):
@@ -195,6 +218,8 @@ class RandomWalk:
 
 class RandomWalk_MetaPath:
     def __init__(self, graph, starting_node_index, sentence_len, meta_path):
+        sentence_len = int(sentence_len)
+        _validate_walk_parameters(walk_length=sentence_len)
         i_graph = graph.get_graph()
         self.walk = []
         current_node = i_graph.vs[starting_node_index]
@@ -225,6 +250,9 @@ class RandomWalk_MetaPath:
 
 def start_walk(roots_index, graph, walks_number, walk_length, walk_rules,
                update_stats=False, neighbor_cache=None, sampling_method="uniform", seed=None):
+    walks_number = int(walks_number)
+    walk_length = int(walk_length)
+    _validate_walk_parameters(walks_number, walk_length)
     sentences = []
     if roots_index == 0 or roots_index is None:
         return
@@ -387,6 +415,9 @@ def _walk_batch(indptr, indices, flags, roots, walks_number, walk_length, backtr
 def iter_walk_id_batches(graph, roots, walks_number, walk_length, backtrack, seed=None,
                          root_batch=WALK_KERNEL_ROOT_BATCH):
     """Yield node-ID walk matrices for sorted ``roots`` of a CSR reader, one root batch at a time."""
+    walks_number = int(walks_number)
+    walk_length = int(walk_length)
+    _validate_walk_parameters(walks_number, walk_length)
     roots = np.asarray(sorted(int(root) for root in roots), dtype=np.int64)
     if seed is None:
         seed = int(np.random.randint(0, 2 ** 63, dtype=np.int64))
@@ -396,7 +427,7 @@ def iter_walk_id_batches(graph, roots, walks_number, walk_length, backtrack, see
     flags = np.frombuffer(graph.node_class_flags, dtype=np.uint8)
     for offset in range(0, roots.size, int(root_batch)):
         yield _walk_batch(indptr, indices, flags, roots[offset:offset + int(root_batch)],
-                          int(walks_number), int(walk_length), bool(backtrack), seed_key)
+                          walks_number, walk_length, bool(backtrack), seed_key)
 
 
 def dynrandom_walks_generation(configuration, graph):
@@ -450,6 +481,7 @@ def _write_walk_matrix_shard(configuration, checkpoint_path, roots, output_path)
     walk_cfg = _random_walk_config(configuration)
     walks_number = int(walk_cfg.get("walks_number", 10))
     walk_length = int(walk_cfg.get("walk_length", 30))
+    _validate_walk_parameters(walks_number, walk_length)
     graph = load_graph_reader(configuration, checkpoint_path)
     restore_dyn_roots(graph, roots)
     walk_count = len(graph.dyn_roots) * max(walks_number, 0)
@@ -616,6 +648,7 @@ def _generate_walks(configuration, graph):
     walk_cfg = _random_walk_config(configuration)
     walk_nums = int(walk_cfg.get("walks_number", 10))
     walk_length = int(walk_cfg.get("walk_length", 30))
+    _validate_walk_parameters(walk_nums, walk_length)
     backtrack = _as_bool(walk_cfg.get("backtrack", False))
     update_stats = bool(walk_cfg.get("rw_stat", False))
     sampling_method = str(walk_cfg.get("sampling_method", "uniform")).strip().lower()
@@ -638,14 +671,21 @@ def _generate_walks(configuration, graph):
     sentences = []
 
     if walk_nums > 0 and uses_walk_kernel(configuration) and hasattr(graph, "indptr"):
-        started = time.perf_counter()
-        batches = list(iter_walk_id_batches(graph, graph.dyn_roots, walk_nums, walk_length, backtrack, seed))
-        generated = time.perf_counter()
-        for batch in batches:
+        # Convert each root batch as it is produced, so only one ID matrix is alive at a time.
+        generate_seconds = names_seconds = 0.0
+        batches = iter_walk_id_batches(graph, graph.dyn_roots, walk_nums, walk_length, backtrack, seed)
+        while True:
+            started = time.perf_counter()
+            batch = next(batches, None)
+            generate_seconds += time.perf_counter() - started
+            if batch is None:
+                break
+            started = time.perf_counter()
             names = graph.get_node_names(batch)
             sentences += [names[offset:offset + walk_length] for offset in range(0, len(names), walk_length)]
-        print(f"[random-walk] generate_seconds={generated - started:.6f} "
-              f"names_seconds={time.perf_counter() - generated:.6f} walks={len(sentences)}")
+            names_seconds += time.perf_counter() - started
+        print(f"[random-walk] generate_seconds={generate_seconds:.6f} "
+              f"names_seconds={names_seconds:.6f} walks={len(sentences)}")
         graph.dyn_roots.clear()
     elif walk_nums > 0:
         if not meta_path:
