@@ -13,9 +13,15 @@ class InferenceService:
             save_dir = os.path.join("data", "bert", "test")
         save_dir = os.path.abspath(save_dir)
         _validate_local_checkpoint(save_dir)
-        if device in (None, "auto"):
+        device = str(device or "auto").strip().lower()
+        if device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("bert_matching.device must be one of: auto, cpu, cuda")
+        if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("bert_matching.device=cuda requested, but CUDA is not available")
         self.device = torch.device(device)
+        print(f"[bert-matching] device={self.device}", flush=True)
         self.tokenizer = AutoTokenizer.from_pretrained(save_dir, local_files_only=True)
         self.model = AutoModelForSequenceClassification.from_pretrained(save_dir, local_files_only=True)
         self.model.to(self.device)

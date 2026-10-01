@@ -214,9 +214,21 @@ train_embeddings = retrain_embeddings
 
 
 def load_or_create_model(config, model_path: str):
-    """Load a persisted embedding model if present, else initialize a fresh one."""
+    """Load a persisted embedding model if present, else initialize a fresh one.
+
+    A loaded model keeps its learned state and hyperparameters, but ``workers`` only
+    controls execution: it follows the running config, so a model trained elsewhere (e.g. a
+    shared offline seed) trains with this Pod's configured thread count.
+    """
     if os.path.isfile(model_path):
-        return EmbeddingModel.load(model_path)
+        model = EmbeddingModel.load(model_path)
+        workers = _embedding_config(config).get("workers")
+        if workers is not None:
+            if int(workers) < 1:
+                raise ValueError("embeddings_training.workers must be at least 1")
+            model.workers = int(workers)
+            model.model.workers = int(workers)
+        return model
     return initialize_embeddings(config)
 
 

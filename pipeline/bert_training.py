@@ -15,6 +15,17 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
+def resolve_device(configured_device="auto"):
+    device_name = str(configured_device or "auto").strip().lower()
+    if device_name not in {"auto", "cpu", "cuda"}:
+        raise ValueError("bert_training.device must be one of: auto, cpu, cuda")
+    if device_name == "auto":
+        device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("bert_training.device=cuda requested, but CUDA is not available")
+    return torch.device(device_name)
+
+
 def train_model(configuration, processed_data):
     """
     Docstring for train_model
@@ -42,7 +53,8 @@ def train_model(configuration, processed_data):
             "Check that Data_example/bert/*.csv is present in the mounted PVC and the config paths are correct."
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(configuration.get("device", "auto"))
+    print(f"[bert-training] device={device}", flush=True)
     model = model.to(device)
 
     dataset = DatasetDict({
@@ -61,7 +73,8 @@ def train_model(configuration, processed_data):
         save_strategy="epoch",
         num_train_epochs=configuration.get("epochs", 2),
         push_to_hub=False,
-        fp16=torch.cuda.is_available(),
+        no_cuda=device.type == "cpu",
+        fp16=device.type == "cuda",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,

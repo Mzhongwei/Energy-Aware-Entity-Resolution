@@ -141,6 +141,7 @@ bert_matching:
   max_text_chars: 4096           # cap on stored record text
 
 bert_training:
+  device: auto                   # auto / cuda / cpu; benchmark configs set this explicitly
 
 bert_inference:
 
