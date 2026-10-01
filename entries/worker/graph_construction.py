@@ -15,6 +15,7 @@ from utils.pipeline_io import (
     prune_window_checkpoints,
     wait_for_window_checkpoint_ack,
     write_checkpoint_reference,
+    transferring,
     write_window_checkpoint,
 )
 from pipeline.graph_construction import (
@@ -104,7 +105,9 @@ def main():
             os.path.join(checkpoint_dir, f"graph_snapshot_{window_index:06d}")
             if compact else os.path.join(checkpoint_dir, f"{window_index}.graphml")
         )
-        persist_graph(graph, checkpoint_graph_path)
+        with transferring("write", "graph_snapshot") as transfer:
+            persist_graph(graph, checkpoint_graph_path)
+            transfer.path = checkpoint_graph_path
         write_window_checkpoint(checkpoint_dir, window_index, {"dyn_roots": dyn_roots})
         write_checkpoint_reference(os.path.dirname(graph_path), "current", checkpoint_graph_path, window_index)
         write_checkpoint_reference(

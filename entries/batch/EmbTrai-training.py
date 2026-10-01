@@ -25,6 +25,7 @@ from utils.pipeline_io import (
     get_model_directory,
     get_transfer_data_directory,
     load_config,
+    transferring,
 )
 
 
@@ -102,7 +103,9 @@ def graph_stage(config, bus):
         snapshot = str(bus.root / (f"graph_snapshot_{window.index:06d}" if compact
                                    else f"graph-{window.index}.graphml"))
         with timed("graph-construction", window.index, "write-snapshot"):
-            persist_graph(graph, snapshot)
+            with transferring("write", "graph_snapshot") as transfer:
+                persist_graph(graph, snapshot)
+                transfer.path = snapshot
             stage.send(window.index, {"path": snapshot, "roots": root_names})
         clear_dyn_roots(graph)
         # Do not mutate or replace a snapshot while the reader is using it.
@@ -133,7 +136,9 @@ def walk_stage(config, bus):
         roots = handoff["roots"]
         if executor is None or isinstance(roots, dict):
             with timed("random-walk", window.index, "load-graph"):
-                graph = load_graph_reader(config, handoff["path"])
+                with transferring("read", "graph_snapshot") as transfer:
+                    transfer.path = handoff["path"]
+                    graph = load_graph_reader(config, transfer.path)
                 restore_dyn_roots(graph, roots)
             with timed("random-walk", window.index, "compute"):
                 walk_output = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []

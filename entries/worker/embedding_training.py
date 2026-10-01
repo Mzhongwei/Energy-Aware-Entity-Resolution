@@ -14,6 +14,7 @@ from utils.pipeline_io import (
     prune_window_checkpoints,
     wait_for_window_checkpoint_ack,
     write_buffer,
+    transferring,
     write_checkpoint_reference,
 )
 from pipeline.embedding_training import is_walk_shard_manifest, load_or_create_model, train_embeddings
@@ -101,7 +102,9 @@ def main():
         model = train_embeddings(config, model, sequences)
         del sequences
 
-        checkpoint_model_path = write_buffer(model, checkpoint_dir, window_index, extension="emb")
+        with transferring("write", "embedding") as transfer:
+            checkpoint_model_path = write_buffer(model, checkpoint_dir, window_index, extension="emb")
+            transfer.path = os.path.dirname(checkpoint_model_path)
         write_checkpoint_reference(os.path.dirname(model_path), "current", checkpoint_model_path, window_index)
         write_checkpoint_reference(io.output_dir(), window_index, checkpoint_model_path, window_index)
         mark_window_published(checkpoint_dir, window_index)

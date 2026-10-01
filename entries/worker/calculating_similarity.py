@@ -8,6 +8,7 @@ from utils.pipeline_io import (
     get_buffer_directory,
     load_checkpoint_reference,
     load_config,
+    transferring,
     wait_for_checkpoint_reference,
     waiting,
 )
@@ -59,7 +60,9 @@ def main():
         embedding_path = load_checkpoint_reference(reference_path)["checkpoint_path"]
 
         if candidate_pairs:
-            model = EmbeddingModel.load(embedding_path)
+            with transferring("read", "embedding") as transfer:
+                transfer.path = os.path.dirname(embedding_path)
+                model = EmbeddingModel.load(embedding_path)
             matching_pairs = score_mutual_topk_candidate_pairs(
                 model, candidate_pairs, top_k=top_k, batch_threshold=batch_threshold, chunk_size=chunk_size,
             )

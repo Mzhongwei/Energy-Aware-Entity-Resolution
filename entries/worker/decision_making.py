@@ -12,6 +12,7 @@ from utils.pipeline_io import (
     is_window_checkpoint_acknowledged,
     load_checkpoint_reference,
     load_config,
+    transferring,
     wait_for_checkpoint_reference,
     waiting,
 )
@@ -99,7 +100,9 @@ def main():
                 f"[decision_making] embedding stream ended before window {window_index} was produced"
             )
         reference = load_checkpoint_reference(reference_path)
-        model = EmbeddingModel.load(reference["checkpoint_path"])
+        with transferring("read", "embedding") as transfer:
+            transfer.path = os.path.dirname(reference["checkpoint_path"])
+            model = EmbeddingModel.load(reference["checkpoint_path"])
         previous_pairs, predicted_graph = decide_matches(
             mutual_topk_pairs=matching_pairs,
             previous_pairs=previous_pairs,
@@ -114,7 +117,9 @@ def main():
         predicted_graph.export_graphml(predicted_match_path)
 
         snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
-        predicted_graph.export_graphml(snapshot_path)
+        with transferring("write", "match_snapshot") as transfer:
+            predicted_graph.export_graphml(snapshot_path)
+            transfer.path = snapshot_path
 
         stage.send(window_index, {"pair_count": len(previous_pairs), "predicted_match_path": snapshot_path})
         del predicted_graph

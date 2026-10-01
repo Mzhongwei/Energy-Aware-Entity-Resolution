@@ -11,6 +11,7 @@ from utils.pipeline_io import (
     is_window_checkpoint_acknowledged,
     load_config,
     resolve_checkpoint_reference,
+    transferring,
 )
 from pipeline.graph_construction import load_graph_reader, restore_dyn_roots
 from pipeline.random_walk import dynrandom_walks_generation, resolve_walk_process_count
@@ -52,7 +53,9 @@ def main():
         handoff = resolve_checkpoint_reference(handoff)
         roots = handoff.get("dyn_roots")
         if executor is None or isinstance(roots, dict):
-            graph = load_graph_reader(config, handoff["checkpoint_path"])
+            with transferring("read", "graph_snapshot") as transfer:
+                transfer.path = handoff["checkpoint_path"]
+                graph = load_graph_reader(config, transfer.path)
             restore_dyn_roots(graph, roots)
             walk_output = dynrandom_walks_generation(config, graph) if graph.dyn_roots else []
             # The next window loads a complete graph snapshot. Release this window's graph

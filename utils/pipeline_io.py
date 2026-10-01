@@ -64,10 +64,46 @@ except (OSError, ValueError):
 
 WINDOW_METRICS_PREFIX = "[EAER_WINDOW_METRICS] "
 
+# Inter-stage data movement over the shared volume (NFS) is timed separately:
+# ``transfer_seconds`` is the part of ``compute_seconds`` spent writing an output handed to the
+# next stage or reading an input handed over by the previous one. Every transfer also prints
+# one ``[EAER_TRANSFER_METRICS]`` line with wall-clock bounds, so results.py can read its
+# energy from the node's power time series. Reads of mmap-backed snapshots are lazy: only the
+# open is timed and the page faults land in compute (set ``graph_snapshot.mmap: false`` to
+# measure the full read).
+TRANSFER_METRICS_PREFIX = "[EAER_TRANSFER_METRICS] "
+
 
 def _iso(epoch: float) -> str:
     from datetime import datetime, timezone
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="microseconds")
+
+
+def _path_bytes(path) -> int:
+    """Size of a file, or of every file below a directory (snapshots are directories)."""
+    if not path:
+        return 0
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+class Transfer:
+    """Yielded by ``transferring()``: set ``path`` (sized on exit) or ``bytes`` directly."""
+
+    def __init__(self):
+        self.path = None
+        self.bytes = None
 
 
 class StageClock:
@@ -84,15 +120,70 @@ class StageClock:
         self._wait = 0.0
         self._started = None
         self._started_wall = 0.0
+        self._transfer_depth = 0
+        self._transfer = 0.0
+        self._read_bytes = 0
+        self._write_bytes = 0
+        self._transfer_total = 0.0
+        self._read_bytes_total = 0
+        self._write_bytes_total = 0
+        self._transfers = 0
 
     def totals(self) -> dict:
-        if not self.used:
-            return {}
-        return {
-            "wait_seconds": round(self._wait_total, 6),
-            "compute_seconds": round(self._compute_total, 6),
-            "windows": self._windows,
+        totals = {}
+        if self.used:
+            totals.update({
+                "wait_seconds": round(self._wait_total, 6),
+                "compute_seconds": round(self._compute_total, 6),
+                "windows": self._windows,
+            })
+        if self._transfers:
+            # One-shot scripts transfer without the window clock; their totals count too.
+            totals.update({
+                "transfer_seconds": round(self._transfer_total, 6),
+                "transfer_read_bytes": self._read_bytes_total,
+                "transfer_write_bytes": self._write_bytes_total,
+                "transfers": self._transfers,
+            })
+        return totals
+
+    @contextmanager
+    def transferring(self, direction: str, kind: str):
+        """Time an inter-stage read or write. Nested use counts once (the outermost)."""
+        if direction not in {"read", "write"}:
+            raise ValueError(f"transfer direction must be 'read' or 'write', not {direction!r}")
+        handle = Transfer()
+        if self._transfer_depth:
+            yield handle
+            return
+        self._transfer_depth += 1
+        started, started_wall = perf_counter(), time()
+        try:
+            yield handle
+        finally:
+            self._transfer_depth -= 1
+            elapsed = perf_counter() - started
+            size = handle.bytes if handle.bytes is not None else _path_bytes(handle.path)
+            self._record_transfer(direction, kind, int(size or 0), elapsed, started_wall)
+
+    def _record_transfer(self, direction: str, kind: str, size: int, elapsed: float, started_wall: float):
+        self._transfers += 1
+        self._transfer_total += elapsed
+        if self._depth == 0:
+            # Time inside waiting() is not compute, so it cannot be a share of compute either.
+            self._transfer += elapsed
+        if direction == "read":
+            self._read_bytes += size
+            self._read_bytes_total += size
+        else:
+            self._write_bytes += size
+            self._write_bytes_total += size
+        record = {
+            "stage": self.stage, "direction": direction, "kind": kind, "bytes": size,
+            "seconds": round(elapsed, 6),
+            "started_at": _iso(started_wall), "ended_at": _iso(started_wall + elapsed),
         }
+        print(TRANSFER_METRICS_PREFIX + json.dumps(record, separators=(",", ":")), flush=True)
 
     @contextmanager
     def waiting(self):
@@ -116,8 +207,11 @@ class StageClock:
         record = {
             "stage": self.stage, "window": window,
             "wait_seconds": round(wait, 6), "compute_seconds": round(compute, 6),
+            "transfer_seconds": round(min(self._transfer, compute), 6),
+            "transfer_read_bytes": self._read_bytes, "transfer_write_bytes": self._write_bytes,
             "started_at": _iso(started_wall), "ended_at": _iso(ended_wall),
         }
+        self._transfer, self._read_bytes, self._write_bytes = 0.0, 0, 0
         print(WINDOW_METRICS_PREFIX + json.dumps(record, separators=(",", ":")), flush=True)
 
     def begin(self, stage: str) -> None:
@@ -147,6 +241,15 @@ _STAGE_CLOCK = StageClock()
 def waiting():
     """Context manager: time spent inside counts as waiting on a peer, not computing."""
     return _STAGE_CLOCK.waiting()
+
+
+def transferring(direction: str, kind: str):
+    """Context manager: time an inter-stage ``read`` or ``write`` on the shared volume.
+
+    Yields a handle; set ``handle.path`` to the file or directory moved (sized on exit), or
+    ``handle.bytes`` when the size is already known. ``kind`` labels the edge payload.
+    """
+    return _STAGE_CLOCK.transferring(direction, kind)
 
 
 def begin_window(stage: str) -> None:
@@ -316,15 +419,16 @@ def write_step_output(directory: str, file_name: str, extension: str, output, se
     output_filename = f"{file_name}.{extension}" if extension else file_name
     output_path = os.path.join(directory, output_filename)
     ensure_parent_dir(output_path)
-    if extension.lower() == "csv":
-        if not isinstance(output, pd.DataFrame):
-            raise ValueError("CSV step output requires a pandas DataFrame.")
-        output.to_csv(output_path, index=False)
-        return
-
-    payload = json.dumps(serializer(output))
-    with open(output_path, "w", encoding="utf-8") as file_handle:
-        file_handle.write(payload)
+    if extension.lower() == "csv" and not isinstance(output, pd.DataFrame):
+        raise ValueError("CSV step output requires a pandas DataFrame.")
+    payload = None if extension.lower() == "csv" else json.dumps(serializer(output))
+    with transferring("write", "step_output") as transfer:
+        transfer.path = output_path
+        if payload is None:
+            output.to_csv(output_path, index=False)
+        else:
+            with open(output_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(payload)
 
 def load_processed_data(processed_data_path: str):
     if not processed_data_path:
@@ -333,11 +437,12 @@ def load_processed_data(processed_data_path: str):
     if not os.path.isfile(processed_data_path):
         raise FileNotFoundError(f"processed_data_path does not exist: {processed_data_path}")
 
-    if processed_data_path.lower().endswith(".csv"):
-        return pd.read_csv(processed_data_path)
-
-    with open(processed_data_path, "r", encoding="utf-8") as file_handle:
-        content = file_handle.read().strip()
+    with transferring("read", "step_output") as transfer:
+        transfer.path = processed_data_path
+        if processed_data_path.lower().endswith(".csv"):
+            return pd.read_csv(processed_data_path)
+        with open(processed_data_path, "r", encoding="utf-8") as file_handle:
+            content = file_handle.read().strip()
 
     parsed = parse_json_payload(content, deserializer=deserialize_from_json)
     if parsed is None:
@@ -574,8 +679,10 @@ def wait_for_checkpoint_reference(
 
 
 def load_checkpoint_reference(reference_path: str) -> dict:
-    with open(reference_path, "r", encoding="utf-8") as reference_file:
-        payload = json.load(reference_file)
+    with transferring("read", "reference") as transfer:
+        transfer.path = reference_path
+        with open(reference_path, "r", encoding="utf-8") as reference_file:
+            payload = json.load(reference_file)
     reference = payload.get("value") if isinstance(payload, dict) else None
     return resolve_checkpoint_reference(reference, reference_path)
 
@@ -972,7 +1079,9 @@ class BufferIO:
         self._seen_first = True
 
     def load(self):
-        payload = load_earliest_buffer(self.input_dir)
+        with transferring("read", "buffer") as transfer:
+            transfer.path = _get_earliest_buffer_file(self.input_dir)
+            payload = load_earliest_buffer(self.input_dir)
         if payload is None:
             return None
         return get_earliest_window_index(self.input_dir), payload
@@ -981,7 +1090,9 @@ class BufferIO:
         delete_earliest_buffer_file(self.input_dir)
 
     def send(self, window_index: int, value, output: str | None = None, extension: str = "json"):
-        return write_buffer(value, self.output_dir(output), window_index, extension=extension)
+        with transferring("write", "buffer") as transfer:
+            transfer.path = write_buffer(value, self.output_dir(output), window_index, extension=extension)
+        return transfer.path
 
     def send_eos(self) -> None:
         for directory in self.output_dirs.values():
@@ -1005,9 +1116,11 @@ class Handoff:
     def put(self, channel, window, value):
         path = self.path(channel, window)
         temporary = path.with_suffix(f".{os.getpid()}.tmp")
-        with temporary.open("wb") as stream:
-            pickle.dump(value, stream, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(temporary, path)
+        with transferring("write", "handoff") as transfer:
+            with temporary.open("wb") as stream:
+                pickle.dump(value, stream, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(temporary, path)
+            transfer.path = str(path)
 
     def wait(self, channel, window):
         """Block until the artifact exists; raise if a peer failed or the timeout expires."""
@@ -1029,8 +1142,10 @@ class Handoff:
         self.wait(channel, window)
         path = self.path(channel, window)
         # Only internally produced, run-scoped artifacts are accepted here.
-        with path.open("rb") as stream:
-            value = pickle.load(stream)
+        with transferring("read", "handoff") as transfer:
+            transfer.bytes = path.stat().st_size
+            with path.open("rb") as stream:
+                value = pickle.load(stream)
         path.unlink()
         return value
 

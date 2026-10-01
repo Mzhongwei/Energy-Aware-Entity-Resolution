@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-from utils.pipeline_io import BufferIO, StreamStage, get_model_directory, load_config
+from utils.pipeline_io import BufferIO, StreamStage, get_model_directory, load_config, transferring
 from pipeline.bert_matching import BertMatcher
 from pipeline.calculating_similarity import get_mutual_top_k
 from pipeline.decision_making import build_similarity_graph
@@ -50,11 +50,16 @@ def main():
             print(f"[bert_matching] no snapshot for event {decision_event}; skipping", file=sys.stderr)
             return
 
-        accepted = matcher.filter_pairs(load_scored_pairs_from_graphml(config, source_path))
+        with transferring("read", "match_snapshot") as transfer:
+            transfer.path = source_path
+            scored_pairs = load_scored_pairs_from_graphml(config, source_path)
+        accepted = matcher.filter_pairs(scored_pairs)
         graph = build_similarity_graph(accepted, output_format=output_format, top_k=top_k)
         graph.export_graphml(predicted_match_path)
         snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window.index))
-        graph.export_graphml(snapshot_path)
+        with transferring("write", "match_snapshot") as transfer:
+            graph.export_graphml(snapshot_path)
+            transfer.path = snapshot_path
         stage.send(window.index, {"pair_count": len(accepted), "predicted_match_path": snapshot_path})
         os.remove(source_path)
 
