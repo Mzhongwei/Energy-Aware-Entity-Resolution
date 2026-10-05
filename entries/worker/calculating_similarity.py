@@ -13,7 +13,7 @@ from utils.pipeline_io import (
     waiting,
 )
 from models.embedding_model import EmbeddingModel
-from pipeline.calculating_similarity import get_mutual_top_k, score_mutual_topk_candidate_pairs
+from pipeline.calculating_similarity import get_similarity_top_k, score_mutual_topk_candidate_pairs
 
 """
 task: similarity calculation
@@ -37,9 +37,8 @@ def main():
 
     config = load_config(args.config)
     task_config = config.get(TASK_CONFIG_KEY, {}) or {}
-    top_k = get_mutual_top_k(config)
-    batch_threshold = int(task_config.get("batch_threshold", 2048))
-    chunk_size = int(task_config.get("chunk_size", 4096))
+    top_k = get_similarity_top_k(config)
+    chunk_size = int(task_config.get("chunk_size", 2048))
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     stage = StreamStage("calculating_similarity", io)
     embedding_buffer = get_buffer_directory(args.workload, EMBEDDING_INPUT_DATA_TYPE)
@@ -64,7 +63,7 @@ def main():
                 transfer.path = os.path.dirname(embedding_path)
                 model = EmbeddingModel.load(embedding_path)
             matching_pairs = score_mutual_topk_candidate_pairs(
-                model, candidate_pairs, top_k=top_k, batch_threshold=batch_threshold, chunk_size=chunk_size,
+                model, candidate_pairs, top_k=top_k, chunk_size=chunk_size,
             )
             del model
         else:

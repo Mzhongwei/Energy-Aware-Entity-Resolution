@@ -36,20 +36,6 @@ def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> Li
     return list(_iter_candidate_pairs(candidate_pairs))
 
 
-def _chunk_pairs(pairs: Iterable[CandidatePair], chunk_size: int) -> Iterator[List[CandidatePair]]:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than zero.")
-
-    chunk: List[CandidatePair] = []
-    for pair in pairs:
-        chunk.append(pair)
-        if len(chunk) == chunk_size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
-
-
 def _cosine_similarity(vec_a, vec_b) -> float:
     a = np.asarray(vec_a, dtype=np.float32)
     b = np.asarray(vec_b, dtype=np.float32)
@@ -123,6 +109,14 @@ def get_mutual_top_k(config: dict, default: int = 2) -> int:
     return validate_top_k(section.get("top_k", default))
 
 
+def get_similarity_top_k(config: dict, default: int = 1) -> int:
+    """Mutual top-k used by the similarity stage, read from ``calculating_similarity.top_k``."""
+    section = config.get("calculating_similarity") if isinstance(config, dict) else None
+    if not isinstance(section, dict):
+        section = {}
+    return validate_top_k(section.get("top_k", default))
+
+
 def normalize_scored_pair(pair) -> ScoredPair:
     if not isinstance(pair, (list, tuple)) or len(pair) != 3:
         raise ValueError(
@@ -186,39 +180,187 @@ def select_mutual_topk_pairs(matching_pairs: List[ScoredPair], top_k: int = 2) -
     return _mutual_topk_from_top_pairs(*_select_top_pairs(matching_pairs, top_k))
 
 
+def _iter_candidate_groups(candidate_pairs: List[Tuple[str, List[str]]]) -> Iterator[Tuple[str, List[str]]]:
+    if not isinstance(candidate_pairs, list):
+        raise ValueError("candidate_pairs must be a list of tuples.")
+
+    for pair in candidate_pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError("Each candidate_pairs item must be a 2-element list or tuple of (indexed_id, query_ids).")
+        indexed_id, query_ids = pair
+        if isinstance(query_ids, str):
+            query_ids = [query_ids]
+        elif not isinstance(query_ids, (list, tuple, set)):
+            raise ValueError("query_ids must be a string or an iterable of query ids.")
+        yield indexed_id, query_ids
+
+
+def _iter_rank_chunks(
+    candidate_pairs: List[Tuple[str, List[str]]], rank: Dict[str, int], chunk_size: int,
+) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    pending_left = pending_right = np.empty(0, dtype=np.int64)
+    group_left: List[int] = []
+    group_sizes: List[int] = []
+    right: List[int] = []
+
+    def flush(final: bool) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        nonlocal pending_left, pending_right
+        left_ranks = np.concatenate([pending_left, np.repeat(np.asarray(group_left, dtype=np.int64), group_sizes)])
+        right_ranks = np.concatenate([pending_right, np.asarray(right, dtype=np.int64)])
+        group_left.clear(), group_sizes.clear(), right.clear()
+        full = len(left_ranks) if final else len(left_ranks) - len(left_ranks) % chunk_size
+        for start in range(0, full, chunk_size):
+            yield left_ranks[start:start + chunk_size], right_ranks[start:start + chunk_size]
+        pending_left, pending_right = left_ranks[full:], right_ranks[full:]
+
+    for indexed_id, query_ids in _iter_candidate_groups(candidate_pairs):
+        if not query_ids:
+            continue
+        group_left.append(rank[indexed_id])
+        group_sizes.append(len(query_ids))
+        right.extend(map(rank.__getitem__, query_ids))
+        if len(right) >= chunk_size:
+            yield from flush(final=False)
+    yield from flush(final=True)
+
+
+class _CosineScorer:
+    """Cosine similarity over ranked ids, reading rows of the model's own vector table."""
+
+    _NORM_BLOCK = 65536
+
+    def __init__(self, kv, ids: List[str]):
+        missing_ids = [node_id for node_id in ids if node_id not in kv.key_to_index]
+        if missing_ids:
+            raise ValueError(f"Missing embeddings for ids: {missing_ids[:5]}")
+
+        table = getattr(kv, "vectors", None)
+        if isinstance(table, np.ndarray):
+            self.table = table
+            self.rows = np.asarray([kv.key_to_index[node_id] for node_id in ids], dtype=np.int64)
+        else:
+            self.table = np.asarray([kv[node_id] for node_id in ids], dtype=np.float32)
+            self.rows = np.arange(len(ids), dtype=np.int64)
+
+        # Norms block by block, so no full normalized copy of the table is ever held.
+        norms = np.empty(len(ids), dtype=np.float32)
+        for start in range(0, len(ids), self._NORM_BLOCK):
+            block = self.table[self.rows[start:start + self._NORM_BLOCK]].astype(np.float32, copy=False)
+            norms[start:start + len(block)] = np.linalg.norm(block, axis=1)
+        if np.any(norms <= 0.0):
+            raise ValueError("Cannot compute cosine similarity for zero vectors.")
+        self.inverse_norms = 1.0 / norms
+
+    def __call__(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        dots = np.einsum(
+            "ij,ij->i",
+            self.table[self.rows[left]].astype(np.float32, copy=False),
+            self.table[self.rows[right]].astype(np.float32, copy=False),
+        )
+        return dots * self.inverse_norms[left] * self.inverse_norms[right]
+
+
+class _TopKState:
+    """Running top-k partners per node; partners rank by (-score, partner id)."""
+
+    def __init__(self, node_count: int, top_k: int):
+        self.top_k = top_k
+        self.scores = np.full((node_count, top_k), -np.inf, dtype=np.float32)
+        self.partners = np.full((node_count, top_k), -1, dtype=np.int64)
+
+    def update(self, nodes: np.ndarray, partners: np.ndarray, scores: np.ndarray) -> None:
+        if self.top_k == 1:
+            self._update_best(nodes, partners, scores)
+            return
+        touched = np.unique(nodes)
+        kept = self.partners[touched] >= 0
+        nodes = np.concatenate([np.repeat(touched, self.top_k)[kept.ravel()], nodes])
+        partners = np.concatenate([self.partners[touched][kept], partners])
+        scores = np.concatenate([self.scores[touched][kept], scores])
+
+        order = np.lexsort((partners, -scores, nodes))
+        nodes, partners, scores = nodes[order], partners[order], scores[order]
+        # Scoring is deterministic, so a pair seen twice has equal scores and sorts adjacent.
+        first = np.ones(len(nodes), dtype=bool)
+        first[1:] = (nodes[1:] != nodes[:-1]) | (partners[1:] != partners[:-1])
+        nodes, partners, scores = nodes[first], partners[first], scores[first]
+
+        starts = np.flatnonzero(np.r_[True, nodes[1:] != nodes[:-1]])
+        slots = np.arange(len(nodes)) - np.repeat(starts, np.diff(np.r_[starts, len(nodes)]))
+        keep = slots < self.top_k
+
+        self.scores[touched] = -np.inf
+        self.partners[touched] = -1
+        self.scores[nodes[keep], slots[keep]] = scores[keep]
+        self.partners[nodes[keep], slots[keep]] = partners[keep]
+
+    def _update_best(self, nodes: np.ndarray, partners: np.ndarray, scores: np.ndarray) -> None:
+        order = np.lexsort((partners, -scores, nodes))
+        nodes, partners, scores = nodes[order], partners[order], scores[order]
+        first = np.r_[True, nodes[1:] != nodes[:-1]]
+        nodes, partners, scores = nodes[first], partners[first], scores[first]
+
+        best_scores, best_partners = self.scores[nodes, 0], self.partners[nodes, 0]
+        better = (scores > best_scores) | ((scores == best_scores) & (partners < best_partners))
+        self.scores[nodes[better], 0] = scores[better]
+        self.partners[nodes[better], 0] = partners[better]
+
+
 def score_mutual_topk_candidate_pairs(
     model,
     candidate_pairs: List[Tuple[str, List[str]]],
-    top_k: int = 2,
-    batch_threshold: int = 2048,
-    chunk_size: int = 4096,
+    top_k: int = 1,
+    chunk_size: int = 2048,
 ) -> List[ScoredPair]:
     """
     Compute local mutual top-k pairs with unified semantics:
 
     - left_id == indexed_id == training-side id
     - right_id == query_id == incremental-side id
+
+    Pairs are scored in chunks of ``chunk_size`` and folded into fixed-size top-k
+    state per side, so memory depends on the chunk and on the number of distinct
+    ids, not on the number of candidate pairs. Small chunks stay in CPU cache.
     """
-    pair_count = sum(1 for _ in _iter_candidate_pairs(candidate_pairs))
-    if pair_count == 0:
+    top_k = validate_top_k(top_k)
+    chunk_size = int(chunk_size)
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero.")
+
+    raw_ids = set()
+    for indexed_id, query_ids in _iter_candidate_groups(candidate_pairs):
+        if query_ids:
+            raw_ids.add(indexed_id)
+            raw_ids.update(query_ids)
+    if not raw_ids:
         raise ValueError("candidate_pairs is empty; cannot calculate similarity.")
 
-    top_k = validate_top_k(top_k)
-    kv = _resolve_keyed_vectors(model)
-    use_batch = pair_count >= int(batch_threshold)
-    top_for_indexed: TopPairs = {}
-    top_for_query: TopPairs = {}
+    # Integer ids follow string order, so integer tie-breaking matches string tie-breaking.
+    ids = sorted({str(node_id) for node_id in raw_ids})
+    position = {node_id: index for index, node_id in enumerate(ids)}
+    rank = {node_id: position[str(node_id)] for node_id in raw_ids}
+    score = _CosineScorer(_resolve_keyed_vectors(model), ids)
+    top_for_indexed = _TopKState(len(ids), top_k)
+    top_for_query = _TopKState(len(ids), top_k)
 
-    for chunk in _chunk_pairs(_iter_candidate_pairs(candidate_pairs), int(chunk_size)):
-        scored_chunk = _score_pairs_batch(kv, chunk) if use_batch else _score_pairs_iterative(kv, chunk)
-        _update_top_pairs(scored_chunk, top_for_indexed, top_for_query, top_k)
+    for left, right in _iter_rank_chunks(candidate_pairs, rank, chunk_size):
+        scores = score(left, right)
+        top_for_indexed.update(left, right, scores)
+        top_for_query.update(right, left, scores)
 
-    return _mutual_topk_from_top_pairs(top_for_indexed, top_for_query)
+    indexed, slot = np.nonzero(top_for_indexed.partners >= 0)
+    query = top_for_indexed.partners[indexed, slot]
+    scores = top_for_indexed.scores[indexed, slot]
+    mutual = (top_for_query.partners[query] == indexed[:, None]).any(axis=1)
+    indexed, query, scores = indexed[mutual], query[mutual], scores[mutual]
+    order = np.lexsort((query, -scores, indexed))
+    return [(ids[i], ids[q], float(s)) for i, q, s in zip(indexed[order], query[order], scores[order])]
 
 
 __all__ = [
     "score_candidate_pairs",
     "get_mutual_top_k",
+    "get_similarity_top_k",
     "normalize_scored_pair",
     "validate_top_k",
     "select_mutual_topk_pairs",

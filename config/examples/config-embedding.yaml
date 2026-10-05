@@ -123,7 +123,8 @@ embeddings_training:            # Gensim Word2Vec, optimized for multicore CPU t
 candidate_enumeration: {}
 
 calculating_similarity:
-  chunk_size: 4096              # candidate pairs scored per in-memory chunk
+  chunk_size: 2048              # candidate pairs scored per in-memory chunk; 2k-4k stays in CPU cache
+  top_k: 1                       # mutual top K pairs kept per record by the similarity stage
 
 decision_making:
   top_k: 1                       # mutual top K matches to keep for each record
