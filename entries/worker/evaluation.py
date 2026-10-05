@@ -39,7 +39,6 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    config["output_format"] = config.get("decision_making", {}).get("output_format", "graphml")
     # Evaluation is the end of the chain: it forwards no EOS, only writes the report.
     input_type = BERT_INPUT_DATA_TYPE if is_bert_matching_enabled(config) else INPUT_DATA_TYPE
     stage = StreamStage("evaluation", BufferIO(args.workload, input_type, None, config))

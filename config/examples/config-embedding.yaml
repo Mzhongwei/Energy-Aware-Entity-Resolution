@@ -128,7 +128,6 @@ calculating_similarity:
 
 decision_making:
   top_k: 1                       # mutual top K matches to keep for each record
-  output_format: "graphml"            # db / json / parquet / graphml
 
 # Embedding decision as blocking, BERT as matcher: when enabled, the batch workflow also
 # trains BERT on trainset_path/evalset_path, and an incremental bert-matching stage keeps

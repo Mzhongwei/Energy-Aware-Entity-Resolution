@@ -112,6 +112,43 @@ def load_scored_pairs_from_graphml(config: dict, graph_path: str) -> list[tuple[
 
     return [(left, right, score) for (left, right), score in scores.items()]
 
+
+SCORED_PAIRS_HEADER = ("left_id", "right_id", "score")
+
+
+def serialize_scored_pairs(pairs) -> bytes:
+    """Encode canonical scored pairs as CSV; ``repr`` keeps every score exact."""
+    buffer = StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(SCORED_PAIRS_HEADER)
+    writer.writerows((left, right, repr(float(score))) for left, right, score in pairs)
+    return buffer.getvalue().encode("utf-8")
+
+
+def write_bytes_atomically(path: str, data: bytes) -> None:
+    """Replace ``path`` in one rename so readers never see a partially written file."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    with open(temporary, "wb") as stream:
+        stream.write(data)
+    os.replace(temporary, path)
+
+
+def load_scored_pairs(config: dict, path: str) -> list[tuple[str, str, float]]:
+    """Load canonical scored pairs from a CSV snapshot, or from a legacy GraphML graph."""
+    if path.endswith(".graphml"):
+        return load_scored_pairs_from_graphml(config, path)
+    if not path.endswith(".csv"):
+        raise ValueError(f"Unsupported scored-pairs file (expected .csv or .graphml): {path}")
+    with open(path, newline="", encoding="utf-8") as stream:
+        reader = csv.reader(stream)
+        header = tuple(next(reader, ()))
+        if header != SCORED_PAIRS_HEADER:
+            raise ValueError(f"{path} does not start with the header {','.join(SCORED_PAIRS_HEADER)}")
+        return [(left, right, float(score)) for left, right, score in reader]
+
 ### check configuration ###
 def _merge_with_defaults(user_config, default_config):
     """

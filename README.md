@@ -110,7 +110,6 @@ Distributed entries exchange window artifacts through shared storage; Python obj
 - `sequences`
 - `cg_feature`
 - `candidate_pairs`
-- `matching_pairs`
 - `predicted_matching`
 - `evaluation_result`
 

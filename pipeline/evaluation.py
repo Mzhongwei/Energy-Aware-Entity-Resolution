@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-from utils.utils import load_scored_pairs_from_graphml, orient_record_pair
+from utils.utils import load_scored_pairs, orient_record_pair
 
 
 Pair = Tuple[str, str]
@@ -36,9 +36,7 @@ def _get_similarity_file(configuration: dict) -> str:
     state_cfg = configuration.get("state_management", {}) if isinstance(configuration, dict) else {}
     save_dir = state_cfg.get("predicted_match-dir", "data/predicted")
     name = state_cfg.get("predicted_match-name") or configuration.get("version_name", "test")
-    output_format = configuration.get("output_format", "graphml")
-    ext = ".graphml" if output_format == "graphml" else ".txt"
-    return str(Path(save_dir) / f"{name}{ext}")
+    return str(Path(save_dir) / f"{name}.csv")
 
 
 def _ground_truth_pairs(configuration: dict, ground_truth_file: str) -> Tuple[Set[Pair], Set[str]]:
@@ -56,13 +54,13 @@ def _ground_truth_pairs(configuration: dict, ground_truth_file: str) -> Tuple[Se
     return pair_set, left_target_rids
 
 
-def _predicted_pairs_from_graphml(configuration: dict, similarity_file: str) -> Set[Pair]:
+def _predicted_pairs(configuration: dict, similarity_file: str) -> Set[Pair]:
     if not Path(similarity_file).exists():
         raise FileNotFoundError(f"Similarity file not found: {similarity_file}")
 
     return {
         (left, right)
-        for left, right, _score in load_scored_pairs_from_graphml(configuration, similarity_file)
+        for left, right, _score in load_scored_pairs(configuration, similarity_file)
     }
 
 
@@ -89,12 +87,9 @@ def compare_ground_truth(configuration: dict, similarity_file=None) -> Dict[str,
         raise ValueError("Evaluation requires 'match_file' or 'ground_truth' in the configuration.")
     if not similarity_file:
         similarity_file = _get_similarity_file(configuration)
-    output_format = configuration.get("output_format", "graphml")
-    if output_format != "graphml":
-        raise ValueError("Current evaluation implementation supports graphml output only.")
 
     actual_pairs, left_target_rids = _ground_truth_pairs(configuration, ground_truth_file)
-    predicted_pairs = _predicted_pairs_from_graphml(configuration, similarity_file)
+    predicted_pairs = _predicted_pairs(configuration, similarity_file)
 
     all_metrics = _compute_metrics(predicted_pairs, actual_pairs)
 

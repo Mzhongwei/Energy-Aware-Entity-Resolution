@@ -5,8 +5,9 @@ stage keeps only the pairs a trained BERT cross-encoder classifies as matches.
 
 Input:  scored pairs ``(left_id, right_id, embedding_score)`` from decision making.
 Output: the subset BERT accepts, with the embedding score unchanged. The score stays the
-        similarity-graph edge weight; SimilarityGraph merges records whose score is exactly
-        1.0, which a softmax probability can round to.
+        embedding similarity, not the BERT probability: matches with a score of exactly 1.0
+        are grouped (see ``decision_making.expand_matches``), which a softmax probability
+        can round to.
 """
 from __future__ import annotations
 

@@ -5,8 +5,8 @@ import sys
 from utils.pipeline_io import BufferIO, StreamStage, get_model_directory, load_config, transferring
 from pipeline.bert_matching import BertMatcher
 from pipeline.calculating_similarity import get_mutual_top_k
-from pipeline.decision_making import build_similarity_graph
-from utils.utils import load_scored_pairs_from_graphml
+from pipeline.decision_making import expand_matches
+from utils.utils import load_scored_pairs, serialize_scored_pairs, write_bytes_atomically
 
 """
 task: BERT matching
@@ -16,14 +16,14 @@ output: decision event with BERT-filtered snapshot, triggering evaluation [buffe
 description: the embedding decision acts as blocking; BERT keeps only the pairs it classifies
 as matches. Each distinct pair is judged once and its probability reused in later windows.
 Record texts come from the record store written by normalization. Like decision making, it
-overwrites a fixed graphml for inspection and hands evaluation a per-window snapshot, then
+overwrites a fixed CSV for inspection and hands evaluation a per-window snapshot, then
 deletes the decision snapshot it consumed.
 """
 
 INPUT_DATA_TYPE = "predicted_matching"
 OUTPUT_DATA_TYPE = "bert_matching"
-PREDICTED_MATCH_FILE_NAME = "bert_matching.graphml"
-SNAPSHOT_FILE_NAME_TEMPLATE = "bert_matching_window_{window_index}.graphml"
+PREDICTED_MATCH_FILE_NAME = "bert_matching.csv"
+SNAPSHOT_FILE_NAME_TEMPLATE = "bert_matching_window_{window_index}.csv"
 
 
 def main():
@@ -33,7 +33,6 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    output_format = config.get("decision_making", {}).get("output_format", "graphml")
     top_k = get_mutual_top_k(config)
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     stage = StreamStage("bert_matching", io)
@@ -52,13 +51,13 @@ def main():
 
         with transferring("read", "match_snapshot") as transfer:
             transfer.path = source_path
-            scored_pairs = load_scored_pairs_from_graphml(config, source_path)
+            scored_pairs = load_scored_pairs(config, source_path)
         accepted = matcher.filter_pairs(scored_pairs)
-        graph = build_similarity_graph(accepted, output_format=output_format, top_k=top_k)
-        graph.export_graphml(predicted_match_path)
+        data = serialize_scored_pairs(expand_matches(config, accepted, top_k))
+        write_bytes_atomically(predicted_match_path, data)
         snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window.index))
         with transferring("write", "match_snapshot") as transfer:
-            graph.export_graphml(snapshot_path)
+            write_bytes_atomically(snapshot_path, data)
             transfer.path = snapshot_path
         stage.send(window.index, {"pair_count": len(accepted), "predicted_match_path": snapshot_path})
         os.remove(source_path)
