@@ -5,6 +5,7 @@ import os
 import pickle
 import signal
 import sys
+import tempfile
 from pathlib import Path
 from time import perf_counter, sleep, time, time_ns
 
@@ -753,9 +754,9 @@ def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
         return final_dir
     if os.path.isdir(final_dir):
         _delete_directory_if_exists(final_dir)
-    temp_dir = os.path.join(output_dir, f".{prefix}.{time_ns()}.tmp")
+    # Reserve a unique directory before taking ownership of it for cleanup.
+    temp_dir = tempfile.mkdtemp(prefix=f".{prefix}.", suffix=".tmp", dir=output_dir)
     try:
-        os.makedirs(temp_dir)
         cg_index.index_dir = temp_dir
         cg_index.persist()
         with open(os.path.join(temp_dir, ".complete"), "w", encoding="utf-8"):
@@ -804,11 +805,11 @@ def _write_embedding_model_buffer(model, output_dir: str, prefix: str):
         return final_emb_path
     if os.path.isdir(final_dir):
         _delete_directory_if_exists(final_dir)
-    temp_dir = os.path.join(output_dir, f".{buffer_name}.{time_ns()}.tmp")
+    # mkdtemp atomically reserves the name and retries existing candidates.
+    temp_dir = tempfile.mkdtemp(prefix=f".{buffer_name}.", suffix=".tmp", dir=output_dir)
     temp_emb_path = os.path.join(temp_dir, "embedding.emb")
 
     try:
-        os.makedirs(temp_dir)
         model.save(temp_emb_path)
         with open(os.path.join(temp_dir, ".complete"), "w", encoding="utf-8"):
             pass
