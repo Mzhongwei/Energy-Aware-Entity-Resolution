@@ -5,6 +5,7 @@ from utils.pipeline_io import (
     BufferIO,
     StageStop,
     StreamStage,
+    get_max_checkpoint_lead,
     get_model_directory,
     is_empty_payload,
     is_window_published,
@@ -13,7 +14,7 @@ from utils.pipeline_io import (
     load_window_checkpoint,
     mark_window_published,
     prune_window_checkpoints,
-    wait_for_window_checkpoint_ack,
+    wait_for_checkpoint_lead,
     write_checkpoint_reference,
     transferring,
     write_window_checkpoint,
@@ -63,20 +64,20 @@ def main():
             os.remove(graph_path)
         prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
-    def wait_for_previous_window_ack():
-        # Do not mutate the graph while the previous snapshot is still being read downstream.
-        if (
-            checkpoint_window >= 0
-            and is_window_published(checkpoint_dir, checkpoint_window)
-            and not wait_for_window_checkpoint_ack(
-                checkpoint_dir, checkpoint_window,
-                should_stop=stage.should_stop, poll_interval_seconds=io.poll_interval,
-            )
+    max_checkpoint_lead = get_max_checkpoint_lead(config, "graph_construction")
+
+    def wait_for_checkpoint_lead_slot():
+        # Published snapshots are immutable and pruned only once acknowledged, so this stage
+        # may run ahead of their reader by up to graph_construction.max_checkpoint_lead windows
+        # (1: wait until the previous window's snapshot is acknowledged).
+        if not wait_for_checkpoint_lead(
+            checkpoint_dir, max_checkpoint_lead,
+            should_stop=stage.should_stop, poll_interval_seconds=io.poll_interval,
         ):
             raise StageStop
 
     stage = StreamStage(
-        "graph_construction", io, is_empty=is_empty_payload, before_load=wait_for_previous_window_ack,
+        "graph_construction", io, is_empty=is_empty_payload, before_load=wait_for_checkpoint_lead_slot,
     )
 
     def process(window):

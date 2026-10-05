@@ -56,6 +56,12 @@ state_management:
 incremental:
   startup_timeout_seconds: 1800
   poll_interval_seconds: 2
+  # Backpressure between workers: a worker starts its next window only while each of its
+  # output buffers holds fewer than this many unconsumed windows, so a fast stage cannot
+  # fill the buffer PV (walk-shard windows count too). Time spent held back is reported as
+  # wait_seconds. 0 = unbounded (no backpressure). The Kafka consumer's raw_data buffer is
+  # not bounded by this.
+  max_buffered_windows: 0
 
 # File-backed training is processed in bounded windows. Kafka inference continues to use
 # kafka.window_count below.
@@ -74,6 +80,11 @@ candidate_generation:
 
 graph_construction:
   backend: "compact_adjacency"  # compact CSR snapshots; random-walk readers use mmap
+  # Graph snapshots random walk has not yet acknowledged before graph construction must
+  # wait. 1 = wait for the previous window's snapshot (graph construction and random walk
+  # alternate). N > 1 lets graph construction run up to N windows ahead; up to N+1 full
+  # snapshots are then kept on the graph PV, and both stages may peak in memory together.
+  max_checkpoint_lead: 1
   # node types explained in README
   node_types:
     - "5#__tn"                   # numerical instance
@@ -93,8 +104,8 @@ random_walk:
   processes: 2                  # processes inside one Pod; 1 preserves serial execution
   seed: 1729                    # per-root deterministic streams; invariant to process count
   sampling_method: "uniform"   # required by compact_adjacency
-  walk_length: 30                # step size
-  walks_number: 10               # number of sentences per root
+  walk_length: 60                # step size
+  walks_number: 20               # number of sentences per root
   backtrack: false               # whether to allow return to previous node
   
 
@@ -111,7 +122,7 @@ embeddings_training:            # Gensim Word2Vec, optimized for multicore CPU t
   n_dimensions: 128
   window_size: 3
   shrink_windows: true           # Gensim's dynamic effective context window
-  min_count: 10                  # tokens seen fewer times get no vector; keep <= random_walk.walks_number
+  min_count: 3                  # tokens seen fewer times get no vector; keep <= random_walk.walks_number
   sampling_factor: 0.001
   negative: 5                    # negative samples per positive pair
   epochs: 5
@@ -119,6 +130,11 @@ embeddings_training:            # Gensim Word2Vec, optimized for multicore CPU t
   alpha: 0.025
   min_alpha: 0.0001
   seed: 1729                     # exact reproducibility requires workers: 1
+  # Embedding checkpoints calculating-similarity has not yet acknowledged before training
+  # must wait. 1 = wait for the previous window's checkpoint (training and similarity +
+  # decision alternate). N > 1 lets training run up to N windows ahead; up to N+1 full model
+  # checkpoints are then kept on the embedding PV, and both stages may peak in memory together.
+  max_checkpoint_lead: 1
 
 candidate_enumeration: {}
 

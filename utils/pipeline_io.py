@@ -304,6 +304,15 @@ def load_config(config_path: str):
     return loaded if isinstance(loaded, dict) else {}
 
 
+def get_max_buffered_windows(config: dict) -> int:
+    """``incremental.max_buffered_windows``: unconsumed windows per output buffer; 0 = unbounded."""
+    incremental = config.get("incremental", {}) if isinstance(config, dict) else {}
+    limit = int(incremental.get("max_buffered_windows", 0))
+    if limit < 0:
+        raise ValueError("incremental.max_buffered_windows must be zero (unbounded) or positive")
+    return limit
+
+
 def get_incremental_wait_config(config: dict) -> tuple[int | None, float]:
     """Return the single startup timeout and the non-terminal polling interval."""
     incremental = config.get("incremental", {}) if isinstance(config, dict) else {}
@@ -522,17 +531,24 @@ def wait_for_buffer(
     )
 
 
-def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
-    accepted_extensions = {".csv", ".json"}
-    data_file = _find_earliest(
-        buffer_dir,
-        lambda path, name: (
-            os.path.isfile(path)
-            and os.path.splitext(name)[1] in accepted_extensions
-            and not name.endswith(".manifest.json")
-            and not name.startswith("eos_")
-        ),
+def _is_data_buffer(path: str, name: str) -> bool:
+    return (
+        os.path.isfile(path)
+        and os.path.splitext(name)[1] in {".csv", ".json"}
+        and not name.endswith(".manifest.json")
+        and not name.startswith("eos_")
     )
+
+
+def count_buffered_windows(buffer_dir: str) -> int:
+    """Data windows written to ``buffer_dir`` and not yet consumed (EOS excluded)."""
+    if not os.path.isdir(buffer_dir):
+        return 0
+    return sum(1 for name in os.listdir(buffer_dir) if _is_data_buffer(os.path.join(buffer_dir, name), name))
+
+
+def _get_earliest_buffer_file(buffer_dir: str) -> str | None:
+    data_file = _find_earliest(buffer_dir, _is_data_buffer)
     if data_file:
         return data_file
     # EOS is considered only after every data buffer in this directory has been
@@ -886,18 +902,48 @@ def is_window_checkpoint_acknowledged(checkpoint_dir: str, window_index: int) ->
     return os.path.isfile(os.path.join(checkpoint_dir, f"{window_index}.ack"))
 
 
-def wait_for_window_checkpoint_ack(
+def get_max_checkpoint_lead(config: dict, section: str) -> int:
+    """``<section>.max_checkpoint_lead``: published checkpoints allowed to await acknowledgement."""
+    stage_config = config.get(section) if isinstance(config, dict) else None
+    lead = int((stage_config or {}).get("max_checkpoint_lead", 1))
+    if lead < 1:
+        raise ValueError(f"{section}.max_checkpoint_lead must be at least 1")
+    return lead
+
+
+def unacknowledged_windows(checkpoint_dir: str) -> list[int]:
+    """Windows whose checkpoint is published but not yet acknowledged downstream."""
+    if not os.path.isdir(checkpoint_dir):
+        return []
+    names = set(os.listdir(checkpoint_dir))
+    return sorted(
+        window_index
+        for name in names
+        if name.endswith(".published")
+        for window_index in [_window_index_from_name(name)]
+        if window_index is not None and f"{window_index}.ack" not in names
+    )
+
+
+def wait_for_checkpoint_lead(
     checkpoint_dir: str,
-    window_index: int,
+    max_lead: int,
     should_stop=None,
     poll_interval_seconds: float = 1,
 ) -> bool:
-    marker_path = os.path.join(checkpoint_dir, f"{window_index}.ack")
-    if not os.path.isfile(marker_path):
-        print(f"[INFO] Waiting for checkpoint window {window_index} to be consumed", flush=True)
+    """Block until fewer than ``max_lead`` published checkpoints await acknowledgement.
+
+    Every window's checkpoint is an immutable file and is pruned only once acknowledged,
+    so the producer may run ahead of its reader; this bounds how far (and so how many
+    checkpoints are kept). ``max_lead=1`` waits for the previous window's acknowledgement.
+    """
+    pending = unacknowledged_windows(checkpoint_dir)
+    if len(pending) >= max_lead:
+        print(f"[INFO] Waiting for checkpoint windows {pending} to be consumed "
+              f"(max_checkpoint_lead={max_lead})", flush=True)
     return bool(
         _wait_for(
-            lambda: marker_path if os.path.isfile(marker_path) else None,
+            lambda: len(unacknowledged_windows(checkpoint_dir)) < max_lead or None,
             None,
             should_stop=should_stop,
             poll_interval_seconds=poll_interval_seconds,
@@ -1053,6 +1099,7 @@ class BufferIO:
             name: get_buffer_directory(workload, data_type) for name, data_type in (outputs or {}).items()
         }
         self.startup_timeout, self.poll_interval = get_incremental_wait_config(config or {})
+        self.max_buffered_windows = get_max_buffered_windows(config or {})
         self._seen_first = False
 
     def output_dir(self, output: str | None = None) -> str:
@@ -1078,6 +1125,23 @@ class BufferIO:
                 f"[{stage.name}] startup timed out after {self.startup_timeout}s waiting for {self.input_dir}"
             )
         self._seen_first = True
+
+    def wait_for_output_capacity(self, stage: "StreamStage") -> None:
+        """Backpressure: hold the next window while any output buffer is full."""
+        if not self.max_buffered_windows:
+            return
+        for directory in self.output_dirs.values():
+            if count_buffered_windows(directory) < self.max_buffered_windows:
+                continue
+            print(f"[{stage.name}] waiting for {directory} to drain below "
+                  f"{self.max_buffered_windows} buffered windows", flush=True)
+            with waiting():
+                ready = _wait_for(
+                    lambda: count_buffered_windows(directory) < self.max_buffered_windows or None,
+                    None, should_stop=stage.should_stop, poll_interval_seconds=self.poll_interval,
+                )
+            if ready is None:
+                raise StageStop
 
     def load(self):
         with transferring("read", "buffer") as transfer:
@@ -1221,6 +1285,9 @@ class StreamStage:
                 if self.before_load is not None:
                     with waiting():
                         self.before_load()
+                wait_for_output_capacity = getattr(self.io, "wait_for_output_capacity", None)
+                if wait_for_output_capacity is not None:
+                    wait_for_output_capacity(self)
                 item = self.io.load()
                 if item is None:
                     if finalize is not None:
