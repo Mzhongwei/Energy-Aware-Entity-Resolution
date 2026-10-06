@@ -6,6 +6,7 @@ import os
 import numpy as np
 
 from models.embedding_model import EmbeddingModel
+from utils.pipeline_io import get_model_directory
 
 WALK_SHARD_FORMATS = ("walk-shards-v1", "walk-shards-v2")
 _MATRIX_ROWS_PER_READ = 4096
@@ -211,6 +212,12 @@ def retrain_embeddings(config, model, sequences):
 
 
 train_embeddings = retrain_embeddings
+
+
+def trained_model_path(config) -> str:
+    """The batch-trained model: saved by batch embedding training, loaded by incremental
+    embedding training as its starting model."""
+    return os.path.join(get_model_directory(config, "embedding"), "embedding.emb")
 
 
 def load_or_create_model(config, model_path: str):

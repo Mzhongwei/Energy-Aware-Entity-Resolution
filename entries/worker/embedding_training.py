@@ -6,7 +6,6 @@ from utils.pipeline_io import (
     StageStop,
     StreamStage,
     get_max_checkpoint_lead,
-    get_model_directory,
     is_empty_payload,
     is_window_published,
     latest_embedding_checkpoint,
@@ -23,6 +22,7 @@ from pipeline.embedding_training import (
     load_or_create_model,
     open_walk_sequences,
     train_embeddings,
+    trained_model_path,
 )
 
 """
@@ -37,7 +37,6 @@ to the shared model directory on every window so training survives pod restarts.
 
 INPUT_DATA_TYPE = "sequences"
 OUTPUT_DATA_TYPE = "embedding_calculating"
-MODEL_FILE_NAME = "embedding.emb"
 
 
 def main():
@@ -48,7 +47,7 @@ def main():
 
     config = load_config(args.config)
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
-    model_path = os.path.join(get_model_directory(config, "embedding"), MODEL_FILE_NAME)
+    model_path = trained_model_path(config)
     checkpoint_dir = os.path.join(os.path.dirname(model_path), "incremental_checkpoints")
 
     def remove_batch_seed():

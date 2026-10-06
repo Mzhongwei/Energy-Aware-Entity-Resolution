@@ -85,11 +85,11 @@ def normalize(config, bus):
 
 def graph_stage(config, bus):
     from pipeline.graph_construction import (clear_dyn_roots, load_or_create_graph,
-                                               persist_graph, serialize_dyn_roots)
+                                               persist_graph, serialize_dyn_roots,
+                                               trained_graph_path)
 
     compact = config.get("graph_construction", {}).get("backend") == "compact_adjacency"
-    final_path = os.path.join(get_model_directory(config, "graph"),
-                              "graph_snapshot_current" if compact else "graph.graphml")
+    final_path = trained_graph_path(config)
     graph = load_or_create_graph(config, final_path)
     stage = StreamStage("graph-construction", HandoffIO(bus, "processed-graph", "graph"), handle_signals=False)
 
@@ -178,9 +178,10 @@ def embedding_stage(config, bus):
         load_or_create_model,
         open_walk_sequences,
         train_embeddings,
+        trained_model_path,
     )
 
-    path = os.path.join(get_model_directory(config, "embedding"), "embedding.emb")
+    path = trained_model_path(config)
     model = load_or_create_model(config, path)
     stage = StreamStage("embedding-training", HandoffIO(bus, "sequences"), handle_signals=False)
 

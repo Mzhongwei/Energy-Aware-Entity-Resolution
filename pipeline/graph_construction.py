@@ -24,6 +24,7 @@ from models.graph_backend import (
     is_root as flag_is_root,
 )
 from pipeline.sampler import NodeSampler
+from utils.pipeline_io import get_model_directory
 from utils.utils import OUTPUT_FORMAT, TIME_FORMAT, convert_token_value
 
 
@@ -677,6 +678,14 @@ def dyn_graph_generation(configuration):
     print(OUTPUT_FORMAT.format('Graph construction complete', t_end.strftime(TIME_FORMAT)))
     print(OUTPUT_FORMAT.format('Time required to build graph:', f'{dt.total_seconds():.2f} seconds.'))
     return g
+
+
+def trained_graph_path(configuration) -> str:
+    """The batch-trained graph: saved by batch graph construction, loaded by incremental
+    graph construction as its starting graph. A compact graph is a snapshot directory."""
+    compact = _graph_config(configuration).get("backend", "igraph") == "compact_adjacency"
+    return os.path.join(get_model_directory(configuration, "graph"),
+                        "graph_snapshot_current" if compact else "graph.graphml")
 
 
 def load_or_create_graph(configuration, graph_path: str):

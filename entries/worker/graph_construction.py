@@ -6,7 +6,6 @@ from utils.pipeline_io import (
     StageStop,
     StreamStage,
     get_max_checkpoint_lead,
-    get_model_directory,
     is_empty_payload,
     is_window_published,
     latest_graph_checkpoint,
@@ -24,6 +23,7 @@ from pipeline.graph_construction import (
     load_or_create_graph,
     persist_graph,
     serialize_dyn_roots,
+    trained_graph_path,
 )
 
 """
@@ -37,7 +37,6 @@ ships only its path and dyn_roots downstream.
 
 INPUT_DATA_TYPE = "processed_data_graph"
 OUTPUT_DATA_TYPE = "graph"
-GRAPH_FILE_NAME = "graph.graphml"
 
 
 def main():
@@ -49,12 +48,16 @@ def main():
     config = load_config(args.config)
     compact = config.get("graph_construction", {}).get("backend") == "compact_adjacency"
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
-    graph_path = os.path.join(get_model_directory(config, "graph"), GRAPH_FILE_NAME)
+    graph_path = trained_graph_path(config)
     checkpoint_dir = os.path.join(os.path.dirname(graph_path), "incremental_checkpoints")
     latest_checkpoint = latest_graph_checkpoint(checkpoint_dir)
     checkpoint_window = latest_checkpoint[0] if latest_checkpoint else -1
     checkpoint_graph_path = latest_checkpoint[1] if latest_checkpoint else graph_path
+    # load_or_create_graph silently starts an empty graph when the path is missing; without
+    # the batch graph, incremental walks never reach the indexed records.
     graph = load_or_create_graph(config, checkpoint_graph_path)
+    print(f"[graph_construction] start from {checkpoint_graph_path} "
+          f"(exists={os.path.exists(checkpoint_graph_path)}, vertices={graph.vertex_count()})", flush=True)
     if latest_checkpoint:
         # Roots are also stored in CSR for the read-only consumer. The mutable
         # builder starts the next window with an empty delta after a restart.
