@@ -11,7 +11,8 @@ spring.kafka.producer.value-serializer=org.springframework.kafka.support.seriali
 
 # csv file path info
 # csv.file.path=<your file path>
-csv.file.timeout=100
+# Pause after each record (ms): one 408-record window every ~408 x timeout.
+csv.file.timeout=50
 
 # Config for log files, remember to set up your own path of log files in "logging.file.name"
 logging.file.name=logs/app.log

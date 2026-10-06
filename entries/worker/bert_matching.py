@@ -33,6 +33,13 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    cpus = (config.get("bert_matching") or {}).get("cpus")
+    if cpus is not None:
+        import torch
+
+        # Match the Pod's CPU limit (compiler sets request = limit = cpus); torch otherwise
+        # starts one thread per host core and the CFS quota throttles them.
+        torch.set_num_threads(int(cpus))
     top_k = get_mutual_top_k(config)
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     stage = StreamStage("bert_matching", io)

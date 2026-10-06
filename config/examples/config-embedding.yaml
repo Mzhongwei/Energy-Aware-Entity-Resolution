@@ -154,6 +154,8 @@ bert_matching:
   batch_size: 64
   max_length: 128                # tokens per pair, as in BERT training
   device: auto                   # auto / cuda / cpu; GPU placement: k8s/scheduling/workloads.yaml
+  # cpus: 2                      # CPU cores of the matching Pod (request = limit) and torch
+                                 # threads; unset keeps the manifest's 1-2 cores, default threads
   max_text_chars: 4096           # cap on stored record text
 
 bert_training:
