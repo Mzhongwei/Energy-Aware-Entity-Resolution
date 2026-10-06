@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
 
@@ -168,7 +167,8 @@ _MODEL_ARGUMENTS = {
     "min_alpha": "min_alpha",
     "shrink_windows": "shrink_windows",
 }
-_TRAINING_KEYS = {"inc_epochs"}
+# Stage controls are valid configuration, but are not Gensim constructor arguments.
+_STAGE_KEYS = {"inc_epochs", "max_checkpoint_lead"}
 _PYTORCH_KEYS = {
     "batch_size", "device", "dynamic_window", "framework", "learning_rate",
     "min_learning_rate", "optimizer", "pair_chunk_tokens", "pair_generation",
@@ -184,7 +184,7 @@ def initialize_embeddings(config):
             f"embeddings_training keys {pytorch_keys} belong to the removed PyTorch "
             "implementation; configure Gensim with workers/training_algorithm/learning_method"
         )
-    unknown = sorted(set(emb_cfg) - set(_MODEL_ARGUMENTS) - _TRAINING_KEYS)
+    unknown = sorted(set(emb_cfg) - set(_MODEL_ARGUMENTS) - _STAGE_KEYS)
     if unknown:
         raise ValueError(f"Unknown embeddings_training keys: {unknown}")
     return EmbeddingModel(**{

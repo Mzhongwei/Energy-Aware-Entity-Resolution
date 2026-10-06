@@ -18,7 +18,12 @@ from utils.pipeline_io import (
     transferring,
     write_checkpoint_reference,
 )
-from pipeline.embedding_training import is_walk_shard_manifest, load_or_create_model, train_embeddings
+from pipeline.embedding_training import (
+    cleanup_walk_shards,
+    load_or_create_model,
+    open_walk_sequences,
+    train_embeddings,
+)
 
 """
 task: embedding model training
@@ -81,25 +86,16 @@ def main():
         sequence_payload = window.take()
         window_index = window.index
 
-        def cleanup_shards():
-            if is_walk_shard_manifest(sequence_payload):
-                from pipeline.embedding_training import cleanup_walk_shards
-                cleanup_walk_shards(sequence_payload)
-
         if window_index <= checkpoint_window:
             # Replay after a restart: re-publish the checkpoint reference if it was lost.
             if window_index == checkpoint_window and not is_window_published(checkpoint_dir, window_index):
                 write_checkpoint_reference(io.output_dir(), window_index, checkpoint_model_path, checkpoint_window)
                 mark_window_published(checkpoint_dir, window_index)
-            cleanup_shards()
+            cleanup_walk_shards(sequence_payload)
             prune_window_checkpoints(checkpoint_dir, checkpoint_window)
             return
 
-        if is_walk_shard_manifest(sequence_payload):
-            from pipeline.embedding_training import open_walk_sequences
-            sequences = open_walk_sequences(sequence_payload)
-        else:
-            sequences = sequence_payload
+        sequences = open_walk_sequences(sequence_payload)
         model = train_embeddings(config, model, sequences)
         del sequences
 
@@ -112,7 +108,7 @@ def main():
         remove_batch_seed()
         checkpoint_window = window_index
         prune_window_checkpoints(checkpoint_dir, checkpoint_window)
-        cleanup_shards()
+        cleanup_walk_shards(sequence_payload)
 
     stage.run(process)
 

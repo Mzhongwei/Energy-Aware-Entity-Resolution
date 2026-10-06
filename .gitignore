@@ -11,7 +11,8 @@ config/config*
 .codex
 # pytest and other test files
 .pytest*
-tests/
+tests/*
+!tests/test_embedding_training.py
 # Energy Conso Results
 emissions*.csv
 result*.csv
