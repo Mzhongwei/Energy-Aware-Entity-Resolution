@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.opencsv.CSVReader;
@@ -73,17 +74,48 @@ public class readCSV implements CommandLineRunner{
         }
     }
 
+    private void readJsonl(String pathJsonl) throws IOException{
+        try (BufferedReader reader = new BufferedReader(new FileReader(pathJsonl))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                logger.info("[stream] put data into kafka producer...");
+                JsonNode jsonvalue = objectMapper.readTree(line);
+                logger.info("[sent] json object to kafka producer: " + jsonvalue);
+                kafkaProducerService.sendMessage(jsonvalue);
+
+                try {
+                    Thread.sleep(timeout);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    logger.error("Thread sleep interrupted!", e);
+                }
+            }
+            logger.info("[finished] JSONL file reading: " + pathJsonl + " !");
+        }
+    }
+
+    private void readFile(String path) throws IOException, CsvValidationException{
+        if (path.endsWith(".jsonl")) {
+            readJsonl(path);
+        } else {
+            readData(path);
+        }
+    }
+
     private void checkPath(String pathCSV){
         try{
             File f = new File(pathCSV);
             if(f.isFile()){
-                readData(pathCSV);
+                readFile(pathCSV);
             }else if(f.isDirectory()){
                 File[] files = f.listFiles(File::isFile);
                 if(files != null){
                     for(File file: files){
                         String path = file.getAbsolutePath();
-                        readData(path);
+                        readFile(path);
                     }
                 }
             }

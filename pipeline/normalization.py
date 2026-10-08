@@ -113,7 +113,11 @@ def index_normalization(config, raw_data, raw_data_path, is_training):
     """
     # ===== index =====
     if raw_data is None:
-        raw_data = pd.read_csv(raw_data_path)
+        if str(raw_data_path).endswith(".jsonl"):
+            # dtype=False: keep JSON value types as-is, same as records streamed from the simulator
+            raw_data = pd.read_json(raw_data_path, lines=True, dtype=False)
+        else:
+            raw_data = pd.read_csv(raw_data_path)
     else:
         raw_data = raw_data.copy()
 
