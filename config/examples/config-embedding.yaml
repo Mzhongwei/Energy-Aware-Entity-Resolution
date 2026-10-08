@@ -76,6 +76,7 @@ embeddings_training:
   sampling_factor: 0.001
   
 calculating_similarity:
+  mutual_top_k: 1
 
 decision_making:
   top_k: 10                      # top K most similar entries to keep
