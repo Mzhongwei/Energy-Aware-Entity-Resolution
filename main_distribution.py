@@ -274,7 +274,8 @@ def calculating_similarity(config, candidate_pairs, state_manager: StateManager)
         raise ValueError("embedding_model must be initialized before calculating_similarity.")
     sim_cfg = _config_section(config, "calculating_similarity", "similarity")
     batch_threshold = int(sim_cfg.get("batch_threshold", 2048))
-    return score_mutual_top1_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold)
+    top_k = int(sim_cfg.get("mutual_top_k", 1))
+    return score_mutual_top1_candidate_pairs(embedding_model, candidate_pairs, batch_threshold=batch_threshold, top_k=top_k)
 
 
 def decision_making(config, mutualtop_pairs, state_manager: StateManager):
@@ -288,6 +289,7 @@ def decision_making(config, mutualtop_pairs, state_manager: StateManager):
         previous_pairs=previous_pairs,
         model=embedding_model,
         output_format=output_format,
+        top_k=int(_config_section(config, "calculating_similarity", "similarity").get("mutual_top_k", 1)),
     )
     state_manager.update("mutualtop_pairs", final_pairs)
     state_manager.update("predicted_matching", predicted_matching)

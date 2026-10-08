@@ -87,53 +87,57 @@ def score_candidate_pairs(model, candidate_pairs: List[Tuple[str, List[str]]], b
     return _score_pairs_iterative(kv, flattened_pairs)
 
 
-def _select_best_pairs(matching_pairs: List[ScoredPair]) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Tuple[str, float]]]:
-    best_for_indexed: Dict[str, Tuple[str, float]] = {}
-    best_for_query: Dict[str, Tuple[str, float]] = {}
+def _select_topk_pairs(matching_pairs: List[ScoredPair], top_k: int) -> Tuple[Dict[str, List[Tuple[str, float]]], Dict[str, set]]:
+    candidates_for_indexed: Dict[str, List[Tuple[str, float]]] = {}
+    candidates_for_query: Dict[str, List[Tuple[str, float]]] = {}
 
     for pair in matching_pairs:
         if not isinstance(pair, tuple) or len(pair) != 3:
             raise ValueError("Each matching_pairs item must be a tuple of (left_id/indexed_id, right_id/query_id, score).")
         indexed_id, query_id, score = str(pair[0]), str(pair[1]), float(pair[2])
+        candidates_for_indexed.setdefault(indexed_id, []).append((query_id, score))
+        candidates_for_query.setdefault(query_id, []).append((indexed_id, score))
 
-        current_indexed = best_for_indexed.get(indexed_id)
-        if current_indexed is None or score > current_indexed[1]:
-            best_for_indexed[indexed_id] = (query_id, score)
+    # stable sort: on equal scores the first seen candidate wins (same as the former strict `>` top1)
+    topk_for_indexed = {
+        indexed_id: sorted(candidates, key=lambda item: -item[1])[:top_k]
+        for indexed_id, candidates in candidates_for_indexed.items()
+    }
+    topk_for_query = {
+        query_id: {indexed_id for indexed_id, _ in sorted(candidates, key=lambda item: -item[1])[:top_k]}
+        for query_id, candidates in candidates_for_query.items()
+    }
+    return topk_for_indexed, topk_for_query
 
-        current_query = best_for_query.get(query_id)
-        if current_query is None or score > current_query[1]:
-            best_for_query[query_id] = (indexed_id, score)
 
-    return best_for_indexed, best_for_query
-
-
-def select_mutual_top1_pairs(matching_pairs: List[ScoredPair]) -> List[ScoredPair]:
+def select_mutual_top1_pairs(matching_pairs: List[ScoredPair], top_k: int = 1) -> List[ScoredPair]:
+    """Keep (indexed_id, query_id) when each one is within the other's top_k (top_k=1 -> mutual top1)."""
     if not isinstance(matching_pairs, list):
         raise ValueError("matching_pairs must be a list of scored tuples.")
     if not matching_pairs:
-        raise ValueError("matching_pairs is empty; cannot perform mutual top1 selection.")
+        raise ValueError("matching_pairs is empty; cannot perform mutual top-k selection.")
+    if int(top_k) < 1:
+        raise ValueError("top_k must be >= 1.")
 
-    best_for_indexed, best_for_query = _select_best_pairs(matching_pairs)
+    topk_for_indexed, topk_for_query = _select_topk_pairs(matching_pairs, int(top_k))
     final_pairs: List[ScoredPair] = []
-    for indexed_id, (query_id, score) in best_for_indexed.items():
-        reverse_best = best_for_query.get(query_id)
-        if reverse_best is None:
-            continue
-        if reverse_best[0] == indexed_id:
-            final_pairs.append((indexed_id, query_id, score))
+    for indexed_id, ranked_queries in topk_for_indexed.items():
+        for query_id, score in ranked_queries:
+            if indexed_id in topk_for_query.get(query_id, ()):
+                final_pairs.append((indexed_id, query_id, score))
 
     return final_pairs
 
 
-def score_mutual_top1_candidate_pairs(model, candidate_pairs: List[Tuple[str, List[str]]], batch_threshold: int = 2048) -> List[ScoredPair]:
+def score_mutual_top1_candidate_pairs(model, candidate_pairs: List[Tuple[str, List[str]]], batch_threshold: int = 2048, top_k: int = 1) -> List[ScoredPair]:
     """
-    Compute local mutual top1 pairs with unified semantics:
+    Compute local mutual top-k pairs (top_k=1 -> mutual top1) with unified semantics:
 
     - left_id == indexed_id == training-side id
     - right_id == query_id == incremental-side id
     """
     matching_pairs = score_candidate_pairs(model, candidate_pairs, batch_threshold=batch_threshold)
-    return select_mutual_top1_pairs(matching_pairs)
+    return select_mutual_top1_pairs(matching_pairs, top_k=top_k)
 
 
 __all__ = ["score_candidate_pairs", "select_mutual_top1_pairs", "score_mutual_top1_candidate_pairs"]
