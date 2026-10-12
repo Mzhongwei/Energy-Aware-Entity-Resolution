@@ -17,8 +17,20 @@ def enumerate_candidates(cg_feature, index):
     - left_id: indexed/training-side id
     - right_id: query/incremental-side id
 
-    :return candidate_pairs: list of tuple, tuple: (indexed_id, [query_id1, query_id2, ...])
+    :return candidate_pairs: list of tuple, tuple: (indexed_id, [query_id1, query_id2, ...]).
+        With fullindexing, a single cross block ([indexed_id, ...], [query_id, ...]) instead:
+        every indexed id pairs with every query id of the window, without repeating the
+        query list once per indexed id.
     """
+    cg_feature = list(cg_feature)
+    if getattr(index, "method", None) == "fullindexing" and cg_feature:
+        query_ids = [str(query_id) for query_id, _ in cg_feature]
+        indexed_ids = [str(indexed_id) for indexed_id in query_indexed_ids(None, index)]
+        # A query id that is also indexed must not pair with itself; keep the
+        # per-id format for that rare case.
+        if indexed_ids and not set(query_ids) & set(indexed_ids):
+            return [(indexed_ids, query_ids)]
+
     indexed_to_query_ids: Dict[str, List[str]] = defaultdict(list)
     for query_id, feature in cg_feature:
         query_id = str(query_id)

@@ -19,17 +19,29 @@ def _iter_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> Itera
         raise ValueError("candidate_pairs must be a list of tuples.")
 
     for pair in candidate_pairs:
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            raise ValueError("Each candidate_pairs item must be a 2-element list or tuple of (indexed_id, query_ids).")
-        indexed_id, query_ids = pair
-        if isinstance(query_ids, str):
-            iterable_query_ids = [query_ids]
-        elif isinstance(query_ids, (list, tuple, set)):
-            iterable_query_ids = query_ids
-        else:
-            raise ValueError("query_ids must be a string or an iterable of query ids.")
-        for query_id in iterable_query_ids:
-            yield str(indexed_id), str(query_id)
+        for indexed_id, query_ids in _expand_candidate_group(pair):
+            for query_id in query_ids:
+                yield str(indexed_id), str(query_id)
+
+
+def _expand_candidate_group(pair) -> Iterator[Tuple[str, List[str]]]:
+    """Yield ``(indexed_id, query_ids)`` groups of one candidate_pairs item.
+
+    An item is ``(indexed_id, query_ids)`` or a cross block ``([indexed_id, ...], query_ids)``
+    (fullindexing), where every indexed id pairs with the same, shared query list.
+    """
+    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+        raise ValueError("Each candidate_pairs item must be a 2-element list or tuple of (indexed_id, query_ids).")
+    indexed_ids, query_ids = pair
+    if isinstance(query_ids, str):
+        query_ids = [query_ids]
+    elif not isinstance(query_ids, (list, tuple, set)):
+        raise ValueError("query_ids must be a string or an iterable of query ids.")
+    if isinstance(indexed_ids, (list, tuple)):
+        for indexed_id in indexed_ids:
+            yield indexed_id, query_ids
+    else:
+        yield indexed_ids, query_ids
 
 
 def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> List[CandidatePair]:
@@ -185,14 +197,7 @@ def _iter_candidate_groups(candidate_pairs: List[Tuple[str, List[str]]]) -> Iter
         raise ValueError("candidate_pairs must be a list of tuples.")
 
     for pair in candidate_pairs:
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            raise ValueError("Each candidate_pairs item must be a 2-element list or tuple of (indexed_id, query_ids).")
-        indexed_id, query_ids = pair
-        if isinstance(query_ids, str):
-            query_ids = [query_ids]
-        elif not isinstance(query_ids, (list, tuple, set)):
-            raise ValueError("query_ids must be a string or an iterable of query ids.")
-        yield indexed_id, query_ids
+        yield from _expand_candidate_group(pair)
 
 
 def _iter_rank_chunks(
