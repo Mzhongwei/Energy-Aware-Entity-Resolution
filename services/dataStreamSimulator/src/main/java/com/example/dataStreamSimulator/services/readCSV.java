@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
+import com.opencsv.RFC4180ParserBuilder;
 import com.opencsv.exceptions.CsvValidationException;
 
 @Service
@@ -41,7 +42,11 @@ public class readCSV implements CommandLineRunner{
 
     private void readCsvData(String pathCSV) throws FileNotFoundException, IOException, CsvValidationException{
 
-        try (CSVReader reader = new CSVReaderBuilder(new FileReader(pathCSV)).build()) {
+        // RFC 4180 (quotes doubled, no escape character), as pandas writes it. The default
+        // parser treats a backslash before a quote as an escape and merges such rows.
+        try (CSVReader reader = new CSVReaderBuilder(new FileReader(pathCSV))
+                .withCSVParser(new RFC4180ParserBuilder().build())
+                .build()) {
             String [] nextLine;
             String[] headersValues = reader.readNext();
             if (headersValues == null) {
