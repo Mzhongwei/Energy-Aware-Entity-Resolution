@@ -787,7 +787,9 @@ def _write_cg_index_buffer(cg_index, output_dir: str, prefix: str):
 
 def _write_csv_buffer(data_buffer, output_dir: str, prefix: str):
     os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(data_buffer)
+    # Python <= 3.11's csv writer treats NUL as its unset escapechar and raises
+    # "need to escape, but no escapechar set" on any field containing it.
+    df = pd.DataFrame(data_buffer).replace("\x00", "", regex=True)
     output_path = os.path.join(output_dir, f"{prefix}.csv")
     temp_path = os.path.join(output_dir, f".{prefix}.{time_ns()}.csv.tmp")
     df.to_csv(temp_path, index=False)
