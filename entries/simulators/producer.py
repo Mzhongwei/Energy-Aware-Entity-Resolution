@@ -78,15 +78,20 @@ def start_producer(config):
         raise FileNotFoundError("'java' executable was not found in PATH.")
 
     jar_path = _resolve_simulator_jar(java_path)
+    arguments = [
+        java_exec,
+        "-jar",
+        jar_path,
+        f"--csv.file.path={csv_path}",
+        f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}",
+        f"--spring.kafka.bootstrap-servers={kafka_bootstrap}",
+    ]
+    # Pause between records (ms); unset keeps the simulator image's csv.file.timeout.
+    record_interval_ms = config["kafka"].get("record_interval_ms")
+    if record_interval_ms is not None:
+        arguments.append(f"--csv.file.timeout={int(record_interval_ms)}")
     java_proc = subprocess.Popen(
-        [
-            java_exec,
-            "-jar",
-            jar_path,
-            f"--csv.file.path={csv_path}",
-            f"--spring.kafka.producer.topic-id={config['kafka']['topicid']}",
-            f"--spring.kafka.bootstrap-servers={kafka_bootstrap}",
-        ],
+        arguments,
         cwd=java_path,
         start_new_session=True
     )

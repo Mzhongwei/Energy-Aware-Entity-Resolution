@@ -84,7 +84,7 @@ graph_construction:
   # wait. 1 = wait for the previous window's snapshot (graph construction and random walk
   # alternate). N > 1 lets graph construction run up to N windows ahead; up to N+1 full
   # snapshots are then kept on the graph PV, and both stages may peak in memory together.
-  max_checkpoint_lead: 1
+  max_checkpoint_lead: 2
   # node types explained in README
   node_types:
     - "5#__tn"                   # numerical instance
@@ -134,7 +134,7 @@ embeddings_training:            # Gensim Word2Vec, optimized for multicore CPU t
   # must wait. 1 = wait for the previous window's checkpoint (training and similarity +
   # decision alternate). N > 1 lets training run up to N windows ahead; up to N+1 full model
   # checkpoints are then kept on the embedding PV, and both stages may peak in memory together.
-  max_checkpoint_lead: 1
+  max_checkpoint_lead: 2
 
 candidate_enumeration: {}
 
