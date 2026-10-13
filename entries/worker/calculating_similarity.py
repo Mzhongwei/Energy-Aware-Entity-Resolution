@@ -1,6 +1,11 @@
 import argparse
 import os
 
+# Cross blocks are scored on a thread pool, one matrix product per thread; a multi-threaded
+# BLAS inside each would oversubscribe the Pod's CPUs. Must be set before numpy loads.
+for _blas_threads in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_blas_threads, "1")
+
 from utils.pipeline_io import (
     BufferIO,
     StageStop,
@@ -47,6 +52,17 @@ PREDICTED_MATCH_FILE_NAME = "predicted_matching.csv"
 SNAPSHOT_FILE_NAME_TEMPLATE = "predicted_matching_window_{window_index}.csv"
 
 
+def available_cpus() -> int:
+    """CPUs this container may use: its cgroup CPU limit, else the CPUs it is allowed on."""
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max", encoding="utf-8").read().split()[:2]
+        if quota != "max":
+            return max(1, int(int(quota) // int(period)))
+    except (OSError, ValueError):
+        pass
+    return max(1, len(os.sched_getaffinity(0)))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Worker entry for incremental similarity calculation and decision making.")
     parser.add_argument("--config", default="/app/config/examples/config-embedding.yaml")
@@ -59,6 +75,8 @@ def main():
     similarity_top_k = get_similarity_top_k(config)
     decision_top_k = get_mutual_top_k(config)
     chunk_size = int(task_config.get("chunk_size", 2048))
+    threads = int(task_config.get("threads") or available_cpus())
+    print(f"[calculating_similarity] scoring threads: {threads}", flush=True)
     min_similarity = decision_config.get("min_similarity")
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     stage = StreamStage("calculating_similarity", io)
@@ -111,6 +129,7 @@ def main():
                 model = EmbeddingModel.load(embedding_path)
             matching_pairs = score_mutual_topk_candidate_pairs(
                 model, candidate_pairs, top_k=similarity_top_k, chunk_size=chunk_size,
+                threads=threads,
             )
             del candidate_pairs
             if matching_pairs:

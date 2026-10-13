@@ -140,6 +140,7 @@ candidate_enumeration: {}
 
 calculating_similarity:
   chunk_size: 2048              # candidate pairs scored per in-memory chunk; 2k-4k stays in CPU cache
+  # threads: 4                  # scoring threads for fullindexing cross blocks; unset = the Pod's CPU limit
   top_k: 1                       # mutual top K pairs kept per record by the similarity stage
 
 decision_making:

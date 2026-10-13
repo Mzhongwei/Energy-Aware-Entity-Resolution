@@ -1,3 +1,6 @@
+import math
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from typing import Dict, Iterable, Iterator, List, Tuple
 
@@ -42,6 +45,10 @@ def _expand_candidate_group(pair) -> Iterator[Tuple[str, List[str]]]:
             yield indexed_id, query_ids
     else:
         yield indexed_ids, query_ids
+
+
+def _is_cross_block(pair) -> bool:
+    return isinstance(pair, (list, tuple)) and len(pair) == 2 and isinstance(pair[0], (list, tuple))
 
 
 def _flatten_candidate_pairs(candidate_pairs: List[Tuple[str, List[str]]]) -> List[CandidatePair]:
@@ -256,6 +263,22 @@ class _CosineScorer:
             raise ValueError("Cannot compute cosine similarity for zero vectors.")
         self.inverse_norms = 1.0 / norms
 
+    def tolerance(self) -> float:
+        """Bound on how far an ``approximate`` score can be from the exact ``__call__`` score.
+
+        Each float32 cosine here is within (d + 3) * 2**-24 of the true value for vectors of
+        dimension d (the dot product's summation plus the norm scalings), whatever the
+        summation order; two such scores of the same pair are within twice that. Doubled
+        again as a safety factor.
+        """
+        return 4.0 * (self.table.shape[1] + 4) * 2.0 ** -24
+
+    def unit_vectors(self, ranks: np.ndarray) -> np.ndarray:
+        """Float32 unit vectors of ``ranks``, rows in the given order."""
+        vectors = self.table[self.rows[ranks]].astype(np.float32, copy=True)
+        vectors *= self.inverse_norms[ranks][:, None]
+        return vectors
+
     def __call__(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
         dots = np.einsum(
             "ij,ij->i",
@@ -263,6 +286,82 @@ class _CosineScorer:
             self.table[self.rows[right]].astype(np.float32, copy=False),
         )
         return dots * self.inverse_norms[left] * self.inverse_norms[right]
+
+
+# Approximate scores held per block and thread (float32); a block is cut to fit this.
+_CROSS_BLOCK_BYTES = 32 * 1024 * 1024
+
+
+def _kth_largest(scores: np.ndarray, k: int, axis: int) -> np.ndarray | None:
+    """The k-th largest score along ``axis``; None when the axis has at most k entries."""
+    size = scores.shape[axis]
+    if size <= k:
+        return None
+    if k == 1:
+        return scores.max(axis=axis)
+    return np.partition(scores, size - k, axis=axis).take(size - k, axis=axis)
+
+
+def _cross_block_rows(left_count: int, right_count: int, threads: int) -> int:
+    budget_rows = max(1, _CROSS_BLOCK_BYTES // (4 * max(1, right_count)))
+    # At least a few blocks per thread, so the pool stays busy on narrow windows.
+    balanced_rows = max(1, math.ceil(left_count / (4 * threads)))
+    return min(budget_rows, balanced_rows)
+
+
+def _score_cross_rows(
+    score: "_CosineScorer", left: np.ndarray, left_units: np.ndarray, right: np.ndarray,
+    right_units: np.ndarray, top_k: int, chunk_size: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Exact scores of the pairs of ``left`` x ``right`` that can reach a top-k on either side.
+
+    A matrix product ranks every pair approximately. A pair outside the slack of the k-th
+    best approximate score of its row and of its column (both within this block) cannot be
+    among the exact top-k of either, ties included, because approximate and exact scores
+    differ by at most ``score.tolerance()``. Only the kept pairs are rescored with the exact
+    kernel, so the top-k states see the same scores as for per-id candidate groups.
+    """
+    approximate = left_units @ right_units.T
+    slack = 2.0 * score.tolerance()
+    keep = None
+    for axis in (1, 0):
+        kth = _kth_largest(approximate, top_k, axis)
+        if kth is None:
+            keep = np.ones(approximate.shape, dtype=bool)
+            break
+        near = approximate >= np.expand_dims(kth - slack, axis)
+        keep = near if keep is None else keep | near
+    del approximate
+    rows, columns = np.nonzero(keep)
+    pair_left, pair_right = left[rows], right[columns]
+    pair_scores = np.empty(len(pair_left), dtype=np.float32)
+    for start in range(0, len(pair_left), chunk_size):
+        stop = start + chunk_size
+        pair_scores[start:stop] = score(pair_left[start:stop], pair_right[start:stop])
+    return pair_left, pair_right, pair_scores
+
+
+def _iter_cross_block_scores(
+    score: "_CosineScorer", left: np.ndarray, right: np.ndarray, top_k: int,
+    chunk_size: int, threads: int,
+) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Scored candidate pairs of the cross block ``left`` x ``right`` (unique ranks)."""
+    left_units = score.unit_vectors(left)
+    right_units = score.unit_vectors(right)
+    rows = _cross_block_rows(len(left), len(right), threads)
+    starts = range(0, len(left), rows)
+
+    def run(start: int):
+        stop = start + rows
+        return _score_cross_rows(
+            score, left[start:stop], left_units[start:stop], right, right_units, top_k, chunk_size,
+        )
+
+    if threads <= 1:
+        yield from map(run, starts)
+        return
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        yield from pool.map(run, starts)
 
 
 class _TopKState:
@@ -316,6 +415,7 @@ def score_mutual_topk_candidate_pairs(
     candidate_pairs: List[Tuple[str, List[str]]],
     top_k: int = 1,
     chunk_size: int = 2048,
+    threads: int = 1,
 ) -> List[ScoredPair]:
     """
     Compute local mutual top-k pairs with unified semantics:
@@ -326,14 +426,28 @@ def score_mutual_topk_candidate_pairs(
     Pairs are scored in chunks of ``chunk_size`` and folded into fixed-size top-k
     state per side, so memory depends on the chunk and on the number of distinct
     ids, not on the number of candidate pairs. Small chunks stay in CPU cache.
+
+    Cross blocks ``([indexed_id, ...], [query_id, ...])`` are ranked by matrix products in
+    row blocks on ``threads`` threads, and only pairs that can reach a top-k are rescored
+    with the same kernel, so the result equals that of the expanded per-id groups.
     """
     top_k = validate_top_k(top_k)
     chunk_size = int(chunk_size)
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than zero.")
+    threads = max(1, int(threads))
+    if not isinstance(candidate_pairs, list):
+        raise ValueError("candidate_pairs must be a list of tuples.")
 
+    blocks = [pair for pair in candidate_pairs if _is_cross_block(pair)]
+    groups = [pair for pair in candidate_pairs if not _is_cross_block(pair)]
     raw_ids = set()
-    for indexed_id, query_ids in _iter_candidate_groups(candidate_pairs):
+    for indexed_ids, query_ids in blocks:
+        _expand_candidate_group((indexed_ids, query_ids))  # validates the item
+        if indexed_ids and query_ids:
+            raw_ids.update(indexed_ids)
+            raw_ids.update([query_ids] if isinstance(query_ids, str) else query_ids)
+    for indexed_id, query_ids in _iter_candidate_groups(groups):
         if query_ids:
             raw_ids.add(indexed_id)
             raw_ids.update(query_ids)
@@ -348,10 +462,23 @@ def score_mutual_topk_candidate_pairs(
     top_for_indexed = _TopKState(len(ids), top_k)
     top_for_query = _TopKState(len(ids), top_k)
 
-    for left, right in _iter_rank_chunks(candidate_pairs, rank, chunk_size):
+    for left, right in _iter_rank_chunks(groups, rank, chunk_size):
         scores = score(left, right)
         top_for_indexed.update(left, right, scores)
         top_for_query.update(right, left, scores)
+    for indexed_ids, query_ids in blocks:
+        if isinstance(query_ids, str):
+            query_ids = [query_ids]
+        if not indexed_ids or not query_ids:
+            continue
+        # Unique ranks: a repeated id would fill a k-th best slot twice.
+        left = np.unique(np.fromiter(map(rank.__getitem__, indexed_ids), dtype=np.int64))
+        right = np.unique(np.fromiter(map(rank.__getitem__, query_ids), dtype=np.int64))
+        for pair_left, pair_right, scores in _iter_cross_block_scores(
+            score, left, right, top_k, chunk_size, threads,
+        ):
+            top_for_indexed.update(pair_left, pair_right, scores)
+            top_for_query.update(pair_right, pair_left, scores)
 
     indexed, slot = np.nonzero(top_for_indexed.partners >= 0)
     query = top_for_indexed.partners[indexed, slot]
