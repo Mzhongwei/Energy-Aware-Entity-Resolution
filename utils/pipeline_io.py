@@ -343,9 +343,22 @@ MODEL_PATH_KEYS = {
 
 
 def is_bert_matching_enabled(config: dict) -> bool:
-    """Whether BERT judges the embedding decision's pairs before evaluation."""
+    """Whether BERT judges the candidate pairs before evaluation."""
     section = config.get("bert_matching") if isinstance(config, dict) else None
     return isinstance(section, dict) and section.get("enabled") is True
+
+
+def is_decision_making_enabled(config: dict) -> bool:
+    """Whether the embedding decision (``decision_making.enabled``, default true) runs.
+
+    Decision making and BERT matching are the two final matching steps. Without the decision,
+    BERT must be enabled: it judges each window's mutual top-k pairs directly.
+    """
+    section = config.get("decision_making") if isinstance(config, dict) else None
+    enabled = not (isinstance(section, dict) and section.get("enabled") is False)
+    if not enabled and not is_bert_matching_enabled(config):
+        raise ValueError("decision_making.enabled: false requires bert_matching.enabled: true")
+    return enabled
 
 
 def get_transfer_data_directory(workload: str, data_type: str) -> str:

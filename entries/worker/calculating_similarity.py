@@ -13,6 +13,7 @@ from utils.pipeline_io import (
     acknowledge_window_checkpoint,
     get_buffer_directory,
     get_model_directory,
+    is_decision_making_enabled,
     is_window_checkpoint_acknowledged,
     load_checkpoint_reference,
     load_config,
@@ -27,7 +28,9 @@ from pipeline.calculating_similarity import (
     score_mutual_topk_candidate_pairs,
 )
 from pipeline.decision_making import decide_matches, expand_matches
-from utils.utils import load_scored_pairs, serialize_scored_pairs, write_bytes_atomically
+from utils.utils import (
+    load_scored_pairs, orient_record_pair, serialize_scored_pairs, write_bytes_atomically,
+)
 
 """
 task: similarity calculation + decision making
@@ -41,6 +44,8 @@ overwritten so it always reflects the most recent decision (for external inspect
 restarts), and as a per-window snapshot referenced in the buffer event, so evaluation --
 which may run concurrently -- evaluates the exact matches produced for that window.
 Acknowledging the checkpoint lets embedding training move on to the next window.
+With decision_making.enabled: false (BERT matching on), the decision is skipped: each window's
+snapshot holds only that window's mutual top-k pairs, which BERT matching judges directly.
 """
 
 INPUT_DATA_TYPE = "candidate_pairs"
@@ -90,9 +95,13 @@ def main():
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
     os.makedirs(os.path.dirname(predicted_match_path), exist_ok=True)
 
+    # Without the decision, each window's mutual top-k pairs go to BERT matching as they are:
+    # nothing accumulates here, and later windows cannot displace earlier candidates.
+    decision_enabled = is_decision_making_enabled(config)
+    print(f"[calculating_similarity] decision making: {'on' if decision_enabled else 'off'}", flush=True)
     previous_pairs = (
         load_scored_pairs(config, predicted_match_path)
-        if os.path.isfile(predicted_match_path)
+        if decision_enabled and os.path.isfile(predicted_match_path)
         else None
     )
     if previous_pairs:
@@ -141,18 +150,27 @@ def main():
             )
             del candidate_pairs
             if matching_pairs:
-                previous_pairs = decide_matches(
-                    matching_pairs, previous_pairs, model,
-                    top_k=decision_top_k, min_similarity=min_similarity, chunk_size=chunk_size,
-                )
-                matches = expand_matches(config, previous_pairs, decision_top_k)
+                if decision_enabled:
+                    previous_pairs = decide_matches(
+                        matching_pairs, previous_pairs, model,
+                        top_k=decision_top_k, min_similarity=min_similarity, chunk_size=chunk_size,
+                    )
+                    matches = expand_matches(config, previous_pairs, decision_top_k)
+                    pair_count = len(previous_pairs)
+                else:
+                    matches = sorted(
+                        (*orient_record_pair(config, indexed_id, query_id), score)
+                        for indexed_id, query_id, score in matching_pairs
+                    )
+                    pair_count = len(matches)
                 data = serialize_scored_pairs(matches)
-                write_bytes_atomically(predicted_match_path, data)
+                if decision_enabled:
+                    write_bytes_atomically(predicted_match_path, data)
                 snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
                 with transferring("write", "match_snapshot") as transfer:
                     write_bytes_atomically(snapshot_path, data)
                     transfer.path = snapshot_path
-                stage.send(window_index, {"pair_count": len(previous_pairs), "predicted_match_path": snapshot_path})
+                stage.send(window_index, {"pair_count": pair_count, "predicted_match_path": snapshot_path})
                 del matches, data
             del model, matching_pairs
         release_checkpoint(window_index)

@@ -144,12 +144,20 @@ calculating_similarity:
   embedding_mmap: true          # memory-map the embedding checkpoint; false reads it whole
   top_k: 1                       # mutual top K pairs kept per record by the similarity stage
 
+# Final matching: decision making and BERT matching are two parallel steps after the
+# similarity stage, each usable alone or together:
+#   decision on,  BERT off: the embedding decision is the matcher.
+#   decision on,  BERT on:  BERT filters the decision (the decision acts as blocking).
+#   decision off, BERT on:  BERT judges each window's mutual top-k pairs directly and keeps
+#                           every pair it accepts; no later window displaces them.
+# decision off requires BERT on.
 decision_making:
+  enabled: true                  # global mutual top-k over all windows, rescored each window
   top_k: 1                       # mutual top K matches to keep for each record
 
-# Embedding decision as blocking, BERT as matcher: when enabled, the batch workflow also
-# trains BERT on trainset_path/evalset_path, and an incremental bert-matching stage keeps
-# only the decision's pairs BERT classifies as matches before evaluation.
+# BERT matching: when enabled, the batch workflow also trains BERT on
+# trainset_path/evalset_path, and an incremental bert-matching stage keeps only the pairs
+# BERT classifies as matches before evaluation (see decision_making for its input).
 bert_matching:
   enabled: false
   threshold: 0.5                 # minimum BERT match probability to keep a pair

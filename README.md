@@ -28,7 +28,7 @@ The active mode is read from the runtime config and determines which pipeline br
 ### Embedding
 
 - `embedding-training` - normalization -> graph construction -> random walk -> embedding training -> CG feature extraction -> feature index construction.
-- `embedding-inference` - normalization -> graph construction -> random walk -> embedding training -> CG feature extraction -> feature index construction -> candidate enumeration -> similarity -> decision making.
+- `embedding-inference` - normalization -> graph construction -> random walk -> embedding training -> CG feature extraction -> feature index construction -> candidate enumeration -> similarity -> decision making and/or BERT matching (see [Final matching](#final-matching-decision-making-and-bert-matching)).
 - `embedding-evaluation` - evaluation on top of an already loaded state.
 
 ### BERT
@@ -71,12 +71,27 @@ use `workers: 1` when exact repeatability is more important than throughput. Che
 created by the removed PyTorch implementation are intentionally rejected and must be
 retrained.
 
-### Optional BERT matching after the embedding decision
+### Final matching: decision making and BERT matching
 
-With `bert_matching.enabled: true`, the embedding pipeline acts as blocking and BERT as the
-matcher: decision making still emits its mutual top-k pairs, and a `bert-matching` worker
-keeps only the pairs a trained BERT classifier accepts (`bert_matching.threshold`) before
-evaluation. Each distinct pair is judged once; pair scores in the output stay the embedding
+After the similarity stage selects each window's mutual top-k pairs
+(`calculating_similarity.top_k`), two parallel final matching steps can turn them into
+matches. Each can run alone, or the decision can feed BERT:
+
+| `decision_making.enabled` | `bert_matching.enabled` | Final matches |
+|---|---|---|
+| `true` (default) | `false` | The embedding decision: every window's pairs are merged with the previous decision, rescored with the current model, and reduced to a global mutual top-k (`decision_making.top_k`). |
+| `true` | `true` | BERT filters the decision, which acts as blocking. A later window can displace an earlier pair from the decision, and then from the output too. |
+| `false` | `true` | BERT judges each window's mutual top-k pairs directly and keeps every pair it accepts. Nothing displaces an accepted pair and no top-k applies to the output. |
+| `false` | `false` | Rejected: there would be no final matching. |
+
+With many non-matching records in the stream, the global decision lets later distractors push
+true pairs out before BERT can keep them; skipping the decision avoids that, at the cost of
+BERT judging every window's candidates.
+
+With `bert_matching.enabled: true`, a `bert-matching` worker keeps only the pairs a trained BERT
+classifier accepts (`bert_matching.threshold`) before evaluation. After the decision, each
+distinct pair is judged once and its probability reused in later windows; without it, each
+window's pairs are judged once and not cached. Pair scores in the output stay the embedding
 similarities. The same switch makes the batch workflow train BERT on
 `trainset_path`/`evalset_path` alongside the embedding stages (the model goes to
 `state_management.bert-dir`), and makes normalization store each record's BERT text under

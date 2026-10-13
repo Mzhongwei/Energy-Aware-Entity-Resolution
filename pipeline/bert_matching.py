@@ -54,20 +54,24 @@ class BertMatcher:
         self.records = records
         self.probabilities: Dict[Tuple[str, str], float] = {}
 
-    def filter_pairs(self, pairs: List[ScoredPair]) -> List[ScoredPair]:
+    def filter_pairs(self, pairs: List[ScoredPair], remember: bool = True) -> List[ScoredPair]:
+        """Keep the pairs BERT classifies as matches. ``remember`` caches each judgement for
+        pairs that come back in later windows (the cumulative decision); pairs judged once
+        and never again (window candidates) need no cache."""
         started = time.perf_counter()
+        probabilities = self.probabilities if remember else {}
         unseen = list(dict.fromkeys((str(left), str(right)) for left, right, _ in pairs
-                                    if (str(left), str(right)) not in self.probabilities))
+                                    if (str(left), str(right)) not in probabilities))
         if unseen:
             texts = self.records.get_many({rid for pair in unseen for rid in pair})
-            probabilities = self.service.predict_batch(
+            judged = self.service.predict_batch(
                 [texts[left] for left, _ in unseen],
                 [texts[right] for _, right in unseen],
                 batch_size=self.batch_size,
             )
-            self.probabilities.update(zip(unseen, probabilities))
+            probabilities.update(zip(unseen, judged))
         accepted = [(str(left), str(right), float(score)) for left, right, score in pairs
-                    if self.probabilities[(str(left), str(right))] >= self.threshold]
+                    if probabilities[(str(left), str(right))] >= self.threshold]
         print(f"[bert_matching] pairs={len(pairs)} judged={len(unseen)} accepted={len(accepted)} "
               f"seconds={time.perf_counter() - started:.6f}", flush=True)
         return accepted
