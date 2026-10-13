@@ -1,8 +1,10 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 
+import numpy as np
 import yaml
 
 from models.embedding_model import EmbeddingModel
@@ -69,6 +71,92 @@ class GensimEmbeddingTests(unittest.TestCase):
         self.config["embeddings_training"]["max_checkpoint_leed"] = 2
         with self.assertRaisesRegex(ValueError, "Unknown embeddings_training keys.*max_checkpoint_leed"):
             initialize_embeddings(self.config)
+
+    # Three windows of walks over a vocabulary that grows each window, large enough that
+    # training really moves the weights (Gensim's downsampling is off for these tests).
+    WINDOWS = tuple(
+        [
+            [f"t{(start * 7 + step * 3) % (20 + 10 * window)}" for step in range(12)]
+            for start in range(40 * window, 40 * window + 40)
+        ]
+        for window in range(3)
+    )
+
+    def fresh_model(self):
+        self.config["embeddings_training"]["sampling_factor"] = 0
+        return initialize_embeddings(self.config)
+
+    def train_windows(self, model, windows):
+        for sequences in windows:
+            model = train_embeddings(self.config, model, sequences)
+        return model
+
+    def test_checkpoint_arrays_are_separate_and_memory_mappable(self):
+        model = self.train_windows(self.fresh_model(), self.WINDOWS)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "embedding.emb")
+            model.save(path)
+            arrays = sorted(name for name in os.listdir(directory) if name.endswith(".npy"))
+            self.assertIn("embedding.emb.wv.vectors.npy", arrays)
+            self.assertIn("embedding.emb.syn1neg.npy", arrays)
+            self.assertFalse([name for name in os.listdir(directory) if name.endswith(".tmp")])
+
+            full = EmbeddingModel.load(path)
+            mapped = EmbeddingModel.load(path, mmap="r")
+            self.assertIsInstance(mapped.wv.vectors, np.memmap)
+            self.assertFalse(mapped.wv.vectors.flags.writeable)
+            self.assertEqual(mapped.wv.key_to_index, model.wv.key_to_index)
+            self.assertGreater(len(model.wv.key_to_index), 30)
+            np.testing.assert_array_equal(np.asarray(mapped.wv.vectors), model.wv.vectors)
+            np.testing.assert_array_equal(full.wv.vectors, model.wv.vectors)
+            np.testing.assert_array_equal(full.syn1neg, model.syn1neg)
+
+    def test_resume_from_checkpoint_trains_exactly_like_an_uninterrupted_run(self):
+        uninterrupted = self.train_windows(self.fresh_model(), self.WINDOWS)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "embedding.emb")
+            self.train_windows(self.fresh_model(), self.WINDOWS[:2]).save(path)
+            resumed = self.train_windows(EmbeddingModel.load(path), self.WINDOWS[2:])
+        self.assertGreater(float(np.abs(uninterrupted.syn1neg).sum()), 0.0)  # training happened
+        self.assertEqual(resumed.train_calls, uninterrupted.train_calls)
+        self.assertEqual(resumed.wv.key_to_index, uninterrupted.wv.key_to_index)
+        np.testing.assert_array_equal(resumed.wv.vectors, uninterrupted.wv.vectors)
+        np.testing.assert_array_equal(resumed.syn1neg, uninterrupted.syn1neg)
+
+    def test_overwrite_drops_arrays_of_the_previous_save(self):
+        model = self.train_windows(self.fresh_model(), self.WINDOWS)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "embedding.emb")
+            model.save(path)
+            Path(f"{path}.old_attribute.npy").write_bytes(b"stale")
+            model.save(path)
+            self.assertFalse(os.path.exists(f"{path}.old_attribute.npy"))
+            np.testing.assert_array_equal(EmbeddingModel.load(path).wv.vectors, model.wv.vectors)
+
+    def test_single_file_checkpoints_still_load(self):
+        model = self.train_windows(self.fresh_model(), self.WINDOWS)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "embedding.emb")
+            with open(path, "wb") as stream:  # the former format: all arrays in the pickle
+                model.model.save(stream)
+            for mmap in (None, "r"):
+                np.testing.assert_array_equal(
+                    EmbeddingModel.load(path, mmap=mmap).wv.vectors, model.wv.vectors,
+                )
+
+    def test_memory_mapped_model_scores_like_a_full_load(self):
+        from pipeline.calculating_similarity import score_mutual_topk_candidate_pairs
+
+        model = self.train_windows(self.fresh_model(), self.WINDOWS)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "embedding.emb")
+            model.save(path)
+            pairs = [(["t1", "t2", "t3", "t4"], ["t21", "t22", "t25"]), ("t5", ["t30", "t31"])]
+            for top_k in (1, 2):
+                self.assertEqual(
+                    score_mutual_topk_candidate_pairs(EmbeddingModel.load(path, mmap="r"), pairs, top_k=top_k),
+                    score_mutual_topk_candidate_pairs(EmbeddingModel.load(path), pairs, top_k=top_k),
+                )
 
 
 if __name__ == "__main__":

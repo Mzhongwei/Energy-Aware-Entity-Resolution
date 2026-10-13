@@ -77,6 +77,9 @@ def main():
     chunk_size = int(task_config.get("chunk_size", 2048))
     threads = int(task_config.get("threads") or available_cpus())
     print(f"[calculating_similarity] scoring threads: {threads}", flush=True)
+    # Scoring reads only the vectors of the window's ids and of the previous decision, so the
+    # checkpoint's arrays are memory-mapped by default and only those rows leave the disk.
+    embedding_mmap = "r" if task_config.get("embedding_mmap", True) else None
     min_similarity = decision_config.get("min_similarity")
     io = BufferIO(args.workload, INPUT_DATA_TYPE, OUTPUT_DATA_TYPE, config)
     stage = StreamStage("calculating_similarity", io)
@@ -125,8 +128,13 @@ def main():
         if candidate_pairs:
             embedding_path = load_checkpoint_reference(reference_path)["checkpoint_path"]
             with transferring("read", "embedding") as transfer:
-                transfer.path = os.path.dirname(embedding_path)
-                model = EmbeddingModel.load(embedding_path)
+                model = EmbeddingModel.load(embedding_path, mmap=embedding_mmap)
+                if embedding_mmap:
+                    # Mapped arrays are read lazily: the open reads the pickle, page faults
+                    # land in compute (embedding_mmap: false measures the full read).
+                    transfer.bytes = os.path.getsize(embedding_path)
+                else:
+                    transfer.path = os.path.dirname(embedding_path)
             matching_pairs = score_mutual_topk_candidate_pairs(
                 model, candidate_pairs, top_k=similarity_top_k, chunk_size=chunk_size,
                 threads=threads,

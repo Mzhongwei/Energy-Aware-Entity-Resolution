@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import shutil
+import tempfile
 
 from gensim.models import Doc2Vec, FastText, Word2Vec
 
@@ -129,29 +131,47 @@ class EmbeddingModel:
         }
 
     def save(self, path):
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
+        """Save the full, trainable model: a pickle at ``path`` and every NumPy array beside
+        it as ``<path>.<attribute>.npy``, so a reader can memory-map the arrays
+        (``load(path, mmap="r")``) instead of reading them whole.
 
-        temporary = f"{path}.{os.getpid()}.tmp"
-        metadata_temporary = f"{temporary}.meta.json"
+        Files are staged in a temporary directory and renamed into place with the pickle
+        last, so the pickle only ever names arrays of its own save. Pipeline checkpoints go
+        to a fresh directory published by one rename; an in-place overwrite of ``path``
+        assumes no concurrent reader, as before.
+        """
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        name = os.path.basename(path)
+        staging = tempfile.mkdtemp(prefix=f".{name}.", suffix=".tmp", dir=directory)
         try:
-            # A file handle forces all Gensim arrays into one file, which lets the
-            # pipeline publish a complete checkpoint via one directory rename.
-            with open(temporary, "wb") as model_file:
-                self.model.save(model_file)
-            with open(metadata_temporary, "w", encoding="utf-8") as stream:
+            staged = os.path.join(staging, name)
+            # sep_limit=0: every array goes to its own .npy, whatever its size.
+            self.model.save(staged, sep_limit=0)
+            with open(f"{staged}.meta.json", "w", encoding="utf-8") as stream:
                 json.dump(self.config_dict(), stream, ensure_ascii=False, indent=2)
-            os.replace(metadata_temporary, f"{path}.meta.json")
-            os.replace(temporary, path)
-        except Exception:
-            for candidate in (temporary, metadata_temporary):
-                if os.path.exists(candidate):
-                    os.remove(candidate)
-            raise
+            arrays = sorted(entry for entry in os.listdir(staging) if entry.endswith(".npy"))
+            stale = [
+                entry for entry in os.listdir(directory)
+                if entry.startswith(f"{name}.") and entry.endswith(".npy") and entry not in arrays
+            ]
+            for entry in arrays:
+                os.replace(os.path.join(staging, entry), os.path.join(directory, entry))
+            os.replace(f"{staged}.meta.json", f"{path}.meta.json")
+            os.replace(staged, path)
+            for entry in stale:
+                os.remove(os.path.join(directory, entry))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, mmap=None):
+        """Load a model saved by ``save``, or an older single-file one.
+
+        ``mmap="r"`` memory-maps the saved arrays read-only: only the rows a reader touches
+        are read from disk. Such a model can be scored but not trained; training needs the
+        default full load.
+        """
         metadata_path = f"{path}.meta.json"
         metadata = {}
         if os.path.isfile(metadata_path):
@@ -174,7 +194,7 @@ class EmbeddingModel:
         training_algorithm = None
         for algorithm in algorithms:
             try:
-                model = cls.MODEL_MAP[algorithm].load(path)
+                model = cls.MODEL_MAP[algorithm].load(path, mmap=mmap)
                 training_algorithm = algorithm
                 break
             except Exception:
