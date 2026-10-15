@@ -167,6 +167,12 @@ bert_matching:
   # cpus: 2                      # CPU cores of the matching Pod (request = limit) and torch
                                  # threads; unset keeps the manifest's 1-2 cores, default threads
   max_text_chars: 4096           # cap on stored record text
+  # With decision_making off, the output is selected among all accepted pairs, greedily by
+  # BERT probability, keeping at most this many matches per left (A) / right (B) record;
+  # null is unlimited. 1/1: one-to-one (clean-clean); 1/null: each A matches one B, a B may
+  # match several A (retrieval-extrait: dirty A, clean B); null/null: keep every pair.
+  max_matches_per_left: null
+  max_matches_per_right: null
 
 bert_training:
   device: auto                   # auto / cuda / cpu; benchmark configs set this explicitly

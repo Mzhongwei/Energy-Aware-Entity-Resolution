@@ -5,7 +5,10 @@ import sys
 from utils.pipeline_io import (
     BufferIO, StreamStage, get_model_directory, is_decision_making_enabled, load_config, transferring,
 )
-from pipeline.bert_matching import BertMatcher
+from pipeline.bert_matching import (
+    BertMatcher, bert_matching_config, load_judged_pairs, match_capacity, select_matches,
+    serialize_judged_pairs,
+)
 from pipeline.calculating_similarity import get_mutual_top_k
 from pipeline.decision_making import expand_matches
 from utils.utils import load_scored_pairs, serialize_scored_pairs, write_bytes_atomically
@@ -19,7 +22,10 @@ output: decision event with BERT-filtered snapshot, triggering evaluation [buffe
 description: BERT keeps only the pairs it classifies as matches. After the embedding decision,
 it filters the decision (each distinct pair judged once, its probability reused in later
 windows). Without the decision, BERT is the matcher: it judges each window's candidates once
-and its output is every pair accepted so far, which no later window can displace.
+and keeps every accepted pair with its probability (bert_matching_accepted.csv); its output
+is the selection among all pairs accepted so far under bert_matching.max_matches_per_left /
+max_matches_per_right (pipeline.bert_matching.select_matches), so a later, more probable
+pair can displace an earlier one.
 Record texts come from the record store written by normalization. Like decision making, it
 overwrites a fixed CSV for inspection and hands evaluation a per-window snapshot, then
 deletes the decision snapshot it consumed.
@@ -28,6 +34,7 @@ deletes the decision snapshot it consumed.
 INPUT_DATA_TYPE = "predicted_matching"
 OUTPUT_DATA_TYPE = "bert_matching"
 PREDICTED_MATCH_FILE_NAME = "bert_matching.csv"
+ACCEPTED_FILE_NAME = "bert_matching_accepted.csv"
 SNAPSHOT_FILE_NAME_TEMPLATE = "bert_matching_window_{window_index}.csv"
 
 
@@ -54,13 +61,22 @@ def main():
     predicted_match_path = os.path.join(get_model_directory(config, "predicted_match"), PREDICTED_MATCH_FILE_NAME)
     os.makedirs(os.path.dirname(predicted_match_path), exist_ok=True)
     decision_enabled = is_decision_making_enabled(config)
-    # Without the decision: every pair accepted so far, restored after a restart.
+    max_left, max_right = match_capacity(bert_matching_config(config))
+    accepted_path = os.path.join(os.path.dirname(predicted_match_path), ACCEPTED_FILE_NAME)
+    # Without the decision: every pair accepted so far, with its BERT probability, restored
+    # after a restart. An older output without probabilities restores them as 1.0.
     accepted_pairs = {}
-    if not decision_enabled and os.path.isfile(predicted_match_path):
-        accepted_pairs = {
-            (left, right): score for left, right, score in load_scored_pairs(config, predicted_match_path)
-        }
+    if not decision_enabled and os.path.isfile(accepted_path):
+        accepted_pairs = {(left, right): (score, probability)
+                          for left, right, score, probability in load_judged_pairs(accepted_path)}
+    elif not decision_enabled and os.path.isfile(predicted_match_path):
+        accepted_pairs = {(left, right): (score, 1.0)
+                          for left, right, score in load_scored_pairs(config, predicted_match_path)}
+    if accepted_pairs:
         print(f"[bert_matching] restored {len(accepted_pairs)} accepted pairs", flush=True)
+    if not decision_enabled:
+        print(f"[bert_matching] matches per left/right record: {max_left or 'any'}/{max_right or 'any'}",
+              flush=True)
 
     def process(window):
         decision_event = window.take()
@@ -76,9 +92,14 @@ def main():
             accepted = matcher.filter_pairs(scored_pairs)
             output = expand_matches(config, accepted, top_k)
         else:
-            for left, right, score in matcher.filter_pairs(scored_pairs, remember=False):
-                accepted_pairs[(left, right)] = score
-            accepted = output = sorted((left, right, score) for (left, right), score in accepted_pairs.items())
+            for left, right, score, probability in matcher.judge(scored_pairs, remember=False):
+                accepted_pairs[(left, right)] = (score, probability)
+            judged = [(left, right, score, probability)
+                      for (left, right), (score, probability) in accepted_pairs.items()]
+            write_bytes_atomically(accepted_path, serialize_judged_pairs(sorted(judged)))
+            accepted = output = sorted(
+                (left, right, score) for left, right, score, _ in select_matches(judged, max_left, max_right)
+            )
         data = serialize_scored_pairs(output)
         write_bytes_atomically(predicted_match_path, data)
         snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window.index))
