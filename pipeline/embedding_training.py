@@ -169,7 +169,7 @@ _MODEL_ARGUMENTS = {
     "shrink_windows": "shrink_windows",
 }
 # Stage controls are valid configuration, but are not Gensim constructor arguments.
-_STAGE_KEYS = {"inc_epochs", "max_checkpoint_lead"}
+_STAGE_KEYS = {"inc_epochs", "max_checkpoint_lead", "workers_schedule"}
 _PYTORCH_KEYS = {
     "batch_size", "device", "dynamic_window", "framework", "learning_rate",
     "min_learning_rate", "optimizer", "pair_chunk_tokens", "pair_generation",
@@ -214,6 +214,47 @@ def retrain_embeddings(config, model, sequences):
 train_embeddings = retrain_embeddings
 
 
+def scheduled_workers(config, window_ordinal: int):
+    """Gensim workers for a window under embeddings_training.workers_schedule (a list cycled
+    over window ordinals, for measuring several worker counts in one run); None without one."""
+    schedule = _embedding_config(config).get("workers_schedule")
+    if not schedule:
+        return None
+    workers = int(list(schedule)[window_ordinal % len(schedule)])
+    if workers < 1:
+        raise ValueError("embeddings_training.workers_schedule entries must be at least 1")
+    return workers
+
+
+def set_workers(model, workers: int) -> None:
+    model.workers = int(workers)
+    model.model.workers = int(workers)
+
+
+def save_replay_snapshot(model, config, sequence_payload, target: str) -> bool:
+    """Keep what a replay of one window needs (exp/replay_stage.py): the model before the
+    window, the window's walks, and the configuration. Returns False if already complete."""
+    import shutil
+
+    if os.path.isfile(os.path.join(target, ".complete")):
+        return False
+    shutil.rmtree(target, ignore_errors=True)
+    os.makedirs(target)
+    model.save(os.path.join(target, "model", "embedding.emb"))
+    manifest = sequence_payload
+    if is_walk_shard_manifest(sequence_payload):
+        walks = os.path.join(target, "walks")
+        shutil.copytree(sequence_payload["directory"], walks)
+        manifest = dict(sequence_payload, directory=walks)
+    with open(os.path.join(target, "walks.json"), "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream)
+    with open(os.path.join(target, "config.json"), "w", encoding="utf-8") as stream:
+        json.dump(config, stream, default=str)
+    with open(os.path.join(target, ".complete"), "w", encoding="utf-8"):
+        pass
+    return True
+
+
 def trained_model_path(config) -> str:
     """The batch-trained model: saved by batch embedding training, loaded by incremental
     embedding training as its starting model."""
@@ -248,4 +289,7 @@ __all__ = [
     "retrain_embeddings",
     "train_embeddings",
     "load_or_create_model",
+    "save_replay_snapshot",
+    "scheduled_workers",
+    "set_workers",
 ]

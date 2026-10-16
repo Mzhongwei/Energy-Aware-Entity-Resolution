@@ -1,5 +1,6 @@
 import argparse
 import os
+import shutil
 
 # Cross blocks are scored on a thread pool, one matrix product per thread; a multi-threaded
 # BLAS inside each would oversubscribe the Pod's CPUs. Must be set before numpy loads.
@@ -23,9 +24,11 @@ from utils.pipeline_io import (
 )
 from models.embedding_model import EmbeddingModel
 from pipeline.calculating_similarity import (
+    RunningBest,
     get_mutual_top_k,
     get_similarity_top_k,
     score_mutual_topk_candidate_pairs,
+    score_running_best_candidate_pairs,
 )
 from pipeline.decision_making import decide_matches, expand_matches
 from utils.utils import (
@@ -45,7 +48,10 @@ restarts), and as a per-window snapshot referenced in the buffer event, so evalu
 which may run concurrently -- evaluates the exact matches produced for that window.
 Acknowledging the checkpoint lets embedding training move on to the next window.
 With decision_making.enabled: false (BERT matching on), the decision is skipped: each window's
-snapshot holds only that window's mutual top-k pairs, which BERT matching judges directly.
+snapshot holds only that window's candidate pairs, which BERT matching judges directly. They are
+the window's mutual top-k pairs, or with calculating_similarity.candidate_rule: running_best the
+pairs whose query record enters the indexed record's k best so far (state persisted per window,
+see pipeline.calculating_similarity.RunningBest).
 """
 
 INPUT_DATA_TYPE = "candidate_pairs"
@@ -54,6 +60,7 @@ OUTPUT_DATA_TYPE = "predicted_matching"
 TASK_CONFIG_KEY = "calculating_similarity"
 DECISION_CONFIG_KEY = "decision_making"
 PREDICTED_MATCH_FILE_NAME = "predicted_matching.csv"
+RUNNING_BEST_FILE_NAME = "running_best.npz"
 SNAPSHOT_FILE_NAME_TEMPLATE = "predicted_matching_window_{window_index}.csv"
 
 
@@ -99,6 +106,25 @@ def main():
     # nothing accumulates here, and later windows cannot displace earlier candidates.
     decision_enabled = is_decision_making_enabled(config)
     print(f"[calculating_similarity] decision making: {'on' if decision_enabled else 'off'}", flush=True)
+    candidate_rule = str(task_config.get("candidate_rule", "mutual_topk"))
+    if candidate_rule not in {"mutual_topk", "running_best"}:
+        raise ValueError("calculating_similarity.candidate_rule must be mutual_topk or running_best")
+    if candidate_rule == "running_best" and decision_enabled:
+        raise ValueError("candidate_rule: running_best needs decision_making.enabled: false")
+    running_best = None
+    running_best_path = os.path.join(os.path.dirname(predicted_match_path), RUNNING_BEST_FILE_NAME)
+    if candidate_rule == "running_best":
+        running_best = RunningBest.load(running_best_path, int(task_config.get("running_best_k", 2)))
+        min_candidate_similarity = task_config.get("min_similarity")
+        query_top_k = int(task_config.get("query_top_k", 0) or 0)
+        pairs_per_window = task_config.get("pairs_per_window")
+        print(f"[calculating_similarity] candidates: running best k={running_best.k}, "
+              f"min_similarity={min_candidate_similarity}, query_top_k={query_top_k}, "
+              f"pairs_per_window={pairs_per_window}; restored {len(running_best.ids)} records", flush=True)
+    # Windows (ordinals) whose candidate pairs are kept for replay experiments.
+    window_count = int((config.get("kafka") or {}).get("window_count") or 0)
+    replay_windows = {int(w) for w in ((config.get("replay") or {}).get("snapshot_windows") or [])}
+    replay_dir = os.path.join(os.path.dirname(predicted_match_path), "replay")
     previous_pairs = (
         load_scored_pairs(config, predicted_match_path)
         if decision_enabled and os.path.isfile(predicted_match_path)
@@ -144,10 +170,18 @@ def main():
                     transfer.bytes = os.path.getsize(embedding_path)
                 else:
                     transfer.path = os.path.dirname(embedding_path)
-            matching_pairs = score_mutual_topk_candidate_pairs(
-                model, candidate_pairs, top_k=similarity_top_k, chunk_size=chunk_size,
-                threads=threads,
-            )
+            if running_best is not None:
+                matching_pairs = score_running_best_candidate_pairs(
+                    model, candidate_pairs, running_best, window=window_index,
+                    min_similarity=min_candidate_similarity, query_top_k=query_top_k,
+                    max_pairs=pairs_per_window, chunk_size=chunk_size, threads=threads,
+                )
+                running_best.save(running_best_path)
+            else:
+                matching_pairs = score_mutual_topk_candidate_pairs(
+                    model, candidate_pairs, top_k=similarity_top_k, chunk_size=chunk_size,
+                    threads=threads,
+                )
             del candidate_pairs
             if matching_pairs:
                 if decision_enabled:
@@ -170,6 +204,11 @@ def main():
                 with transferring("write", "match_snapshot") as transfer:
                     write_bytes_atomically(snapshot_path, data)
                     transfer.path = snapshot_path
+                if window_count and window_index // window_count in replay_windows:
+                    with waiting():  # experiment-only copy, not part of the stage's work
+                        os.makedirs(replay_dir, exist_ok=True)
+                        shutil.copyfile(snapshot_path, os.path.join(
+                            replay_dir, f"candidates_w{window_index // window_count}.csv"))
                 stage.send(window_index, {"pair_count": pair_count, "predicted_match_path": snapshot_path})
                 del matches, data
             del model, matching_pairs

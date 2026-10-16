@@ -15,12 +15,16 @@ from utils.pipeline_io import (
     wait_for_checkpoint_lead,
     write_buffer,
     transferring,
+    waiting,
     write_checkpoint_reference,
 )
 from pipeline.embedding_training import (
     cleanup_walk_shards,
     load_or_create_model,
     open_walk_sequences,
+    save_replay_snapshot,
+    scheduled_workers,
+    set_workers,
     train_embeddings,
     trained_model_path,
 )
@@ -65,6 +69,9 @@ def main():
         prune_window_checkpoints(checkpoint_dir, checkpoint_window)
 
     max_checkpoint_lead = get_max_checkpoint_lead(config, "embeddings_training")
+    window_count = int((config.get("kafka") or {}).get("window_count") or 0)
+    replay_windows = {int(w) for w in ((config.get("replay") or {}).get("snapshot_windows") or [])}
+    replay_root = os.path.join(os.path.dirname(model_path), "replay")
 
     def wait_for_checkpoint_lead_slot():
         # Published snapshots are immutable and pruned only once acknowledged, so this stage
@@ -94,6 +101,16 @@ def main():
             prune_window_checkpoints(checkpoint_dir, checkpoint_window)
             return
 
+        ordinal = window_index // window_count if window_count else None
+        if ordinal is not None and ordinal in replay_windows:
+            with waiting():  # experiment-only copy, not part of the stage's work
+                target = os.path.join(replay_root, f"w{ordinal}")
+                if save_replay_snapshot(model, config, sequence_payload, target):
+                    print(f"[embedding_training] replay snapshot of window {ordinal} saved to {target}", flush=True)
+        workers = scheduled_workers(config, ordinal) if ordinal is not None else None
+        if workers is not None:
+            set_workers(model, workers)
+            print(f"[embedding_training] window {window_index}: {workers} workers", flush=True)
         sequences = open_walk_sequences(sequence_payload)
         model = train_embeddings(config, model, sequences)
         del sequences

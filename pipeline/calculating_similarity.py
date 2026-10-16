@@ -1,4 +1,6 @@
 import math
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -410,26 +412,14 @@ class _TopKState:
         self.partners[nodes[better], 0] = partners[better]
 
 
-def score_mutual_topk_candidate_pairs(
-    model,
-    candidate_pairs: List[Tuple[str, List[str]]],
-    top_k: int = 1,
-    chunk_size: int = 2048,
-    threads: int = 1,
-) -> List[ScoredPair]:
-    """
-    Compute local mutual top-k pairs with unified semantics:
+def _window_top_k(model, candidate_pairs, top_k: int, chunk_size: int, threads: int):
+    """Exact top-k partners of every id of one window's candidate pairs, on both sides.
 
-    - left_id == indexed_id == training-side id
-    - right_id == query_id == incremental-side id
-
-    Pairs are scored in chunks of ``chunk_size`` and folded into fixed-size top-k
-    state per side, so memory depends on the chunk and on the number of distinct
-    ids, not on the number of candidate pairs. Small chunks stay in CPU cache.
-
-    Cross blocks ``([indexed_id, ...], [query_id, ...])`` are ranked by matrix products in
-    row blocks on ``threads`` threads, and only pairs that can reach a top-k are rescored
-    with the same kernel, so the result equals that of the expanded per-id groups.
+    Returns ``(ids, indexed_ranks, top_for_indexed, top_for_query)``: the sorted ids, the
+    ranks of the indexed (training-side) ids, and the top-k states of each side. Cross
+    blocks ``([indexed_id, ...], [query_id, ...])`` are ranked by matrix products in row
+    blocks on ``threads`` threads, and only pairs that can reach a top-k are rescored with the
+    same kernel, so the result equals that of the expanded per-id groups.
     """
     top_k = validate_top_k(top_k)
     chunk_size = int(chunk_size)
@@ -442,14 +432,17 @@ def score_mutual_topk_candidate_pairs(
     blocks = [pair for pair in candidate_pairs if _is_cross_block(pair)]
     groups = [pair for pair in candidate_pairs if not _is_cross_block(pair)]
     raw_ids = set()
+    raw_indexed = set()
     for indexed_ids, query_ids in blocks:
         _expand_candidate_group((indexed_ids, query_ids))  # validates the item
         if indexed_ids and query_ids:
             raw_ids.update(indexed_ids)
+            raw_indexed.update(indexed_ids)
             raw_ids.update([query_ids] if isinstance(query_ids, str) else query_ids)
     for indexed_id, query_ids in _iter_candidate_groups(groups):
         if query_ids:
             raw_ids.add(indexed_id)
+            raw_indexed.add(indexed_id)
             raw_ids.update(query_ids)
     if not raw_ids:
         raise ValueError("candidate_pairs is empty; cannot calculate similarity.")
@@ -479,7 +472,28 @@ def score_mutual_topk_candidate_pairs(
         ):
             top_for_indexed.update(pair_left, pair_right, scores)
             top_for_query.update(pair_right, pair_left, scores)
+    indexed_ranks = np.asarray(sorted(rank[node_id] for node_id in raw_indexed), dtype=np.int64)
+    return ids, indexed_ranks, top_for_indexed, top_for_query
 
+
+def score_mutual_topk_candidate_pairs(
+    model,
+    candidate_pairs: List[Tuple[str, List[str]]],
+    top_k: int = 1,
+    chunk_size: int = 2048,
+    threads: int = 1,
+) -> List[ScoredPair]:
+    """
+    Compute local mutual top-k pairs with unified semantics:
+
+    - left_id == indexed_id == training-side id
+    - right_id == query_id == incremental-side id
+
+    Pairs are scored in chunks of ``chunk_size`` and folded into fixed-size top-k
+    state per side, so memory depends on the chunk and on the number of distinct
+    ids, not on the number of candidate pairs. Small chunks stay in CPU cache.
+    """
+    ids, _, top_for_indexed, top_for_query = _window_top_k(model, candidate_pairs, top_k, chunk_size, threads)
     indexed, slot = np.nonzero(top_for_indexed.partners >= 0)
     query = top_for_indexed.partners[indexed, slot]
     scores = top_for_indexed.scores[indexed, slot]
@@ -487,6 +501,132 @@ def score_mutual_topk_candidate_pairs(
     indexed, query, scores = indexed[mutual], query[mutual], scores[mutual]
     order = np.lexsort((query, -scores, indexed))
     return [(ids[i], ids[q], float(s)) for i, q, s in zip(indexed[order], query[order], scores[order])]
+
+
+class RunningBest:
+    """The k best similarity scores each indexed record has had with the query records of
+    all windows so far ("running best"), persisted after every window.
+
+    ``before`` keeps the scores as they were before the last applied window, so a window
+    replayed after a restart (``window`` equal to its index) starts from the same state.
+    """
+
+    def __init__(self, k: int):
+        self.k = validate_top_k(k)
+        self.ids: List[str] = []
+        self.row: Dict[str, int] = {}
+        self.scores = np.full((0, self.k), -np.inf, dtype=np.float32)
+        self.before = self.scores.copy()
+        self.window = None
+
+    def rows(self, ids: List[str]) -> np.ndarray:
+        """Rows of ``ids``, adding unseen ids with no score yet."""
+        new = [node_id for node_id in ids if node_id not in self.row]
+        if new:
+            for node_id in new:
+                self.row[node_id] = len(self.ids)
+                self.ids.append(node_id)
+            empty = np.full((len(new), self.k), -np.inf, dtype=np.float32)
+            self.scores = np.vstack([self.scores, empty])
+            self.before = np.vstack([self.before, empty])
+        return np.fromiter((self.row[node_id] for node_id in ids), dtype=np.int64, count=len(ids))
+
+    def begin(self, window) -> None:
+        """Start a window: roll back first if this window was already applied."""
+        if self.window is not None and self.window == window:
+            self.scores = self.before.copy()
+        else:
+            self.before = self.scores.copy()
+
+    def save(self, path: str) -> None:
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(prefix=".running_best.", suffix=".npz", dir=directory)
+        os.close(handle)
+        try:
+            np.savez(temporary, ids=np.asarray(self.ids, dtype=str), scores=self.scores,
+                     before=self.before, window=np.asarray(-1 if self.window is None else self.window))
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+
+    @classmethod
+    def load(cls, path: str, k: int) -> "RunningBest":
+        state = cls(k)
+        if not os.path.isfile(path):
+            return state
+        with np.load(path) as data:
+            if data["scores"].shape[1] != state.k:
+                raise ValueError(f"{path} keeps {data['scores'].shape[1]} scores per record, configured k is {k}")
+            state.ids = [str(node_id) for node_id in data["ids"]]
+            state.row = {node_id: index for index, node_id in enumerate(state.ids)}
+            state.scores = data["scores"].astype(np.float32)
+            state.before = data["before"].astype(np.float32)
+            window = int(data["window"])
+            state.window = None if window < 0 else window
+        return state
+
+
+def score_running_best_candidate_pairs(
+    model,
+    candidate_pairs: List[Tuple[str, List[str]]],
+    state: RunningBest,
+    window=None,
+    min_similarity: float | None = None,
+    query_top_k: int = 0,
+    max_pairs: int | None = None,
+    chunk_size: int = 2048,
+    threads: int = 1,
+) -> List[ScoredPair]:
+    """Candidate pairs of one window under the running-best rule, oriented
+    ``(indexed_id, query_id, score)``.
+
+    An indexed record proposes a query record of this window when it enters the record's
+    ``state.k`` best query records seen so far, i.e., only when it beats what earlier windows
+    offered: a record that matches at most one query record cannot be matched by one that
+    is no better than an earlier candidate. ``query_top_k`` > 0 also proposes each query
+    record's best indexed records. Pairs below ``min_similarity`` are dropped, and at most
+    ``max_pairs`` pairs (the most similar) are kept; ``state`` is updated with every score of
+    the window either way.
+    """
+    k = state.k
+    depth = max(k, int(query_top_k or 0))
+    ids, indexed_ranks, top_for_indexed, top_for_query = _window_top_k(model, candidate_pairs, depth, chunk_size, threads)
+    state.begin(window)
+
+    partners = top_for_indexed.partners[indexed_ranks, :k]
+    window_scores = top_for_indexed.scores[indexed_ranks, :k]
+    rows = state.rows([ids[r] for r in indexed_ranks])
+    previous = state.scores[rows]
+    merged = np.concatenate([previous, np.where(partners >= 0, window_scores, -np.inf)], axis=1)
+    merged = -np.sort(-merged, axis=1)
+    kth = merged[:, k - 1]
+    proposed = (partners >= 0) & (window_scores >= kth[:, None])
+    state.scores[rows] = merged[:, :k]
+    state.window = window
+
+    pairs: Dict[Tuple[int, int], float] = {}
+    left = np.repeat(indexed_ranks[:, None], k, axis=1)[proposed]
+    for a, b, value in zip(left, partners[proposed], window_scores[proposed]):
+        pairs[(int(a), int(b))] = float(value)
+    if query_top_k:
+        indexed_set = set(int(r) for r in indexed_ranks)
+        query_ranks = np.asarray([r for r in range(len(ids)) if r not in indexed_set], dtype=np.int64)
+        q_partners = top_for_query.partners[query_ranks, :int(query_top_k)]
+        q_scores = top_for_query.scores[query_ranks, :int(query_top_k)]
+        valid = q_partners >= 0
+        right = np.repeat(query_ranks[:, None], q_partners.shape[1], axis=1)[valid]
+        for a, b, value in zip(q_partners[valid], right, q_scores[valid]):
+            pairs.setdefault((int(a), int(b)), float(value))
+
+    selected = [(a, b, value) for (a, b), value in pairs.items()
+                if min_similarity is None or value >= float(min_similarity)]
+    selected.sort(key=lambda pair: (-pair[2], ids[pair[0]], ids[pair[1]]))
+    if max_pairs is not None and len(selected) > int(max_pairs):
+        selected = selected[:int(max_pairs)]
+    selected.sort(key=lambda pair: (ids[pair[0]], -pair[2], ids[pair[1]]))
+    return [(ids[a], ids[b], value) for a, b, value in selected]
 
 
 __all__ = [
@@ -497,4 +637,6 @@ __all__ = [
     "validate_top_k",
     "select_mutual_topk_pairs",
     "score_mutual_topk_candidate_pairs",
+    "RunningBest",
+    "score_running_best_candidate_pairs",
 ]
