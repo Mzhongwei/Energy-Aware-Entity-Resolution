@@ -51,7 +51,10 @@ With decision_making.enabled: false (BERT matching on), the decision is skipped:
 snapshot holds only that window's candidate pairs, which BERT matching judges directly. They are
 the window's mutual top-k pairs, or with calculating_similarity.candidate_rule: running_best the
 pairs whose query record enters the indexed record's k best so far (state persisted per window,
-see pipeline.calculating_similarity.RunningBest).
+see pipeline.calculating_similarity.RunningBest). candidate_rule: tfidf_running_best applies the
+same rule to TF-IDF similarities (pipeline.tfidf_blocking) of the record terms normalization
+stores with the BERT texts: no embedding checkpoint is read, and the window's checkpoint, if
+the embedding stages run at all, is only acknowledged so they are not held back.
 """
 
 INPUT_DATA_TYPE = "candidate_pairs"
@@ -107,13 +110,22 @@ def main():
     decision_enabled = is_decision_making_enabled(config)
     print(f"[calculating_similarity] decision making: {'on' if decision_enabled else 'off'}", flush=True)
     candidate_rule = str(task_config.get("candidate_rule", "mutual_topk"))
-    if candidate_rule not in {"mutual_topk", "running_best"}:
-        raise ValueError("calculating_similarity.candidate_rule must be mutual_topk or running_best")
-    if candidate_rule == "running_best" and decision_enabled:
-        raise ValueError("candidate_rule: running_best needs decision_making.enabled: false")
+    if candidate_rule not in {"mutual_topk", "running_best", "tfidf_running_best"}:
+        raise ValueError("calculating_similarity.candidate_rule must be mutual_topk, running_best or tfidf_running_best")
+    if candidate_rule != "mutual_topk" and decision_enabled:
+        raise ValueError(f"candidate_rule: {candidate_rule} needs decision_making.enabled: false")
+    use_tfidf = candidate_rule == "tfidf_running_best"
+    tfidf_index = None
+    if use_tfidf:
+        from pipeline.calculating_similarity import candidate_query_ids, score_running_best_tfidf_pairs
+        from pipeline.record_store import record_store_for
+        from pipeline.tfidf_blocking import TfidfIndex, tfidf_config
+
+        tfidf_settings = tfidf_config(config)
+        records = record_store_for(config)
     running_best = None
     running_best_path = os.path.join(os.path.dirname(predicted_match_path), RUNNING_BEST_FILE_NAME)
-    if candidate_rule == "running_best":
+    if candidate_rule != "mutual_topk":
         running_best = RunningBest.load(running_best_path, int(task_config.get("running_best_k", 2)))
         min_candidate_similarity = task_config.get("min_similarity")
         query_top_k = int(task_config.get("query_top_k", 0) or 0)
@@ -140,11 +152,35 @@ def main():
             os.remove(reference_path)
 
     def process(window):
-        nonlocal previous_pairs
+        nonlocal previous_pairs, tfidf_index
         candidate_pairs = window.take()
         window_index = window.index
         if is_window_checkpoint_acknowledged(checkpoint_dir, window_index):
             # Replay after a restart: this window's decision was already published.
+            release_checkpoint(window_index)
+            return
+
+        if use_tfidf:
+            if candidate_pairs:
+                if tfidf_index is None:
+                    # The indexed side is complete before the incremental phase starts.
+                    with transferring("read", "tfidf_records"):
+                        indexed_terms = records.phase_terms("train")
+                    tfidf_index = TfidfIndex.from_records(indexed_terms, max_df=tfidf_settings["max_df"])
+                    print(f"[calculating_similarity] TF-IDF index: {len(tfidf_index.ids)} records, "
+                          f"{len(tfidf_index.vocabulary)} terms, max_df={tfidf_settings['max_df']}", flush=True)
+                    del indexed_terms
+                query_ids = candidate_query_ids(candidate_pairs)
+                del candidate_pairs
+                with transferring("read", "tfidf_records"):
+                    terms = records.get_terms(query_ids)
+                matching_pairs = score_running_best_tfidf_pairs(
+                    tfidf_index, query_ids, [terms[node_id] for node_id in query_ids], running_best,
+                    window=window_index, min_similarity=min_candidate_similarity, query_top_k=query_top_k,
+                    max_pairs=pairs_per_window, chunk_rows=tfidf_settings["chunk_rows"],
+                )
+                running_best.save(running_best_path)
+                publish(window_index, matching_pairs, None)
             release_checkpoint(window_index)
             return
 
@@ -183,36 +219,39 @@ def main():
                     threads=threads,
                 )
             del candidate_pairs
-            if matching_pairs:
-                if decision_enabled:
-                    previous_pairs = decide_matches(
-                        matching_pairs, previous_pairs, model,
-                        top_k=decision_top_k, min_similarity=min_similarity, chunk_size=chunk_size,
-                    )
-                    matches = expand_matches(config, previous_pairs, decision_top_k)
-                    pair_count = len(previous_pairs)
-                else:
-                    matches = sorted(
-                        (*orient_record_pair(config, indexed_id, query_id), score)
-                        for indexed_id, query_id, score in matching_pairs
-                    )
-                    pair_count = len(matches)
-                data = serialize_scored_pairs(matches)
-                if decision_enabled:
-                    write_bytes_atomically(predicted_match_path, data)
-                snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
-                with transferring("write", "match_snapshot") as transfer:
-                    write_bytes_atomically(snapshot_path, data)
-                    transfer.path = snapshot_path
-                if window_count and window_index // window_count in replay_windows:
-                    with waiting():  # experiment-only copy, not part of the stage's work
-                        os.makedirs(replay_dir, exist_ok=True)
-                        shutil.copyfile(snapshot_path, os.path.join(
-                            replay_dir, f"candidates_w{window_index // window_count}.csv"))
-                stage.send(window_index, {"pair_count": pair_count, "predicted_match_path": snapshot_path})
-                del matches, data
+            publish(window_index, matching_pairs, model)
             del model, matching_pairs
         release_checkpoint(window_index)
+
+    def publish(window_index, matching_pairs, model):
+        nonlocal previous_pairs
+        if matching_pairs:
+            if decision_enabled:
+                previous_pairs = decide_matches(
+                    matching_pairs, previous_pairs, model,
+                    top_k=decision_top_k, min_similarity=min_similarity, chunk_size=chunk_size,
+                )
+                matches = expand_matches(config, previous_pairs, decision_top_k)
+                pair_count = len(previous_pairs)
+            else:
+                matches = sorted(
+                    (*orient_record_pair(config, indexed_id, query_id), score)
+                    for indexed_id, query_id, score in matching_pairs
+                )
+                pair_count = len(matches)
+            data = serialize_scored_pairs(matches)
+            if decision_enabled:
+                write_bytes_atomically(predicted_match_path, data)
+            snapshot_path = os.path.join(snapshot_dir, SNAPSHOT_FILE_NAME_TEMPLATE.format(window_index=window_index))
+            with transferring("write", "match_snapshot") as transfer:
+                write_bytes_atomically(snapshot_path, data)
+                transfer.path = snapshot_path
+            if window_count and window_index // window_count in replay_windows:
+                with waiting():  # experiment-only copy, not part of the stage's work
+                    os.makedirs(replay_dir, exist_ok=True)
+                    shutil.copyfile(snapshot_path, os.path.join(
+                        replay_dir, f"candidates_w{window_index // window_count}.csv"))
+            stage.send(window_index, {"pair_count": pair_count, "predicted_match_path": snapshot_path})
 
     stage.run(process)
 

@@ -1,6 +1,8 @@
 """Record texts for the BERT matcher, keyed by record id.
 
-Normalization writes one small JSONL file per window (``{"rid": ..., "text": ...}`` per line):
+Normalization writes one small JSONL file per window (``{"rid": ..., "text": ..., "terms": ...}``
+per line; ``terms`` are the record's value tokens for TF-IDF candidate generation, see
+``pipeline.tfidf_blocking``):
 the batch training stage for the indexed (left) side and the incremental worker for the
 query (right) side. The BERT matching stage loads them lazily, so it can judge any pair the
 embedding decision emits without reading the graph or the source files.
@@ -28,11 +30,33 @@ def serialize_record_text(attributes: Iterable[tuple[str, object]]) -> str:
     return data_cleaning("".join(str(name) + str(value) for name, value in attributes))
 
 
+def _attribute_columns(config: dict, raw_data) -> list:
+    source_field = str((config.get("record_ids") or {}).get("source_field", "")).strip().lower()
+    return [column for column in raw_data.columns
+            if str(column).strip().lower() not in _EXCLUDED_COLUMNS | {source_field}]
+
+
+def record_term_texts(config: dict, raw_data, rids) -> dict[str, str]:
+    """Map each row of ``raw_data`` to its TF-IDF terms: the tokens of the columns in
+    ``calculating_similarity.tfidf.fields`` (all attribute columns when unset or when the
+    table has none of them)."""
+    from pipeline.tfidf_blocking import record_terms, tfidf_config
+
+    columns = _attribute_columns(config, raw_data)
+    fields = tfidf_config(config)["fields"]
+    if fields:
+        selected = [column for column in columns if str(column).strip().lower() in fields]
+        columns = selected or columns
+    terms = {}
+    for rid, values in zip(rids, raw_data[columns].itertuples(index=False, name=None)):
+        rid = rid[0] if isinstance(rid, (list, tuple)) else rid
+        terms[str(rid)] = record_terms(values)
+    return terms
+
+
 def record_texts(config: dict, raw_data, rids, max_chars: int = DEFAULT_MAX_TEXT_CHARS) -> dict[str, str]:
     """Map each row of ``raw_data`` (pre-normalization, in row order) to its record text."""
-    source_field = str((config.get("record_ids") or {}).get("source_field", "")).strip().lower()
-    columns = [column for column in raw_data.columns
-               if str(column).strip().lower() not in _EXCLUDED_COLUMNS | {source_field}]
+    columns = _attribute_columns(config, raw_data)
     texts = {}
     for rid, values in zip(rids, raw_data[columns].itertuples(index=False, name=None)):
         rid = rid[0] if isinstance(rid, (list, tuple)) else rid
@@ -47,15 +71,20 @@ class RecordStore:
     def __init__(self, directory: str):
         self.directory = directory
         self._texts: dict[str, str] = {}
+        self._terms: dict[str, str] = {}
         self._loaded: set[str] = set()
 
-    def write(self, phase: str, window_index: int, texts: Mapping[str, str]) -> str:
+    def write(self, phase: str, window_index: int, texts: Mapping[str, str],
+              terms: Mapping[str, str] | None = None) -> str:
         os.makedirs(self.directory, exist_ok=True)
         path = os.path.join(self.directory, f"{phase}-{int(window_index):06d}.jsonl")
         temporary = f"{path}.{os.getpid()}.tmp"
         with open(temporary, "w", encoding="utf-8") as output:
             for rid, text in texts.items():
-                output.write(json.dumps({"rid": rid, "text": text}, ensure_ascii=False) + "\n")
+                record = {"rid": rid, "text": text}
+                if terms is not None:
+                    record["terms"] = terms[rid]
+                output.write(json.dumps(record, ensure_ascii=False) + "\n")
         os.replace(temporary, path)
         return path
 
@@ -71,8 +100,36 @@ class RecordStore:
                     if line.strip():
                         record = json.loads(line)
                         self._texts[record["rid"]] = record["text"]
+                        if "terms" in record:
+                            self._terms[record["rid"]] = record["terms"]
             self._loaded.add(name)
         return len(new_files)
+
+    def phase_terms(self, phase: str) -> dict[str, str]:
+        """TF-IDF terms of every record written under ``phase`` (e.g. "train": the indexed side)."""
+        terms = {}
+        if not os.path.isdir(self.directory):
+            return terms
+        for name in sorted(os.listdir(self.directory)):
+            if not (name.startswith(f"{phase}-") and name.endswith(".jsonl")):
+                continue
+            with open(os.path.join(self.directory, name), encoding="utf-8") as source:
+                for line in source:
+                    if line.strip():
+                        record = json.loads(line)
+                        if "terms" not in record:
+                            raise KeyError(f"{name} has no TF-IDF terms; rerun normalization with this version")
+                        terms[record["rid"]] = record["terms"]
+        return terms
+
+    def get_terms(self, rids: Iterable[str]) -> dict[str, str]:
+        rids = list(rids)
+        if any(rid not in self._terms for rid in rids):
+            self.refresh()
+        missing = [rid for rid in rids if rid not in self._terms]
+        if missing:
+            raise KeyError(f"No TF-IDF terms for ids {missing[:5]} in {self.directory}")
+        return {rid: self._terms[rid] for rid in rids}
 
     def get_many(self, rids: Iterable[str]) -> dict[str, str]:
         rids = list(rids)
@@ -96,13 +153,15 @@ def record_store_for(config: dict) -> RecordStore:
 def write_window_records(config: dict, phase: str, window_index: int, raw_data, processed) -> str:
     """Persist one normalized window's record texts (``processed`` carries the minted rids)."""
     max_chars = int((config.get("bert_matching") or {}).get("max_text_chars", DEFAULT_MAX_TEXT_CHARS))
-    texts = record_texts(config, raw_data, processed["rid"].tolist(), max_chars)
-    return record_store_for(config).write(phase, window_index, texts)
+    rids = processed["rid"].tolist()
+    texts = record_texts(config, raw_data, rids, max_chars)
+    return record_store_for(config).write(phase, window_index, texts, record_term_texts(config, raw_data, rids))
 
 
 __all__ = [
     "RecordStore",
     "record_store_for",
+    "record_term_texts",
     "record_texts",
     "serialize_record_text",
     "write_window_records",

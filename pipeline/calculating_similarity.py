@@ -590,9 +590,50 @@ def score_running_best_candidate_pairs(
     ``max_pairs`` pairs (the most similar) are kept; ``state`` is updated with every score of
     the window either way.
     """
-    k = state.k
-    depth = max(k, int(query_top_k or 0))
+    depth = max(state.k, int(query_top_k or 0))
     ids, indexed_ranks, top_for_indexed, top_for_query = _window_top_k(model, candidate_pairs, depth, chunk_size, threads)
+    return _select_running_best(ids, indexed_ranks, top_for_indexed, top_for_query, state, window,
+                                min_similarity, query_top_k, max_pairs)
+
+
+def score_running_best_tfidf_pairs(
+    index,
+    query_ids: List[str],
+    query_terms: List[str],
+    state: RunningBest,
+    window=None,
+    min_similarity: float | None = None,
+    query_top_k: int = 0,
+    max_pairs: int | None = None,
+    chunk_rows: int = 512,
+) -> List[ScoredPair]:
+    """``score_running_best_candidate_pairs`` with TF-IDF cosine similarities
+    (``pipeline.tfidf_blocking``) instead of embedding ones: the window's query records are
+    scored against every indexed record of ``index``."""
+    from pipeline.tfidf_blocking import window_top_k
+
+    depth = max(state.k, int(query_top_k or 0))
+    ids, indexed_ranks, top_for_indexed, top_for_query = window_top_k(
+        index, query_ids, query_terms, depth, chunk_rows=chunk_rows)
+    return _select_running_best(ids, indexed_ranks, top_for_indexed, top_for_query, state, window,
+                                min_similarity, query_top_k, max_pairs)
+
+
+def candidate_query_ids(candidate_pairs: List[Tuple[str, List[str]]]) -> List[str]:
+    """Distinct query ids of one window's candidate pairs, sorted."""
+    query_ids = set()
+    for _, ids in _iter_candidate_groups([pair for pair in candidate_pairs if not _is_cross_block(pair)]):
+        query_ids.update(map(str, ids))
+    for indexed_ids, ids in (pair for pair in candidate_pairs if _is_cross_block(pair)):
+        if indexed_ids:
+            query_ids.update(map(str, [ids] if isinstance(ids, str) else ids))
+    return sorted(query_ids)
+
+
+def _select_running_best(ids, indexed_ranks, top_for_indexed, top_for_query, state: RunningBest, window,
+                         min_similarity, query_top_k, max_pairs) -> List[ScoredPair]:
+    """The running-best pairs of one window from its top-k states; updates ``state``."""
+    k = state.k
     state.begin(window)
 
     partners = top_for_indexed.partners[indexed_ranks, :k]
@@ -639,4 +680,6 @@ __all__ = [
     "score_mutual_topk_candidate_pairs",
     "RunningBest",
     "score_running_best_candidate_pairs",
+    "score_running_best_tfidf_pairs",
+    "candidate_query_ids",
 ]
